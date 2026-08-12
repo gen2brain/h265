@@ -86,9 +86,7 @@ func (d *ctuDecoder) markPU(x, y, w, h int, intra bool) {
 
 // boundaryStrength is 8.7.2.4.
 func (d *ctuDecoder) boundaryStrength(xP, yP, xQ, yQ int, vertical bool) int {
-	pi, qi := d.blkIndex(xP, yP), d.blkIndex(xQ, yQ)
-
-	p := &d.blk[pi]
+	qi := d.blkIndex(xQ, yQ)
 	q := &d.blk[qi]
 
 	tu := q.tuV
@@ -99,10 +97,13 @@ func (d *ctuDecoder) boundaryStrength(xP, yP, xQ, yQ int, vertical bool) int {
 	}
 
 	// 8.7.2 filters transform and prediction block edges only, not every
-	// edge on the eight-sample grid.
+	// edge on the eight-sample grid, and most of them are neither.
 	if !tu && !pu {
 		return 0
 	}
+
+	pi := d.blkIndex(xP, yP)
+	p := &d.blk[pi]
 
 	if p.intra || q.intra {
 		return 2
@@ -224,6 +225,15 @@ func (d *ctuDecoder) deblockEdge(x, y int, vertical bool) {
 		across = y&ctb == 0
 	}
 
+	sl := d.sliceAt(x, y)
+	if sl.deblockingDisabled {
+		return
+	}
+
+	deep := d.pic.BitDepth > 8
+	luma8, lumaStride8 := d.pic.plane8(0)
+	luma16, lumaStride16 := d.pic.plane16(0)
+
 	for k := 0; k < 8; k += 4 {
 		var px, py, qx, qy int
 
@@ -248,11 +258,6 @@ func (d *ctuDecoder) deblockEdge(x, y int, vertical bool) {
 			continue
 		}
 
-		sl := d.sliceAt(qx, qy)
-		if sl.deblockingDisabled {
-			continue
-		}
-
 		pt, qt := d.tbIndex(px, py), d.tbIndex(qx, qy)
 
 		qp := (int32(d.qpY[pt]) + int32(d.qpY[qt]) + 1) >> 1
@@ -261,12 +266,12 @@ func (d *ctuDecoder) deblockEdge(x, y int, vertical bool) {
 		// transform, or is pulse code modulated with filtering turned off.
 		noP, noQ := d.noFilter[pt], d.noFilter[qt]
 
-		if d.pic.BitDepth > 8 {
-			plane, stride := d.pic.plane16(0)
-			deblockLuma(plane, stride, qx, qy, vertical, bs, qp, sl, d.pic.BitDepth, noP, noQ)
+		if deep {
+			deblockLuma(luma16, lumaStride16, qx, qy, vertical, bs, qp, sl, d.pic.BitDepth,
+				noP, noQ)
 		} else {
-			plane, stride := d.pic.plane8(0)
-			deblockLuma(plane, stride, qx, qy, vertical, bs, qp, sl, d.pic.BitDepth, noP, noQ)
+			deblockLuma(luma8, lumaStride8, qx, qy, vertical, bs, qp, sl, d.pic.BitDepth,
+				noP, noQ)
 		}
 
 		if bs != 2 || d.s.chromaArrayType() == 0 {
