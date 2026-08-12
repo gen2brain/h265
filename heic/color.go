@@ -102,6 +102,9 @@ type colorState struct {
 	tableUV []float32
 	pixLUT  []uint16
 
+	biasY, rangeY   float32
+	biasUV, rangeUV float32
+
 	ssHor, ssVer int
 	hasColor     bool
 	unsupported  bool
@@ -110,6 +113,12 @@ type colorState struct {
 	yRow         []uint16
 	uRow, vRow   [2][]uint16
 	cbRow, crRow []float32
+
+	yf         []float32
+	uPad, vPad [2][]float32
+	row        convertRow
+	row16      convertRow16
+	consts     rowConsts
 }
 
 func newColorState(pic *hevc.Picture, ci ColorInfo, outDepth int) *colorState {
@@ -164,6 +173,9 @@ func newColorState(pic *hevc.Picture, ci ColorInfo, outDepth int) *colorState {
 		rangeUV = float32(int(224) << shift)
 	}
 
+	s.biasY, s.rangeY = biasY, rangeY
+	s.biasUV, s.rangeUV = biasUV, rangeUV
+
 	n := 1 << s.depth
 
 	s.tableY = make([]float32, n)
@@ -199,6 +211,8 @@ func alphaState(pic *hevc.Picture, outDepth int, full bool) *colorState {
 	if !full {
 		bias, rng = float32(int(16)<<shift), float32(int(219)<<shift)
 	}
+
+	s.biasY, s.rangeY = bias, rng
 
 	n := 1 << s.depth
 
@@ -249,6 +263,13 @@ func (s *colorState) prepare(w int) {
 
 	s.cbRow = make([]float32, w)
 	s.crRow = make([]float32, w)
+
+	s.yf = make([]float32, w)
+
+	for i := range s.uPad {
+		s.uPad[i] = make([]float32, uw+2)
+		s.vPad[i] = make([]float32, uw+2)
+	}
 
 	s.uvIdx = make([]int, w)
 	s.uvAdj = make([]int, w)

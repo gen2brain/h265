@@ -367,3 +367,56 @@ func TestDecodeAll(t *testing.T) {
 		})
 	}
 }
+
+// TestRGBMatchesScalar checks the row kernels against the table-driven scalar
+// path they replace, over every fixture, so an assembly or upsampling error
+// cannot hide behind the planes-only digests.
+func TestRGBMatchesScalar(t *testing.T) {
+	for _, f := range testdataFiles(t) {
+		name := filepath.Base(f)
+
+		t.Run(name, func(t *testing.T) {
+			data := mustRead(t, f)
+
+			img, err := Decode(bytes.NewReader(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			want, err := decodeScalarRGB(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			switch m := img.(type) {
+			case *image.NRGBA:
+				if !bytes.Equal(m.Pix, want.(*image.NRGBA).Pix) {
+					t.Error("kernel output differs from the scalar path")
+				}
+
+			case *image.NRGBA64:
+				if !bytes.Equal(m.Pix, want.(*image.NRGBA64).Pix) {
+					t.Error("kernel output differs from the scalar path")
+				}
+
+			default:
+				t.Fatalf("got %T", img)
+			}
+		})
+	}
+}
+
+// decodeScalarRGB converts with rgbRow rather than the row kernels.
+func decodeScalarRGB(data []byte) (image.Image, error) {
+	f, err := parse(data)
+	if err != nil {
+		return nil, err
+	}
+
+	forceScalarRow = true
+	defer func() { forceScalarRow = false }()
+
+	img, _, err := f.decodeStill(Options{})
+
+	return img, err
+}

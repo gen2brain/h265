@@ -125,6 +125,16 @@ func toImage(pic, alpha *hevc.Picture, ci ColorInfo, ycbcr bool) (image.Image, e
 
 	cs.prepare(w)
 
+	if cs.fastRow(outDepth) {
+		cs.consts = cs.rowConsts()
+
+		if outDepth == 8 {
+			cs.row = rowFn(cs.ssHor)
+		} else {
+			cs.row16 = rowFn16(cs.ssHor)
+		}
+	}
+
 	var (
 		as *colorState
 		av planeView
@@ -156,6 +166,29 @@ func toImage(pic, alpha *hevc.Picture, ci ColorInfo, ycbcr bool) (image.Image, e
 	if outDepth == 8 {
 		dst := image.NewNRGBA(rect)
 
+		if cs.row != nil {
+			ab := make([]uint8, w)
+			for i := range ab {
+				ab[i] = 0xff
+			}
+
+			for row := range h {
+				if as != nil {
+					as.alphaRow(av, row, w, aRow)
+
+					for i, v := range aRow {
+						ab[i] = uint8(v)
+					}
+				}
+
+				u0, u1, v0, v1 := cs.rowPlanes(cb, cr, row, w, h)
+				cs.row(dst.Pix[row*dst.Stride:], cs.lumaRowF(y, row, w),
+					u0, u1, v0, v1, ab, w, &cs.consts)
+			}
+
+			return dst, nil
+		}
+
 		for row := range h {
 			cs.rgbRow(y, cb, cr, row, rgb)
 
@@ -177,6 +210,20 @@ func toImage(pic, alpha *hevc.Picture, ci ColorInfo, ycbcr bool) (image.Image, e
 	}
 
 	dst := image.NewNRGBA64(rect)
+
+	if cs.row16 != nil {
+		for row := range h {
+			if as != nil {
+				as.alphaRow(av, row, w, aRow)
+			}
+
+			u0, u1, v0, v1 := cs.rowPlanes(cb, cr, row, w, h)
+			cs.row16(dst.Pix[row*dst.Stride:], cs.lumaRowF(y, row, w),
+				u0, u1, v0, v1, aRow, w, &cs.consts)
+		}
+
+		return dst, nil
+	}
 
 	for row := range h {
 		cs.rgbRow(y, cb, cr, row, rgb)
