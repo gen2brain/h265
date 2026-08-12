@@ -91,12 +91,15 @@ func TestMCLuma(t *testing.T) {
 
 			for xFrac := range 4 {
 				for yFrac := range 4 {
-					for _, xy := range [][2]int{{4, 4}, {0, 0}, {picW - 2, picH - 2}} {
+					for _, xy := range [][2]int{
+						{4, 4}, {0, 0}, {-4, -4}, {picW - 2, picH - 2}, {picW - w, 4},
+					} {
 						got := make([]int16, w*h)
 						want := make([]int16, w*h)
 
 						mcLuma(got, w, src, picW, picW, picH,
-							xy[0], xy[1], xFrac, yFrac, w, h, bitDepth, make([]int32, 64*80))
+							xy[0], xy[1], xFrac, yFrac, w, h, bitDepth,
+							make([]int32, 64*80), make([]uint8, 71*71))
 						naiveMC(want, w, src, picW, picW, picH,
 							xy[0], xy[1], xFrac, yFrac, w, h, bitDepth, 8)
 
@@ -129,16 +132,25 @@ func TestMCChroma(t *testing.T) {
 
 			for xFrac := range 8 {
 				for yFrac := range 8 {
-					got := make([]int16, w*h)
-					want := make([]int16, w*h)
+					// The corners and the far edges are what exercise the
+					// edge emulation; an interior block never reaches it.
+					for _, xy := range [][2]int{
+						{3, 3}, {0, 0}, {-2, -2}, {picW - 1, picH - 1},
+						{picW - w, 3}, {3, picH - h},
+					} {
+						got := make([]int16, w*h)
+						want := make([]int16, w*h)
 
-					mcChroma(got, w, src, picW, picW, picH, 3, 3, xFrac, yFrac, w, h, bitDepth, make([]int32, 64*80))
-					naiveMC(want, w, src, picW, picW, picH, 3, 3, xFrac, yFrac, w, h, bitDepth, 4)
+						mcChroma(got, w, src, picW, picW, picH, xy[0], xy[1], xFrac, yFrac,
+							w, h, bitDepth, make([]int32, 64*80), make([]uint8, 71*71))
+						naiveMC(want, w, src, picW, picW, picH, xy[0], xy[1], xFrac, yFrac,
+							w, h, bitDepth, 4)
 
-					for i := range got {
-						if got[i] != want[i] {
-							t.Fatalf("bd=%d %dx%d frac=%d,%d: [%d] = %d, want %d",
-								bitDepth, w, h, xFrac, yFrac, i, got[i], want[i])
+						for i := range got {
+							if got[i] != want[i] {
+								t.Fatalf("bd=%d %dx%d frac=%d,%d at %v: [%d] = %d, want %d",
+									bitDepth, w, h, xFrac, yFrac, xy, i, got[i], want[i])
+							}
 						}
 					}
 				}

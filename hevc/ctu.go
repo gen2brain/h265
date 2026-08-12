@@ -112,6 +112,8 @@ type ctuDecoder struct {
 
 	mcBuf   [2][64 * 64]int16
 	mcTmp   [(64 + 7) * 64]int32
+	mcPad8  [(64 + 7) * (64 + 7)]uint8
+	mcPad16 [(64 + 7) * (64 + 7)]uint16
 	mergeCd [8]mvInfo
 	ref     refSamples
 	avail   [4*32 + 1]bool

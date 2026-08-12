@@ -33,19 +33,35 @@ func clampInt(v, lo, hi int) int {
 }
 
 // mcLuma is the luma sample interpolation of 8.5.3.3.3.1. It writes the
-// 14-bit intermediate the weighted prediction process consumes, and clamps
-// reference reads to the picture as the spec's Clip3 on the coordinates does.
+// 14-bit intermediate the weighted prediction process consumes.
 func mcLuma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
-	x, y, xFrac, yFrac, w, h, bitDepth int, scratch []int32,
+	x, y, xFrac, yFrac, w, h, bitDepth int, scratch []int32, pad []P,
 ) {
 	shift1 := bitDepth - 8
 	shift2 := 6
 	shift3 := 14 - bitDepth
 
-	at := func(px, py int) int32 {
-		px = clampInt(px, 0, picW-1)
-		py = clampInt(py, 0, picH-1)
+	// The eight-tap support reaches three samples back and four forward. When
+	// it leaves the picture the region is copied out once with the edge
+	// clamping of 8.5.3.3.3, so the filters below index the source directly.
+	ox, ew := 0, w
+	if xFrac != 0 {
+		ox, ew = -3, w+7
+	}
 
+	oy, eh := 0, h
+	if yFrac != 0 {
+		oy, eh = -3, h+7
+	}
+
+	if x+ox < 0 || y+oy < 0 || x+ox+ew > picW || y+oy+eh > picH {
+		emulate(pad, src, srcStride, picW, picH, x+ox, y+oy, ew, eh)
+
+		src, srcStride = pad, ew
+		x, y = -ox, -oy
+	}
+
+	at := func(px, py int) int32 {
 		return int32(src[py*srcStride+px])
 	}
 
@@ -116,16 +132,31 @@ func mcLuma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
 
 // mcChroma is the chroma sample interpolation of 8.5.3.3.3.2.
 func mcChroma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
-	x, y, xFrac, yFrac, w, h, bitDepth int, scratch []int32,
+	x, y, xFrac, yFrac, w, h, bitDepth int, scratch []int32, pad []P,
 ) {
 	shift1 := bitDepth - 8
 	shift2 := 6
 	shift3 := 14 - bitDepth
 
-	at := func(px, py int) int32 {
-		px = clampInt(px, 0, picW-1)
-		py = clampInt(py, 0, picH-1)
+	// The four-tap support reaches one sample back and two forward.
+	ox, ew := 0, w
+	if xFrac != 0 {
+		ox, ew = -1, w+3
+	}
 
+	oy, eh := 0, h
+	if yFrac != 0 {
+		oy, eh = -1, h+3
+	}
+
+	if x+ox < 0 || y+oy < 0 || x+ox+ew > picW || y+oy+eh > picH {
+		emulate(pad, src, srcStride, picW, picH, x+ox, y+oy, ew, eh)
+
+		src, srcStride = pad, ew
+		x, y = -ox, -oy
+	}
+
+	at := func(px, py int) int32 {
 		return int32(src[py*srcStride+px])
 	}
 
@@ -190,6 +221,33 @@ func mcChroma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, pic
 
 				dst[j*dstStride+i] = int16(v >> shift2)
 			}
+		}
+	}
+}
+
+// emulate copies a region out of a reference picture, repeating the edge
+// samples where it falls outside, so a filter reading it needs no bounds
+// check.
+func emulate[P pixel](dst []P, src []P, srcStride, picW, picH, x, y, w, h int) {
+	for j := range h {
+		sy := clampInt(y+j, 0, picH-1)
+		row := src[sy*srcStride:]
+		out := dst[j*w : j*w+w]
+
+		// The inside part is a copy; only the overhang repeats.
+		lo := clampInt(-x, 0, w)
+		hi := clampInt(picW-x, 0, w)
+
+		for i := range lo {
+			out[i] = row[0]
+		}
+
+		if hi > lo {
+			copy(out[lo:hi], row[x+lo:x+hi])
+		}
+
+		for i := hi; i < w; i++ {
+			out[i] = row[picW-1]
 		}
 	}
 }
