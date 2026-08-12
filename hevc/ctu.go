@@ -95,6 +95,7 @@ type ctuDecoder struct {
 	hasDepSaved bool
 
 	sliceAddrRs    int
+	simpleAvail    bool
 	ctbSliceAddr   []int32
 	sliceLF        map[int32]bool
 	ctbSlice       []int32
@@ -231,8 +232,7 @@ func (d *ctuDecoder) tbIndex(x, y int) int {
 	return (y>>d.minTbLog2)*d.minTbWidth + x>>d.minTbLog2
 }
 
-// available is the z-scan availability of 6.4.1, for a single slice segment
-// and a single tile.
+// available is the z-scan availability of 6.4.1.
 func (d *ctuDecoder) available(xCurr, yCurr, xN, yN int) bool {
 	if xN < 0 || yN < 0 ||
 		xN >= int(d.s.picWidthInLumaSamples) || yN >= int(d.s.picHeightInLumaSamples) {
@@ -241,6 +241,12 @@ func (d *ctuDecoder) available(xCurr, yCurr, xN, yN int) bool {
 
 	if d.minTbAddr[d.tbIndex(xN, yN)] >= d.minTbAddr[d.tbIndex(xCurr, yCurr)] {
 		return false
+	}
+
+	// With one tile and a slice starting at the first block, everything
+	// earlier in z-scan order is in the same slice and the same tile.
+	if d.simpleAvail {
+		return true
 	}
 
 	cw := int(d.s.picWidthInCtbs)
@@ -819,6 +825,8 @@ func reconstructPlane[P pixel](d *ctuDecoder, plane []P, stride, x, y, log2Size,
 
 	// 8.6.2: a bypassed unit takes the coefficients as the residual, with no
 	// scaling and no transform.
+	shift := 0
+
 	if !d.bypass {
 		k := dsp()
 
@@ -832,19 +840,39 @@ func reconstructPlane[P pixel](d *ctuDecoder, plane []P, stride, x, y, log2Size,
 				d.s.extendedPrecision, &d.scratch)
 		}
 
-		k.residualShift(coef, bitDepth, d.s.extendedPrecision)
+		shift = residualShiftBits(bitDepth, d.s.extendedPrecision)
 	}
 
-	maxV := int32(1)<<bitDepth - 1
-
-	for j := range n {
-		row := (y+j)*stride + x
-		for i := range n {
-			plane[row+i] = P(clip3(int32(plane[row+i])+coef[j*n+i], 0, maxV))
-		}
-	}
+	addResidual(plane, stride, x, y, n, shift, coef, bitDepth)
 
 	return nil
+}
+
+// addResidual is bdShift of 8.6.2 and the sum of 8.6.6, in one pass.
+func addResidual[P pixel](plane []P, stride, x, y, n, shift int, coef []int32, bitDepth int) {
+	maxV := int32(1)<<bitDepth - 1
+
+	if shift <= 0 {
+		for j := range n {
+			row := plane[(y+j)*stride+x:][:n]
+
+			for i, c := range coef[j*n : j*n+n] {
+				row[i] = P(clip3(int32(row[i])+c, 0, maxV))
+			}
+		}
+
+		return
+	}
+
+	rnd := int32(1) << (shift - 1)
+
+	for j := range n {
+		row := plane[(y+j)*stride+x:][:n]
+
+		for i, c := range coef[j*n : j*n+n] {
+			row[i] = P(clip3(int32(row[i])+((c+rnd)>>shift), 0, maxV))
+		}
+	}
 }
 
 func gatherRef[P pixel](d *ctuDecoder, plane []P, stride, x, y, n, cIdx int) {
@@ -856,6 +884,10 @@ func gatherRef[P pixel](d *ctuDecoder, plane []P, stride, x, y, n, cIdx int) {
 	w, h := d.pic.Width/sw, d.pic.Height/sh
 
 	d.ref.n = n
+
+	// Availability is uniform across a minimum transform block, so it is
+	// derived once per block rather than once per reference sample.
+	lastTb, lastOK := -1, false
 
 	for i := range 4*n + 1 {
 		var nx, ny int
@@ -869,13 +901,24 @@ func gatherRef[P pixel](d *ctuDecoder, plane []P, stride, x, y, n, cIdx int) {
 			nx, ny = x+i-2*n-1, y-1
 		}
 
-		ok := nx >= 0 && ny >= 0 && nx < w && ny < h &&
-			d.available(x*sw, y*sh, nx*sw, ny*sh)
+		ok := nx >= 0 && ny >= 0 && nx < w && ny < h
 
-		// 8.4.4.2.2: with constrained intra prediction, samples from
-		// inter-coded neighbours count as unavailable.
-		if ok && d.p.constrainedIntraPred && !d.blk[d.blkIndex(nx*sw, ny*sh)].intra {
-			ok = false
+		if ok {
+			tb := d.tbIndex(nx*sw, ny*sh)
+
+			if tb != lastTb {
+				lastTb = tb
+				lastOK = d.available(x*sw, y*sh, nx*sw, ny*sh)
+
+				// 8.4.4.2.2: with constrained intra prediction, samples from
+				// inter-coded neighbours count as unavailable.
+				if lastOK && d.p.constrainedIntraPred &&
+					!d.blk[d.blkIndex(nx*sw, ny*sh)].intra {
+					lastOK = false
+				}
+			}
+
+			ok = lastOK
 		}
 
 		d.avail[i] = ok

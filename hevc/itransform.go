@@ -63,8 +63,13 @@ func dequant(coef []int32, m []uint8, n, qp, bitDepth int, extended bool) {
 		return int32(v)
 	}
 
+	// A zero coefficient scales to zero, and most of a block is zero.
 	if m == nil {
 		for i, c := range coef {
+			if c == 0 {
+				continue
+			}
+
 			coef[i] = clip((int64(c)*16*scale + rnd) >> shift)
 		}
 
@@ -72,37 +77,108 @@ func dequant(coef []int32, m []uint8, n, qp, bitDepth int, extended bool) {
 	}
 
 	for i, c := range coef {
+		if c == 0 {
+			continue
+		}
+
 		coef[i] = clip((int64(c)*int64(m[i])*scale + rnd) >> shift)
 	}
 }
 
-// 8.6.4.2.
-func idct1D(out, in []int32, n, stride int, scratch []int32) {
-	if n == 1 {
-		out[0] = 64 * in[0]
+// idct is 8.6.4.2, split by size so the even half unrolls instead of
+// recursing. Each level transforms the even coefficients at half the size and
+// combines them with an odd half computed from the basis rows.
+func idct(out, in []int32, n int) {
+	switch n {
+	case 4:
+		idct4(out, in)
+	case 8:
+		idct8(out, in)
+	case 16:
+		idct16(out, in)
+	default:
+		idct32(out, in)
+	}
+}
 
-		return
+func idct4(out, in []int32) {
+	_ = out[3]
+
+	e0 := 64 * (in[0] + in[2])
+	e1 := 64 * (in[0] - in[2])
+
+	o0 := 83*in[1] + 36*in[3]
+	o1 := 36*in[1] - 83*in[3]
+
+	out[0] = e0 + o0
+	out[1] = e1 + o1
+	out[2] = e1 - o1
+	out[3] = e0 - o0
+}
+
+func idct8(out, in []int32) {
+	var ev, e, o [4]int32
+
+	ev[0], ev[1], ev[2], ev[3] = in[0], in[2], in[4], in[6]
+	idct4(e[:], ev[:])
+
+	odd(o[:], in, 4)
+
+	for i, v := range e {
+		out[i] = v + o[i]
+		out[7-i] = v - o[i]
+	}
+}
+
+func idct16(out, in []int32) {
+	var ev, e, o [8]int32
+
+	for i := range ev {
+		ev[i] = in[2*i]
 	}
 
-	half := n / 2
+	idct8(e[:], ev[:])
+	odd(o[:], in, 2)
 
-	even := scratch[:half]
-	for j := range half {
-		even[j] = in[2*j]
+	for i, v := range e {
+		out[i] = v + o[i]
+		out[15-i] = v - o[i]
+	}
+}
+
+func idct32(out, in []int32) {
+	var ev, e, o [16]int32
+
+	for i := range ev {
+		ev[i] = in[2*i]
 	}
 
-	evenOut := scratch[half : 2*half]
-	idct1D(evenOut, even, half, stride*2, scratch[2*half:])
+	idct16(e[:], ev[:])
+	odd(o[:], in, 1)
 
-	for i := range half {
-		var odd int32
+	for i, v := range e {
+		out[i] = v + o[i]
+		out[31-i] = v - o[i]
+	}
+}
 
-		for j := range half {
-			odd += int32(transMatrix[(2*j+1)*stride][i]) * in[2*j+1]
+// odd accumulates the odd half of one level, a basis row at a time so the
+// matrix is indexed once per coefficient and a zero one costs nothing.
+func odd(out, in []int32, stride int) {
+	clear(out)
+
+	for j := range out {
+		c := in[2*j+1]
+		if c == 0 {
+			continue
 		}
 
-		out[i] = evenOut[i] + odd
-		out[n-1-i] = evenOut[i] - odd
+		row := transMatrix[(2*j+1)*stride][:len(out)]
+		acc := out[:len(row)]
+
+		for i, v := range row {
+			acc[i] += int32(v) * c
+		}
 	}
 }
 
@@ -121,7 +197,6 @@ func idst1D(out, in []int32) {
 type transformScratch struct {
 	col   [32]int32
 	out   [32]int32
-	tmp   [64]int32
 	block [32 * 32]int32
 }
 
@@ -129,21 +204,36 @@ type transformScratch struct {
 func inverseTransform(coef []int32, n int, dst bool, bitDepth int, extended bool, s *transformScratch) {
 	rng := transformRange(bitDepth, extended)
 	lo, hi := int32(-1<<rng), int32(1<<rng-1)
-	stride := 32 / n
+
+	// A column of zeros transforms to zeros, and residual blocks are mostly
+	// zero above the last significant coefficient.
+	col, out := s.col[:n], s.out[:n]
 
 	for x := range n {
-		for y := range n {
-			s.col[y] = coef[y*n+x]
+		var acc int32
+
+		for y := range col {
+			v := coef[y*n+x]
+			col[y] = v
+			acc |= v
+		}
+
+		if acc == 0 {
+			for y := range n {
+				s.block[y*n+x] = 0
+			}
+
+			continue
 		}
 
 		if dst {
-			idst1D(s.out[:4], s.col[:4])
+			idst1D(out, col)
 		} else {
-			idct1D(s.out[:n], s.col[:n], n, stride, s.tmp[:])
+			idct(out, col, n)
 		}
 
-		for y := range n {
-			s.block[y*n+x] = clip3((s.out[y]+64)>>7, lo, hi)
+		for y, v := range out {
+			s.block[y*n+x] = clip3((v+64)>>7, lo, hi)
 		}
 	}
 
@@ -151,30 +241,23 @@ func inverseTransform(coef []int32, n int, dst bool, bitDepth int, extended bool
 		row := s.block[y*n : y*n+n]
 
 		if dst {
-			idst1D(s.out[:4], row)
+			idst1D(out, row)
 		} else {
-			idct1D(s.out[:n], row, n, stride, s.tmp[:])
+			idct(out, row, n)
 		}
 
-		copy(coef[y*n:y*n+n], s.out[:n])
+		copy(coef[y*n:y*n+n], out)
 	}
 }
 
-// 8.6.2, bdShift.
-func residualShift(coef []int32, bitDepth int, extended bool) {
+// residualShiftBits is bdShift of 8.6.2.
+func residualShiftBits(bitDepth int, extended bool) int {
 	shift := 20 - bitDepth
 	if extended {
-		shift = max(shift, 11)
+		return max(shift, 11)
 	}
 
-	if shift <= 0 {
-		return
-	}
-
-	rnd := int32(1) << (shift - 1)
-	for i, c := range coef {
-		coef[i] = (c + rnd) >> shift
-	}
+	return shift
 }
 
 // 8.6.2, transform_skip_flag. Not clipped; bdShift follows.

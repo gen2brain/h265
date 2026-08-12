@@ -338,7 +338,23 @@ func decodeSubBlockLevels(c *cabac, s *sps, p *pps, coef []int32,
 
 	st.started = true
 
-	firstSig, lastSig := -1, -1
+	// The three passes below visit the significant coefficients only, so the
+	// positions are gathered once instead of rescanning all sixteen.
+	var posBuf [numSbCoeff]int8
+
+	pos := posBuf[:0]
+
+	for k := numSbCoeff - 1; k >= 0; k-- {
+		if sig[k] {
+			pos = append(pos, int8(k))
+		}
+	}
+
+	if len(pos) == 0 {
+		return
+	}
+
+	firstSig, lastSig := int(pos[len(pos)-1]), int(pos[0])
 	lastGreater1 := -1
 
 	var greater1 [numSbCoeff]bool
@@ -346,10 +362,8 @@ func decodeSubBlockLevels(c *cabac, s *sps, p *pps, coef []int32,
 	numGreater1 := 0
 	greater1Ctx := 1
 
-	for k := numSbCoeff - 1; k >= 0; k-- {
-		if !sig[k] {
-			continue
-		}
+	for _, p8 := range pos {
+		k := int(p8)
 
 		if numGreater1 < 8 {
 			ctx := ctxSet*4 + min(3, greater1Ctx)
@@ -373,12 +387,6 @@ func decodeSubBlockLevels(c *cabac, s *sps, p *pps, coef []int32,
 				greater1Ctx++
 			}
 		}
-
-		if lastSig < 0 {
-			lastSig = k
-		}
-
-		firstSig = k
 	}
 
 	var greater2 bool
@@ -396,10 +404,8 @@ func decodeSubBlockLevels(c *cabac, s *sps, p *pps, coef []int32,
 
 	var signs [numSbCoeff]bool
 
-	for k := numSbCoeff - 1; k >= 0; k-- {
-		if !sig[k] {
-			continue
-		}
+	for _, p8 := range pos {
+		k := int(p8)
 
 		if p.signDataHidingEnabled && signHidden && k == firstSig {
 			continue
@@ -419,10 +425,8 @@ func decodeSubBlockLevels(c *cabac, s *sps, p *pps, coef []int32,
 
 	firstRemaining := true
 
-	for k := numSbCoeff - 1; k >= 0; k-- {
-		if !sig[k] {
-			continue
-		}
+	for _, p8 := range pos {
+		k := int(p8)
 
 		base := int32(1)
 		if greater1[k] {

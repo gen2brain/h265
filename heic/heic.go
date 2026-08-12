@@ -204,8 +204,9 @@ func isAlphaURN(s string) bool {
 		s == "urn:mpeg:hevc:2015:auxid:1"
 }
 
-// decodeItem decodes one hvc1 item to a picture.
-func (f *file) decodeItem(it *item) (*hevc.Picture, error) {
+// decodeItem decodes one hvc1 item to a picture. d is reused across the tiles
+// of a grid, which keeps the per-picture buffers allocated once.
+func (f *file) decodeItem(d *hevc.Decoder, it *item) (*hevc.Picture, error) {
 	if it.typ == "grid" {
 		return nil, ErrUnsupported
 	}
@@ -229,8 +230,6 @@ func (f *file) decodeItem(it *item) (*hevc.Picture, error) {
 			return nil, ErrUnsupported
 		}
 	}
-
-	var d hevc.Decoder
 
 	for _, nal := range cfg.hvcC.paramSets {
 		u, ok := hevc.ParseNAL(nal)

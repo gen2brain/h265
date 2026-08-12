@@ -281,6 +281,8 @@ func (d *ctuDecoder) decodeSliceData(nal NALUnit, sh *sliceHeader) error {
 		d.depSliceAddrRs = int(sh.sliceSegmentAddress)
 	}
 
+	d.simpleAvail = d.sliceAddrRs == 0 && !d.p.tilesEnabled
+
 	sub := 0
 
 	start := int(d.rsToTs[sh.sliceSegmentAddress])

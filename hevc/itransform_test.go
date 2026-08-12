@@ -21,11 +21,7 @@ func naive1D(out, in []int32, n int) {
 }
 
 func TestIDCT1D(t *testing.T) {
-	var (
-		got     [32]int32
-		want    [32]int32
-		scratch [64]int32
-	)
+	var got, want [32]int32
 
 	r := rand.New(rand.NewPCG(1, 2))
 
@@ -36,7 +32,7 @@ func TestIDCT1D(t *testing.T) {
 				in[i] = int32(r.IntN(1<<16) - 1<<15)
 			}
 
-			idct1D(got[:n], in, n, 32/n, scratch[:])
+			idct(got[:n], in[:n], n)
 			naive1D(want[:n], in, n)
 
 			for i := range n {
@@ -311,23 +307,73 @@ func TestTransformSkip(t *testing.T) {
 	}
 }
 
-func TestResidualShift(t *testing.T) {
-	r := rand.New(rand.NewPCG(11, 12))
-
-	for _, bitDepth := range []int{8, 10, 12} {
-		in := make([]int32, 64)
-		for i := range in {
-			in[i] = int32(r.IntN(1<<22) - 1<<21)
+func TestResidualShiftBits(t *testing.T) {
+	for _, bd := range []int{8, 10, 12} {
+		if got := residualShiftBits(bd, false); got != 20-bd {
+			t.Errorf("bd=%d: %d, want %d", bd, got, 20-bd)
 		}
 
-		got := make([]int32, len(in))
-		copy(got, in)
-		residualShift(got, bitDepth, false)
+		if got := residualShiftBits(bd, true); got != max(20-bd, 11) {
+			t.Errorf("extended bd=%d: %d, want %d", bd, got, max(20-bd, 11))
+		}
+	}
+}
 
-		shift := 20 - bitDepth
-		for i, c := range in {
-			if want := (c + 1<<(shift-1)) >> shift; got[i] != want {
-				t.Fatalf("bd=%d [%d] = %d, want %d", bitDepth, i, got[i], want)
+// TestAddResidual checks the fused shift, add and clip against a longhand
+// transcription of 8.6.2 and 8.6.6, at both shifts and both bit depths.
+func TestAddResidual(t *testing.T) {
+	r := rand.New(rand.NewPCG(13, 14))
+
+	for _, bitDepth := range []int{8, 10, 12} {
+		for _, n := range []int{4, 8, 16, 32} {
+			for _, extended := range []bool{false, true} {
+				shift := residualShiftBits(bitDepth, extended)
+
+				stride := n + 3
+				maxV := int32(1)<<bitDepth - 1
+
+				coef := make([]int32, n*n)
+				for i := range coef {
+					coef[i] = int32(r.IntN(1<<22) - 1<<21)
+				}
+
+				src := make([]uint16, stride*(n+2))
+				for i := range src {
+					src[i] = uint16(r.IntN(int(maxV) + 1))
+				}
+
+				got := make([]uint16, len(src))
+				copy(got, src)
+				addResidual(got, stride, 1, 1, n, shift, coef, bitDepth)
+
+				for j := range n {
+					for i := range n {
+						c := coef[j*n+i]
+						if shift > 0 {
+							c = (c + 1<<(shift-1)) >> shift
+						}
+
+						o := (1+j)*stride + 1 + i
+						want := uint16(clip3(int32(src[o])+c, 0, maxV))
+
+						if got[o] != want {
+							t.Fatalf("bd=%d n=%d ext=%v [%d,%d] = %d, want %d",
+								bitDepth, n, extended, i, j, got[o], want)
+						}
+					}
+				}
+
+				// Everything outside the block must be untouched.
+				for i := range src {
+					j, k := i/stride, i%stride
+					if j >= 1 && j <= n && k >= 1 && k <= n {
+						continue
+					}
+
+					if got[i] != src[i] {
+						t.Fatalf("wrote outside the block at %d", i)
+					}
+				}
 			}
 		}
 	}

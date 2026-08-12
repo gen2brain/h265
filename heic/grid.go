@@ -59,7 +59,9 @@ func (f *file) decodeImage(it *item) (*hevc.Picture, error) {
 	}
 
 	if it.typ != "grid" {
-		return f.decodeItem(it)
+		var d hevc.Decoder
+
+		return f.decodeItem(&d, it)
 	}
 
 	g, tiles, err := f.gridOf(it)
@@ -71,7 +73,19 @@ func (f *file) decodeImage(it *item) (*hevc.Picture, error) {
 		return nil, ErrUnsupported
 	}
 
-	pics := make([]*hevc.Picture, len(tiles))
+	return f.decodeTiles(g, tiles)
+}
+
+// decodeTiles decodes the tiles one at a time and copies each into the output
+// as it arrives, so only one tile is held at once and one decoder serves them
+// all.
+func (f *file) decodeTiles(g gridInfo, tiles []uint32) (*hevc.Picture, error) {
+	var (
+		d   hevc.Decoder
+		out *hevc.Picture
+		tw  int
+		th  int
+	)
 
 	for i, id := range tiles {
 		t := f.meta.items[id]
@@ -79,41 +93,39 @@ func (f *file) decodeImage(it *item) (*hevc.Picture, error) {
 			return nil, ErrInvalid
 		}
 
-		if pics[i], err = f.decodeItem(t); err != nil {
+		pic, err := f.decodeItem(&d, t)
+		if err != nil {
 			return nil, err
 		}
-	}
 
-	first := pics[0]
-	tw, th := first.CropW, first.CropH
+		if out == nil {
+			tw, th = pic.CropW, pic.CropH
+			if tw*g.cols < g.w || th*g.rows < g.h {
+				return nil, ErrInvalid
+			}
 
-	for _, p := range pics {
-		if p.CropW != tw || p.CropH != th ||
-			p.ChromaFormat != first.ChromaFormat || p.BitDepth != first.BitDepth {
+			out = newGrid(pic, g)
+		}
+
+		if pic.CropW != tw || pic.CropH != th ||
+			pic.ChromaFormat != out.ChromaFormat || pic.BitDepth != out.BitDepth {
 			return nil, ErrInvalid
 		}
+
+		blit(out, pic, g, i, tw, th)
 	}
 
-	if tw*g.cols < g.w || th*g.rows < g.h {
+	if out == nil {
 		return nil, ErrInvalid
 	}
 
-	return stitch(pics, g, tw, th), nil
+	return out, nil
 }
 
-// stitch lays the tiles out row-major into one picture the size the grid
-// declares, which may be smaller than the tiles cover.
-func stitch(pics []*hevc.Picture, g gridInfo, tw, th int) *hevc.Picture {
-	first := pics[0]
-
-	sw, sh := 1, 1
-
-	switch first.ChromaFormat {
-	case 1:
-		sw, sh = 2, 2
-	case 2:
-		sw = 2
-	}
+// newGrid allocates the stitched picture, which may be smaller than the tiles
+// cover.
+func newGrid(first *hevc.Picture, g gridInfo) *hevc.Picture {
+	sw, sh := subsampling(first.ChromaFormat)
 
 	out := &hevc.Picture{
 		Width:        g.w,
@@ -122,80 +134,86 @@ func stitch(pics []*hevc.Picture, g gridInfo, tw, th int) *hevc.Picture {
 		CropH:        g.h,
 		ChromaFormat: first.ChromaFormat,
 		BitDepth:     first.BitDepth,
+		StrideY:      g.w,
 	}
 
-	out.StrideY = g.w
-	out.WidthC = (g.w + sw - 1) / sw
-	out.HeightC = (g.h + sh - 1) / sh
-	out.StrideC = out.WidthC
-
-	if first.ChromaFormat == 0 {
-		out.WidthC, out.HeightC, out.StrideC = 0, 0, 0
+	if first.ChromaFormat != 0 {
+		out.WidthC = (g.w + sw - 1) / sw
+		out.HeightC = (g.h + sh - 1) / sh
+		out.StrideC = out.WidthC
 	}
 
 	if first.BitDepth > 8 {
 		out.Y16 = make([]uint16, out.StrideY*g.h)
 		out.Cb16 = make([]uint16, out.StrideC*out.HeightC)
 		out.Cr16 = make([]uint16, out.StrideC*out.HeightC)
-	} else {
-		out.Y = make([]uint8, out.StrideY*g.h)
-		out.Cb = make([]uint8, out.StrideC*out.HeightC)
-		out.Cr = make([]uint8, out.StrideC*out.HeightC)
+
+		return out
 	}
 
-	for i, p := range pics {
-		row, col := i/g.cols, i%g.cols
-
-		for pl := range 3 {
-			sx, sy := col*tw, row*th
-			cw, ch := tw, th
-			ow, oh := g.w, g.h
-			ss, ds := p.StrideY, out.StrideY
-
-			if pl != 0 {
-				if first.ChromaFormat == 0 {
-					continue
-				}
-
-				sx, sy = sx/sw, sy/sh
-				cw, ch = cw/sw, ch/sh
-				ow, oh = out.WidthC, out.HeightC
-				ss, ds = p.StrideC, out.StrideC
-			}
-
-			cw = min(cw, ow-sx)
-			ch = min(ch, oh-sy)
-
-			if cw <= 0 || ch <= 0 {
-				continue
-			}
-
-			sox, soy := p.CropX, p.CropY
-			if pl != 0 {
-				sox, soy = sox/sw, soy/sh
-			}
-
-			if first.BitDepth > 8 {
-				src, dst := planes16(p, out, pl)
-				for y := range ch {
-					s := (soy+y)*ss + sox
-					d := (sy+y)*ds + sx
-					copy(dst[d:d+cw], src[s:s+cw])
-				}
-
-				continue
-			}
-
-			src, dst := planes8(p, out, pl)
-			for y := range ch {
-				s := (soy+y)*ss + sox
-				d := (sy+y)*ds + sx
-				copy(dst[d:d+cw], src[s:s+cw])
-			}
-		}
-	}
+	out.Y = make([]uint8, out.StrideY*g.h)
+	out.Cb = make([]uint8, out.StrideC*out.HeightC)
+	out.Cr = make([]uint8, out.StrideC*out.HeightC)
 
 	return out
+}
+
+func subsampling(chromaFormat int) (int, int) {
+	switch chromaFormat {
+	case 1:
+		return 2, 2
+	case 2:
+		return 2, 1
+	}
+
+	return 1, 1
+}
+
+// blit copies tile i of the grid into its place in out.
+func blit(out, p *hevc.Picture, g gridInfo, i, tw, th int) {
+	sw, sh := subsampling(out.ChromaFormat)
+	row, col := i/g.cols, i%g.cols
+
+	for pl := range 3 {
+		sx, sy := col*tw, row*th
+		cw, ch := tw, th
+		ow, oh := g.w, g.h
+		ss, ds := p.StrideY, out.StrideY
+		sox, soy := p.CropX, p.CropY
+
+		if pl != 0 {
+			if out.ChromaFormat == 0 {
+				return
+			}
+
+			sx, sy = sx/sw, sy/sh
+			cw, ch = cw/sw, ch/sh
+			ow, oh = out.WidthC, out.HeightC
+			ss, ds = p.StrideC, out.StrideC
+			sox, soy = sox/sw, soy/sh
+		}
+
+		cw = min(cw, ow-sx)
+		ch = min(ch, oh-sy)
+
+		if cw <= 0 || ch <= 0 {
+			continue
+		}
+
+		if out.BitDepth > 8 {
+			src, dst := planes16(p, out, pl)
+			for y := range ch {
+				copy(dst[(sy+y)*ds+sx:][:cw], src[(soy+y)*ss+sox:][:cw])
+			}
+
+			continue
+		}
+
+		src, dst := planes8(p, out, pl)
+		for y := range ch {
+			copy(dst[(sy+y)*ds+sx:][:cw], src[(soy+y)*ss+sox:][:cw])
+		}
+	}
 }
 
 func planes8(src, dst *hevc.Picture, pl int) ([]uint8, []uint8) {
@@ -227,7 +245,7 @@ func (f *file) gridAlpha(it *item) (*hevc.Picture, error) {
 		return nil, err
 	}
 
-	pics := make([]*hevc.Picture, len(tiles))
+	alpha := make([]uint32, len(tiles))
 
 	for i, id := range tiles {
 		a := f.alphaOf(id)
@@ -235,20 +253,8 @@ func (f *file) gridAlpha(it *item) (*hevc.Picture, error) {
 			return nil, nil
 		}
 
-		if pics[i], err = f.decodeItem(a); err != nil {
-			return nil, err
-		}
+		alpha[i] = a.id
 	}
 
-	first := pics[0]
-	tw, th := first.CropW, first.CropH
-
-	for _, p := range pics {
-		if p.CropW != tw || p.CropH != th || p.ChromaFormat != 0 ||
-			p.BitDepth != first.BitDepth {
-			return nil, ErrInvalid
-		}
-	}
-
-	return stitch(pics, g, tw, th), nil
+	return f.decodeTiles(g, alpha)
 }
