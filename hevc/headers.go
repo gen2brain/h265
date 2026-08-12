@@ -677,6 +677,13 @@ func parseSPS(rbsp []byte) (*sps, error) {
 			s.cabacBypassAlignment = c.bit() != 0
 		}
 
+		// The tools below are parsed so the extension stays in step, but they
+		// are not applied. A stream that uses one is refused rather than
+		// decoded into something that merely looks plausible.
+		if s.implicitRdpcm || s.explicitRdpcm || s.cabacBypassAlignment {
+			return nil, ErrUnsupported
+		}
+
 		if multilayerExtension || extension3D || sccExtension {
 			return nil, ErrUnsupported
 		}
@@ -829,6 +836,11 @@ func parsePPS(rbsp []byte) (*pps, error) {
 
 			p.log2SaoOffsetScaleLuma = c.ue()
 			p.log2SaoOffsetScaleChroma = c.ue()
+		}
+
+		// Parsed to keep the extension in step, but not applied.
+		if p.crossComponentPrediction {
+			return nil, ErrUnsupported
 		}
 
 		if multilayerExtension || extension3D || sccExtension {

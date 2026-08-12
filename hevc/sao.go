@@ -101,9 +101,15 @@ func (d *ctuDecoder) parseSAO(x, y int) {
 			offAbs[i] = v
 		}
 
+		// 7.4.9.3 scales every offset by the shift the picture carries.
+		scale := d.p.log2SaoOffsetScaleLuma
+		if cIdx > 0 {
+			scale = d.p.log2SaoOffsetScaleChroma
+		}
+
 		if typeIdx == saoBand {
 			for i := range 4 {
-				p.offset[i] = int32(offAbs[i])
+				p.offset[i] = int32(offAbs[i]) << scale
 
 				if offAbs[i] != 0 && d.c.decodeBypass() != 0 {
 					p.offset[i] = -p.offset[i]
@@ -118,7 +124,7 @@ func (d *ctuDecoder) parseSAO(x, y int) {
 		// Edge offsets are signed by position: the first two are positive,
 		// the last two negative.
 		for i := range 4 {
-			p.offset[i] = int32(offAbs[i])
+			p.offset[i] = int32(offAbs[i]) << scale
 			if i >= 2 {
 				p.offset[i] = -p.offset[i]
 			}
