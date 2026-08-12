@@ -297,6 +297,9 @@ func (f *file) decodeStill(o Options) (image.Image, ColorInfo, error) {
 		return nil, ColorInfo{}, err
 	}
 
+	// ISO/IEC 23008-12 7.2.1: ispe is the displayed size.
+	f.clampToISPE(it, pic)
+
 	var alpha *hevc.Picture
 
 	// A grid carries no alpha of its own; its tiles do.
@@ -308,6 +311,10 @@ func (f *file) decodeStill(o Options) (image.Image, ColorInfo, error) {
 
 	if err != nil {
 		return nil, ColorInfo{}, err
+	}
+
+	if alpha != nil {
+		f.clampToISPE(it, alpha)
 	}
 
 	ci := f.colorInfo(it, pic)
@@ -440,28 +447,30 @@ func (f *file) sequenceConfig() (image.Config, error) {
 	return image.Config{Width: t.width, Height: t.height, ColorModel: model}, nil
 }
 
-// size is the displayed size of an item, which the grid derivation and the
-// rotations both change.
+// clampToISPE trims a decoded picture to the size the item declares.
+func (f *file) clampToISPE(it *item, pic *hevc.Picture) {
+	p := f.meta.prop(it, "ispe")
+	if p == nil {
+		return
+	}
+
+	pic.CropW = min(pic.CropW, int(p.w))
+	pic.CropH = min(pic.CropH, int(p.h))
+}
+
+// size is the stored size of an item, which is what Decode returns unless
+// AutoRotate transforms it.
 func (f *file) size(it *item) (int, int, error) {
 	p := f.meta.prop(it, "ispe")
 	if p == nil {
 		return 0, 0, ErrInvalid
 	}
 
-	w, h := int(p.w), int(p.h)
-
-	if c := f.meta.prop(it, "clap"); c != nil {
-		cw, ch, ok := clapSize(c, w, h)
-		if ok {
-			w, h = cw, ch
-		}
+	if p.w == 0 || p.h == 0 || p.w > 1<<20 || p.h > 1<<20 {
+		return 0, 0, ErrInvalid
 	}
 
-	if r := f.meta.prop(it, "irot"); r != nil && r.angle%2 == 1 {
-		w, h = h, w
-	}
-
-	return w, h, nil
+	return int(p.w), int(p.h), nil
 }
 
 func decodeWrapper(r io.Reader) (image.Image, error) {

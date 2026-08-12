@@ -174,14 +174,6 @@ func (f *file) applyTransforms(img image.Image, it *item) (image.Image, error) {
 	return r.toImage(), nil
 }
 
-// clapSize is the displayed size after the clean aperture, for DecodeConfig,
-// which must agree with what AutoRotate would produce without decoding.
-func clapSize(p *property, w, h int) (int, int, bool) {
-	_, _, cw, ch, ok := cropRect(&p.clap, w, h)
-
-	return cw, ch, ok
-}
-
 // transform applies the clap, irot and imir properties. The planar images the
 // ToYCbCr path returns alias the decoded planes, so they are converted first.
 func (f *file) transform(it *item, img image.Image) (image.Image, error) {
