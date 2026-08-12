@@ -59,7 +59,7 @@ type cabac struct {
 
 func (c *cabac) init(data []byte, off int) error {
 	if off < 0 || off+2 > len(data) {
-		return errInvalid
+		return ErrInvalid
 	}
 
 	c.data = data

@@ -12,11 +12,10 @@ Build with `-tags noasm` for pure Go everywhere.
 
 ### Status
 
-Under development. The bitstream decoder is byte-exact on all 97 available JCT-VC HEVC v1
-conformance vectors; the HEIC container is not written yet.
-
-See [docs/STATUS.md](docs/STATUS.md) for where things stand and what is next, and
-[docs/PLAN.md](docs/PLAN.md) for the design and milestones.
+Under development, and single threaded for now. The bitstream decoder is byte-exact on all 97
+available JCT-VC HEVC v1 conformance vectors, and covers Main, Main10, Main12, monochrome and
+4:2:0, 4:2:2 and 4:4:4 chroma. The `heic` package reads still images, grids, alpha, image
+sequences, the `clap`/`irot`/`imir` transforms and Exif/XMP.
 
 ### Decoding
 
@@ -25,7 +24,12 @@ img, err := heic.Decode(r)
 ```
 
 `heic.Decode` returns `*image.NRGBA`, or `*image.NRGBA64` above 8 bits, and registers itself with
-`image.RegisterFormat`. The `hevc` package decodes the bitstream on its own, a NAL unit at a time:
+`image.RegisterFormat`. It converts with the matrix and range the file declares; `image.YCbCr`
+reads its planes as full-range BT.601 whatever the file signals, so it is not the default.
+`Options{ToYCbCr: true}` hands back the planes unconverted and `DecodeColor` reports what they
+are. `DecodeAll` returns every frame of an image sequence.
+
+The `hevc` package decodes the bitstream on its own, a NAL unit at a time:
 
 ```go
 d := hevc.Decoder{}

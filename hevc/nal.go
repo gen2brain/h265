@@ -200,17 +200,17 @@ func unescape(data []byte) ([]byte, []uint32) {
 // RBSPOffset converts a payload-relative byte position, as entry point offsets
 // count them, into an index into RBSP.
 func (n NALUnit) RBSPOffset(off int) int {
-	for _, p := range n.EPB {
-		if int(p) < off {
-			off--
+	rbsp := off
 
-			continue
+	for _, p := range n.EPB {
+		if int(p) >= off {
+			break
 		}
 
-		break
+		rbsp--
 	}
 
-	return off
+	return rbsp
 }
 
 // NALOffset is the inverse of RBSPOffset.

@@ -2,6 +2,7 @@ package hevc
 
 import (
 	"bytes"
+	"math/rand/v2"
 	"slices"
 	"testing"
 )
@@ -174,4 +175,81 @@ func TestNALTypeClass(t *testing.T) {
 	if !NALCra.IsIRAP() || !NALBlaWLP.IsIRAP() || NALTrailR.IsIRAP() {
 		t.Fatal("IsIRAP")
 	}
+}
+
+// TestRBSPOffsetRoundTrip checks the two offset conversions against a direct
+// count, over payloads dense enough in emulation prevention bytes that an
+// error in the running total shows up. Entry point offsets are converted with
+// these, so being off by one silently starts a substream in the wrong place.
+func TestRBSPOffsetRoundTrip(t *testing.T) {
+	r := rand.New(rand.NewPCG(21, 22))
+
+	for range 200 {
+		payload := make([]byte, 1+r.IntN(300))
+		for i := range payload {
+			// Mostly zeros, so escaping happens constantly.
+			if r.IntN(4) != 0 {
+				payload[i] = 0
+			} else {
+				payload[i] = byte(r.IntN(256))
+			}
+		}
+
+		nal := append([]byte{0x28, 0x01}, escapeRBSP(payload)...)
+
+		u, ok := ParseNAL(nal)
+		if !ok {
+			t.Fatal("ParseNAL failed")
+		}
+
+		if !bytes.Equal(u.RBSP, payload) {
+			t.Fatalf("unescape round trip failed")
+		}
+
+		epb := u.EPB
+		escaped := nal[2:]
+
+		for off := range len(escaped) + 1 {
+			want := off
+			for _, p := range epb {
+				if int(p) < off {
+					want--
+				}
+			}
+
+			if got := u.RBSPOffset(off); got != want {
+				t.Fatalf("RBSPOffset(%d) = %d, want %d (epb %v)", off, got, want, epb)
+			}
+		}
+
+		for off := range len(payload) + 1 {
+			if got := u.RBSPOffset(u.NALOffset(off)); got != off {
+				t.Fatalf("NALOffset then RBSPOffset of %d gave %d", off, got)
+			}
+		}
+	}
+}
+
+// escapeRBSP is the inverse of unescape, for building test payloads.
+func escapeRBSP(b []byte) []byte {
+	var out []byte
+
+	zeros := 0
+
+	for _, v := range b {
+		if zeros == 2 && v <= 3 {
+			out = append(out, 3)
+			zeros = 0
+		}
+
+		out = append(out, v)
+
+		if v == 0 {
+			zeros++
+		} else {
+			zeros = 0
+		}
+	}
+
+	return out
 }

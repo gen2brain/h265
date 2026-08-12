@@ -110,7 +110,7 @@ func TestParameterSets(t *testing.T) {
 
 			case NALSPS:
 				s, err := parseSPS(nal.RBSP)
-				if errors.Is(err, errUnsupported) {
+				if errors.Is(err, ErrUnsupported) {
 					t.Skipf("%s: %v", name, err)
 				}
 

@@ -2,9 +2,11 @@ package hevc
 
 import "errors"
 
+// ErrInvalid is returned for a bitstream that cannot be decoded, and
+// ErrUnsupported for one using a feature this decoder does not implement.
 var (
-	errInvalid     = errors.New("hevc: invalid bitstream")
-	errUnsupported = errors.New("hevc: unsupported feature")
+	ErrInvalid     = errors.New("hevc: invalid bitstream")
+	ErrUnsupported = errors.New("hevc: unsupported feature")
 )
 
 const (
@@ -283,7 +285,7 @@ func parseHRD(c *getBits, commonInfPresent bool, maxSubLayersMinus1 uint8) error
 		if !lowDelay {
 			n := c.ue()
 			if n > 31 {
-				return errInvalid
+				return ErrInvalid
 			}
 
 			cpbCnt = int(n) + 1
@@ -380,13 +382,13 @@ func parseVPS(rbsp []byte) (*vps, error) {
 	v.maxSubLayersMinus1 = uint8(c.bits(3))
 
 	if v.maxSubLayersMinus1 > maxSubLayers-1 {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	v.temporalIDNesting = c.bit() != 0
 
 	if c.bits(16) != 0xffff {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	v.ptl = parseProfileTierLevel(&c, true, v.maxSubLayersMinus1)
@@ -406,7 +408,7 @@ func parseVPS(rbsp []byte) (*vps, error) {
 
 	numLayerSetsMinus1 := c.ue()
 	if numLayerSetsMinus1 > 1023 {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	for range int(numLayerSetsMinus1) {
@@ -423,7 +425,7 @@ func parseVPS(rbsp []byte) (*vps, error) {
 
 		numHRD := c.ue()
 		if numHRD > 1024 {
-			return nil, errInvalid
+			return nil, ErrInvalid
 		}
 
 		for i := range int(numHRD) {
@@ -451,11 +453,11 @@ func parseVPS(rbsp []byte) (*vps, error) {
 
 func checkTrailing(c *getBits, extension bool) error {
 	if c.err {
-		return errInvalid
+		return ErrInvalid
 	}
 
 	if !extension && c.moreRBSPData() {
-		return errInvalid
+		return ErrInvalid
 	}
 
 	return nil
@@ -470,7 +472,7 @@ func parseSPS(rbsp []byte) (*sps, error) {
 	s.maxSubLayersMinus1 = uint8(c.bits(3))
 
 	if s.maxSubLayersMinus1 > maxSubLayers-1 {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	s.temporalIDNesting = c.bit() != 0
@@ -478,22 +480,16 @@ func parseSPS(rbsp []byte) (*sps, error) {
 
 	s.id = c.ue()
 	if s.id > 15 {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	s.chromaFormatIDC = c.ue()
 	if s.chromaFormatIDC > 3 {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	if s.chromaFormatIDC == 3 {
 		s.separateColourPlane = c.bit() != 0
-	}
-
-	// 4:2:2 and 4:4:4 need the chroma transform trees of the Range Extensions,
-	// which 7.3.8.8 splits differently from the 4:2:0 the v1 profiles carry.
-	if s.chromaFormatIDC == 2 || s.chromaFormatIDC == 3 {
-		return nil, errUnsupported
 	}
 
 	s.subWidthC, s.subHeightC = 1, 1
@@ -510,7 +506,7 @@ func parseSPS(rbsp []byte) (*sps, error) {
 
 	if s.picWidthInLumaSamples == 0 || s.picHeightInLumaSamples == 0 ||
 		s.picWidthInLumaSamples > maxPicSize || s.picHeightInLumaSamples > maxPicSize {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	if c.bit() != 0 {
@@ -524,7 +520,7 @@ func parseSPS(rbsp []byte) (*sps, error) {
 	bitDepthChromaMinus8 := c.ue()
 
 	if bitDepthLumaMinus8 > 8 || bitDepthChromaMinus8 > 8 {
-		return nil, errUnsupported
+		return nil, ErrUnsupported
 	}
 
 	s.bitDepthLuma = 8 + uint8(bitDepthLumaMinus8)
@@ -532,7 +528,7 @@ func parseSPS(rbsp []byte) (*sps, error) {
 
 	log2MaxPocLsbMinus4 := c.ue()
 	if log2MaxPocLsbMinus4 > 12 {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	s.log2MaxPocLsb = 4 + uint8(log2MaxPocLsbMinus4)
@@ -552,14 +548,14 @@ func parseSPS(rbsp []byte) (*sps, error) {
 	log2DiffMaxMinCbSize := c.ue()
 
 	if log2MinCbSizeMinus3 > 3 || log2DiffMaxMinCbSize > 3 {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	s.minCbLog2SizeY = 3 + uint8(log2MinCbSizeMinus3)
 	s.ctbLog2SizeY = s.minCbLog2SizeY + uint8(log2DiffMaxMinCbSize)
 
 	if s.ctbLog2SizeY < minCtbLog2SizeY || s.ctbLog2SizeY > maxCtbLog2SizeY {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	s.ctbSizeY = 1 << s.ctbLog2SizeY
@@ -570,14 +566,14 @@ func parseSPS(rbsp []byte) (*sps, error) {
 	log2DiffMaxMinTbSize := c.ue()
 
 	if log2MinTbSizeMinus2 > 3 || log2DiffMaxMinTbSize > 3 {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	s.minTbLog2SizeY = 2 + uint8(log2MinTbSizeMinus2)
 	s.maxTbLog2SizeY = s.minTbLog2SizeY + uint8(log2DiffMaxMinTbSize)
 
 	if s.minTbLog2SizeY >= s.minCbLog2SizeY || s.maxTbLog2SizeY > s.ctbLog2SizeY {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	s.maxTrHierInter = c.ue()
@@ -604,14 +600,14 @@ func parseSPS(rbsp []byte) (*sps, error) {
 		s.pcmBitDepthChroma = 1 + uint8(c.bits(4))
 
 		if s.pcmBitDepthLuma > s.bitDepthLuma || s.pcmBitDepthChroma > s.bitDepthChroma {
-			return nil, errInvalid
+			return nil, ErrInvalid
 		}
 
 		log2MinPcmCbSizeMinus3 := c.ue()
 		log2DiffMaxMinPcmCbSize := c.ue()
 
 		if log2MinPcmCbSizeMinus3 > 2 || log2DiffMaxMinPcmCbSize > 2 {
-			return nil, errInvalid
+			return nil, ErrInvalid
 		}
 
 		s.log2MinPcmCbSize = 3 + uint8(log2MinPcmCbSizeMinus3)
@@ -621,7 +617,7 @@ func parseSPS(rbsp []byte) (*sps, error) {
 
 	numStRPS := c.ue()
 	if numStRPS > maxShortTermRPS {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	s.stRPS = make([]shortTermRPS, 0, numStRPS)
@@ -639,7 +635,7 @@ func parseSPS(rbsp []byte) (*sps, error) {
 	if s.longTermRefPicsPresent {
 		n := c.ue()
 		if n > maxLongTermRefPics {
-			return nil, errInvalid
+			return nil, ErrInvalid
 		}
 
 		s.ltRefPicPocLsb = make([]uint32, n)
@@ -682,7 +678,7 @@ func parseSPS(rbsp []byte) (*sps, error) {
 		}
 
 		if multilayerExtension || extension3D || sccExtension {
-			return nil, errUnsupported
+			return nil, ErrUnsupported
 		}
 	}
 
@@ -702,7 +698,7 @@ func parsePPS(rbsp []byte) (*pps, error) {
 	p.spsID = c.ue()
 
 	if p.id > 63 || p.spsID > 15 {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	p.dependentSliceSegmentsEnabled = c.bit() != 0
@@ -714,7 +710,7 @@ func parsePPS(rbsp []byte) (*pps, error) {
 	p.numRefIdxL1DefaultActive = c.ue() + 1
 
 	if p.numRefIdxL0DefaultActive > 16 || p.numRefIdxL1DefaultActive > 16 {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	p.initQP = c.se() + 26
@@ -730,7 +726,7 @@ func parsePPS(rbsp []byte) (*pps, error) {
 	p.crQPOffset = c.se()
 
 	if p.cbQPOffset < -12 || p.cbQPOffset > 12 || p.crQPOffset < -12 || p.crQPOffset > 12 {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	p.sliceChromaQPOffsets = c.bit() != 0
@@ -750,7 +746,7 @@ func parsePPS(rbsp []byte) (*pps, error) {
 		p.numTileRows = int(c.ue()) + 1
 
 		if p.numTileColumns > maxTileColumns || p.numTileRows > maxTileRows {
-			return nil, errInvalid
+			return nil, ErrInvalid
 		}
 
 		p.uniformSpacing = c.bit() != 0
@@ -782,7 +778,7 @@ func parsePPS(rbsp []byte) (*pps, error) {
 
 			if p.betaOffsetDiv2 < -6 || p.betaOffsetDiv2 > 6 ||
 				p.tcOffsetDiv2 < -6 || p.tcOffsetDiv2 > 6 {
-				return nil, errInvalid
+				return nil, ErrInvalid
 			}
 		}
 	}
@@ -822,7 +818,7 @@ func parsePPS(rbsp []byte) (*pps, error) {
 				p.chromaQPOffsetListLen = c.ue() + 1
 
 				if p.chromaQPOffsetListLen > maxChromaQPOffsets {
-					return nil, errInvalid
+					return nil, ErrInvalid
 				}
 
 				for i := range int(p.chromaQPOffsetListLen) {
@@ -836,7 +832,7 @@ func parsePPS(rbsp []byte) (*pps, error) {
 		}
 
 		if multilayerExtension || extension3D || sccExtension {
-			return nil, errUnsupported
+			return nil, ErrUnsupported
 		}
 	}
 
@@ -858,7 +854,7 @@ func (p *pps) resolveTileGeometry(s *sps) error {
 	}
 
 	if p.numTileColumns > w || p.numTileRows > h {
-		return errInvalid
+		return ErrInvalid
 	}
 
 	cols := make([]uint32, p.numTileColumns)
@@ -881,7 +877,7 @@ func (p *pps) resolveTileGeometry(s *sps) error {
 		}
 
 		if sum >= uint32(w) {
-			return errInvalid
+			return ErrInvalid
 		}
 
 		cols[len(cols)-1] = uint32(w) - sum
@@ -894,7 +890,7 @@ func (p *pps) resolveTileGeometry(s *sps) error {
 		}
 
 		if sum >= uint32(h) {
-			return errInvalid
+			return ErrInvalid
 		}
 
 		rows[len(rows)-1] = uint32(h) - sum
@@ -939,7 +935,7 @@ func parseShortTermRPS(c *getBits, idx, numStRPS int, prev []shortTermRPS) (shor
 		}
 
 		if deltaIdx > idx {
-			return rps, errInvalid
+			return rps, ErrInvalid
 		}
 
 		ref := &prev[idx-deltaIdx]
@@ -948,7 +944,7 @@ func parseShortTermRPS(c *getBits, idx, numStRPS int, prev []shortTermRPS) (shor
 
 		absDeltaRpsMinus1 := c.ue()
 		if absDeltaRpsMinus1 >= 32768 {
-			return rps, errInvalid
+			return rps, ErrInvalid
 		}
 
 		deltaRps := int32(absDeltaRpsMinus1) + 1
@@ -1016,7 +1012,7 @@ func parseShortTermRPS(c *getBits, idx, numStRPS int, prev []shortTermRPS) (shor
 	numPos := c.ue()
 
 	if numNeg > maxRefPicsPerRPS || numPos > maxRefPicsPerRPS {
-		return rps, errInvalid
+		return rps, ErrInvalid
 	}
 
 	rps.deltaPocS0 = make([]int32, numNeg)
@@ -1027,7 +1023,7 @@ func parseShortTermRPS(c *getBits, idx, numStRPS int, prev []shortTermRPS) (shor
 	for i := range int(numNeg) {
 		d := c.ue()
 		if d >= 32768 {
-			return rps, errInvalid
+			return rps, ErrInvalid
 		}
 
 		poc -= int32(d) + 1
@@ -1043,7 +1039,7 @@ func parseShortTermRPS(c *getBits, idx, numStRPS int, prev []shortTermRPS) (shor
 	for i := range int(numPos) {
 		d := c.ue()
 		if d >= 32768 {
-			return rps, errInvalid
+			return rps, ErrInvalid
 		}
 
 		poc += int32(d) + 1

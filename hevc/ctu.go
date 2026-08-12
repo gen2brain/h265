@@ -40,12 +40,13 @@ type ctuDecoder struct {
 	minTbWidth int
 	minTbAddr  []int32
 
-	intraMode []uint8
-	cuDepth   []uint8
-	qpY       []int8
-	skipped   []bool
-	noFilter  []bool
-	bypass    bool
+	intraMode  []uint8
+	intraModeC []uint8
+	cuDepth    []uint8
+	qpY        []int8
+	skipped    []bool
+	noFilter   []bool
+	bypass     bool
 
 	qpYPrev  int32
 	qpYCur   int32
@@ -139,12 +140,13 @@ func newCTUDecoder(prev *ctuDecoder, s *sps, p *pps, sh *sliceHeader, pic *Pictu
 		minTbWidth: tbW,
 		mvWidth:    mvW,
 
-		minTbAddr: reuse(d.minTbAddr, tbW*tbH),
-		intraMode: reuse(d.intraMode, tbW*tbH),
-		cuDepth:   reuse(d.cuDepth, tbW*tbH),
-		qpY:       reuse(d.qpY, tbW*tbH),
-		skipped:   reuse(d.skipped, tbW*tbH),
-		noFilter:  reuse(d.noFilter, tbW*tbH),
+		minTbAddr:  reuse(d.minTbAddr, tbW*tbH),
+		intraMode:  reuse(d.intraMode, tbW*tbH),
+		intraModeC: reuse(d.intraModeC, tbW*tbH),
+		cuDepth:    reuse(d.cuDepth, tbW*tbH),
+		qpY:        reuse(d.qpY, tbW*tbH),
+		skipped:    reuse(d.skipped, tbW*tbH),
+		noFilter:   reuse(d.noFilter, tbW*tbH),
 
 		mvField: reuse(d.mvField, mvW*mvH),
 		mvPoc:   reuse(d.mvPoc, mvW*mvH),
@@ -256,15 +258,15 @@ func (d *ctuDecoder) available(xCurr, yCurr, xN, yN int) bool {
 
 // intraChromaMode is Table 8-2 and, for 4:2:2, Table 8-3.
 func (d *ctuDecoder) intraChromaMode(luma int) int {
-	if d.c.decodeBin(ctxIntraChromaPredMode) == 0 {
-		return luma
-	}
+	mode := luma
 
-	idx := int(d.c.decodeBypassBits(2))
+	if d.c.decodeBin(ctxIntraChromaPredMode) != 0 {
+		idx := int(d.c.decodeBypassBits(2))
 
-	mode := [4]int{intraPlanar, intraVer, intraHor, intraDC}[idx]
-	if mode == luma {
-		mode = 34
+		mode = [4]int{intraPlanar, intraVer, intraHor, intraDC}[idx]
+		if mode == luma {
+			mode = 34
+		}
 	}
 
 	if d.s.chromaFormatIDC == 2 {
@@ -276,8 +278,8 @@ func (d *ctuDecoder) intraChromaMode(luma int) int {
 
 // Table 8-3.
 var chroma422Map = [35]uint8{
-	0, 1, 2, 2, 2, 2, 3, 5, 7, 8, 10, 12, 13, 15, 16, 18, 20, 22, 23, 23, 24,
-	24, 25, 25, 26, 27, 27, 28, 28, 29, 29, 30, 31, 32, 33,
+	0, 1, 2, 2, 2, 2, 3, 5, 7, 8, 10, 12, 13, 15, 17, 18, 19, 20,
+	21, 22, 23, 23, 24, 24, 25, 25, 26, 27, 27, 28, 28, 29, 29, 30, 31,
 }
 
 func (d *ctuDecoder) codingQuadtree(x, y, log2Size, depth int) error {
@@ -470,7 +472,7 @@ func (d *ctuDecoder) codingUnitData(x, y, log2Size, depth int) error {
 	d.markPU(x, y, size, size, true)
 
 	if partMode != partMode2Nx2N && partMode != partModeNxN {
-		return errInvalid
+		return ErrInvalid
 	}
 
 	if d.s.pcmEnabled && log2Size >= int(d.s.log2MinPcmCbSize) &&
@@ -502,12 +504,21 @@ func (d *ctuDecoder) codingUnitData(x, y, log2Size, depth int) error {
 		fill(d, d.intraMode, px, py, pbSize, uint8(lumaModes[i]))
 	}
 
-	chromaMode := lumaModes[0]
-	if d.s.chromaArrayType() != 0 {
-		chromaMode = d.intraChromaMode(lumaModes[0])
+	// 7.3.8.5 codes intra_chroma_pred_mode once per prediction block when
+	// ChromaArrayType is 3, and once per coding unit otherwise.
+	switch {
+	case d.s.chromaArrayType() == 3:
+		for i := range parts {
+			px, py := x+i&1*pbSize, y+i>>1*pbSize
+			fill(d, d.intraModeC, px, py, pbSize, uint8(d.intraChromaMode(lumaModes[i])))
+		}
+	case d.s.chromaArrayType() != 0:
+		fill(d, d.intraModeC, x, y, size, uint8(d.intraChromaMode(lumaModes[0])))
+	default:
+		fill(d, d.intraModeC, x, y, size, uint8(lumaModes[0]))
 	}
 
-	return d.transformTree(x, y, x, y, log2Size, 0, 0, lumaModes, chromaMode, partMode, false, false)
+	return d.transformTree(x, y, x, y, log2Size, 0, 0, lumaModes, partMode, [2]bool{}, [2]bool{})
 }
 
 // intraLumaModeWithFlag completes 8.4.2 once prev_intra_luma_pred_flag has been
@@ -582,7 +593,7 @@ func (d *ctuDecoder) intraLumaModeWithFlag(x, y int, prev bool) int {
 }
 
 func (d *ctuDecoder) transformTree(x, y, xBase, yBase, log2Size, depth, blkIdx int,
-	lumaModes [4]int, chromaMode, partMode int, cbfCbUp, cbfCrUp bool,
+	lumaModes [4]int, partMode int, cbfCbUp, cbfCrUp [2]bool,
 ) error {
 	intraSplit := d.curIntra && partMode == partModeNxN
 
@@ -610,14 +621,24 @@ func (d *ctuDecoder) transformTree(x, y, xBase, yBase, log2Size, depth, blkIdx i
 	cbfCb, cbfCr := cbfCbUp, cbfCrUp
 
 	if d.s.chromaArrayType() != 0 && (log2Size > 2 || d.s.chromaArrayType() == 3) {
-		cbfCb = false
-		if depth == 0 || cbfCbUp {
-			cbfCb = d.c.decodeBin(ctxCBFCBCR+depth) != 0
+		// 7.3.8.8: 4:2:2 stacks two chroma transform blocks per luma block, each
+		// with its own cbf, once the tree stops splitting them apart.
+		second := d.s.chromaArrayType() == 2 && (!split || log2Size == 3)
+
+		cbfCb = [2]bool{}
+		if depth == 0 || cbfCbUp[0] {
+			cbfCb[0] = d.c.decodeBin(ctxCBFCBCR+depth) != 0
+			if second {
+				cbfCb[1] = d.c.decodeBin(ctxCBFCBCR+depth) != 0
+			}
 		}
 
-		cbfCr = false
-		if depth == 0 || cbfCrUp {
-			cbfCr = d.c.decodeBin(ctxCBFCBCR+depth) != 0
+		cbfCr = [2]bool{}
+		if depth == 0 || cbfCrUp[0] {
+			cbfCr[0] = d.c.decodeBin(ctxCBFCBCR+depth) != 0
+			if second {
+				cbfCr[1] = d.c.decodeBin(ctxCBFCBCR+depth) != 0
+			}
 		}
 	}
 
@@ -626,7 +647,7 @@ func (d *ctuDecoder) transformTree(x, y, xBase, yBase, log2Size, depth, blkIdx i
 
 		for i := range 4 {
 			if err := d.transformTree(x+i&1*half, y+i>>1*half, x, y, log2Size-1,
-				depth+1, i, lumaModes, chromaMode, partMode, cbfCb, cbfCr); err != nil {
+				depth+1, i, lumaModes, partMode, cbfCb, cbfCr); err != nil {
 				return err
 			}
 		}
@@ -638,12 +659,12 @@ func (d *ctuDecoder) transformTree(x, y, xBase, yBase, log2Size, depth, blkIdx i
 	// chroma coefficients; otherwise an inter root block is inferred to have
 	// luma residual.
 	cbfLuma := true
-	if depth != 0 || cbfCb || cbfCr || d.curIntra {
+	if depth != 0 || cbfCb[0] || cbfCb[1] || cbfCr[0] || cbfCr[1] || d.curIntra {
 		cbfLuma = d.c.decodeBin(ctxCBFLuma+boolInt(depth == 0)) != 0
 	}
 
 	return d.transformUnit(x, y, xBase, yBase, log2Size, depth, blkIdx,
-		lumaModes, chromaMode, partMode, cbfLuma, cbfCb, cbfCr)
+		lumaModes, partMode, cbfLuma, cbfCb, cbfCr)
 }
 
 func (d *ctuDecoder) setQP(x, y, size int) {
@@ -661,7 +682,7 @@ func boolInt(b bool) int {
 }
 
 func (d *ctuDecoder) transformUnit(x, y, xBase, yBase, log2Size, depth, blkIdx int,
-	lumaModes [4]int, chromaMode, partMode int, cbfLuma, cbfCb, cbfCr bool,
+	lumaModes [4]int, partMode int, cbfLuma bool, cbfCb, cbfCr [2]bool,
 ) error {
 	// 8.4.4.2 takes the mode from IntraPredModeY at the block's own position,
 	// which is not blkIdx once the transform tree splits below the partition.
@@ -670,7 +691,9 @@ func (d *ctuDecoder) transformUnit(x, y, xBase, yBase, log2Size, depth, blkIdx i
 		mode = int(d.intraMode[d.tbIndex(x, y)])
 	}
 
-	if (cbfLuma || cbfCb || cbfCr) && d.p.cuQPDeltaEnabled && !d.qpCoded {
+	cbfChroma := cbfCb[0] || cbfCb[1] || cbfCr[0] || cbfCr[1]
+
+	if (cbfLuma || cbfChroma) && d.p.cuQPDeltaEnabled && !d.qpCoded {
 		d.parseCuQPDelta()
 	}
 
@@ -695,11 +718,7 @@ func (d *ctuDecoder) transformUnit(x, y, xBase, yBase, log2Size, depth, blkIdx i
 			cx, cy = x/d.s.subWidthC, y/d.s.subHeightC
 		}
 
-		if err := d.reconstruct(cx, cy, c, 1, chromaMode, cbfCb); err != nil {
-			return err
-		}
-
-		return d.reconstruct(cx, cy, c, 2, chromaMode, cbfCr)
+		return d.chromaTBs(cx, cy, c, d.chromaMode(x, y), cbfCb, cbfCr)
 	}
 
 	if blkIdx != 3 {
@@ -708,11 +727,40 @@ func (d *ctuDecoder) transformUnit(x, y, xBase, yBase, log2Size, depth, blkIdx i
 
 	cx, cy := xBase/d.s.subWidthC, yBase/d.s.subHeightC
 
-	if err := d.reconstruct(cx, cy, 2, 1, chromaMode, cbfCb); err != nil {
-		return err
+	return d.chromaTBs(cx, cy, 2, d.chromaMode(xBase, yBase), cbfCb, cbfCr)
+}
+
+// chromaTBs reconstructs the chroma transform blocks of one transform unit.
+// 4:2:2 stacks two of them per component, and 7.3.8.10 codes both Cb blocks
+// before either Cr block.
+func (d *ctuDecoder) chromaTBs(cx, cy, c, mode int, cbfCb, cbfCr [2]bool) error {
+	n := 1
+	if d.s.chromaArrayType() == 2 {
+		n = 2
 	}
 
-	return d.reconstruct(cx, cy, 2, 2, chromaMode, cbfCr)
+	for cIdx := 1; cIdx <= 2; cIdx++ {
+		cbf := cbfCb
+		if cIdx == 2 {
+			cbf = cbfCr
+		}
+
+		for t := range n {
+			if err := d.reconstruct(cx, cy+t<<c, c, cIdx, mode, cbf[t]); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func (d *ctuDecoder) chromaMode(x, y int) int {
+	if !d.curIntra {
+		return 0
+	}
+
+	return int(d.intraModeC[d.tbIndex(x, y)])
 }
 
 func (d *ctuDecoder) reconstruct(x, y, log2Size, cIdx, mode int, cbf bool) error {
@@ -991,7 +1039,7 @@ func (d *ctuDecoder) interCU(x, y, log2Size, depth, partMode int) error {
 
 	var modes [4]int
 
-	return d.transformTree(x, y, x, y, log2Size, 0, 0, modes, 0, partMode, false, false)
+	return d.transformTree(x, y, x, y, log2Size, 0, 0, modes, partMode, [2]bool{}, [2]bool{})
 }
 
 // scalingFactor picks the matrix of 8.6.3, which is flat when scaling lists
@@ -1034,7 +1082,7 @@ func readPCM[P pixel](g *getBits, plane []P, stride, x, y, w, h, depth, bitDepth
 func (d *ctuDecoder) pcmSample(x, y, log2Size int) error {
 	off := d.c.pcmOffset()
 	if off < 0 || off >= len(d.c.data) {
-		return errInvalid
+		return ErrInvalid
 	}
 
 	size := 1 << log2Size
@@ -1076,7 +1124,7 @@ func (d *ctuDecoder) pcmSample(x, y, log2Size int) error {
 	}
 
 	if g.err {
-		return errInvalid
+		return ErrInvalid
 	}
 
 	return d.c.init(d.c.data, off+(g.pos()+7)/8)

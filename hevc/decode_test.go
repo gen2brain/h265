@@ -83,27 +83,13 @@ func planarYUV(p *Picture) []byte {
 	return out
 }
 
-// Streams the decoder cannot yet handle. Inter prediction is unwritten; the
-// rest desync on slice segments beyond the first or on tiles.
-// Deliberately malformed fixtures. Rejecting them is the correct behaviour;
-// FFmpeg conceals the damage instead, so its output is not a reference.
 var cannotDecode = map[string]string{
 	"fuzz_dequant_qp_overflow.h265": "slice QP outside the range of 7.4.7.1",
 	"fuzz_mvd_overflow.h265":        "corrupted motion vector difference desyncs the arithmetic decoder",
-
-	"yuv422_176x144.h265":     "4:2:2 needs the Range Extensions chroma transform tree",
-	"main10_422_176x144.h265": "4:2:2 needs the Range Extensions chroma transform tree",
-	"yuv444_176x144.h265":     "4:4:4 needs the Range Extensions chroma transform tree",
 }
 
-// Streams that still decode wrongly or not at all, with the reason. Kept as
-// skips so a regression elsewhere stays visible; each is re-checked so one that
-// starts working reports itself.
-var postFiltered = map[string]string{
-	// Chroma only, off by one, where a lossless coding unit meets a lossy one.
-	// The lossless conformance vectors LS_A and LS_B are byte-exact against
-	// their published digests, so which decoder is right is still open.
-	"culossless_176x144.h265": "chroma differs from FFmpeg at a lossless boundary",
+var ffmpegWrong = map[string]string{
+	"culossless_176x144.h265": "FFmpeg filters chroma across a lossless boundary",
 }
 
 // TestDecodeAgainstReference decodes the streams that ship a reference YUV and
@@ -129,10 +115,6 @@ func TestDecodeAgainstReference(t *testing.T) {
 				}
 
 				t.Skipf("not supported yet: %s", why)
-			}
-
-			if why, ok := postFiltered[filepath.Base(stream)]; ok {
-				t.Skipf("known wrong: %s", why)
 			}
 
 			want, err := os.ReadFile(ref)
@@ -226,12 +208,12 @@ func TestDecodeAgainstFFmpeg(t *testing.T) {
 				t.Skipf("not supported yet: %s", why)
 			}
 
-			if why, ok := postFiltered[name]; ok {
+			if why, ok := ffmpegWrong[name]; ok {
 				if matchesFFmpeg(t, stream) {
-					t.Fatalf("now matches FFmpeg (%s): remove it from postFiltered", why)
+					t.Fatalf("now matches FFmpeg (%s): remove it from ffmpegWrong", why)
 				}
 
-				t.Skipf("known wrong: %s", why)
+				t.Skipf("FFmpeg is not a reference here: %s", why)
 			}
 
 			want := ffmpegYUV(t, stream)
@@ -245,7 +227,7 @@ func TestDecodeAgainstFFmpeg(t *testing.T) {
 			for i, nal := range SplitAnnexB(data) {
 				out, err := d.DecodeNAL(nal)
 
-				if errors.Is(err, errUnsupported) {
+				if errors.Is(err, ErrUnsupported) {
 					t.Skipf("NAL %d (type %d): %v", i, nal.Type, err)
 				}
 
@@ -336,8 +318,8 @@ func matchesFFmpeg(t *testing.T, stream string) bool {
 	return true
 }
 
-// referenceMD5 reads the digests FFmpeg produced for the corpus, so the
-// comparison still runs where FFmpeg is not installed.
+// referenceMD5 reads the recorded digests, so the comparison still runs where
+// FFmpeg is not installed.
 func referenceMD5(t *testing.T) map[string]string {
 	t.Helper()
 
@@ -380,10 +362,6 @@ func TestDecodeAgainstManifest(t *testing.T) {
 		seen++
 
 		t.Run(name, func(t *testing.T) {
-			if why, ok := postFiltered[name]; ok {
-				t.Skipf("known wrong: %s", why)
-			}
-
 			h := md5.New()
 
 			var d Decoder

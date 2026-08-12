@@ -136,7 +136,7 @@ func parseSliceHeader(rbsp []byte, nalType NALType, s *sps, p *pps) (*sliceHeade
 
 	h.ppsID = c.ue()
 	if h.ppsID != p.id {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	numCtbs := s.picWidthInCtbs * s.picHeightInCtbs
@@ -148,7 +148,7 @@ func parseSliceHeader(rbsp []byte, nalType NALType, s *sps, p *pps) (*sliceHeade
 
 		h.sliceSegmentAddress = c.bits(ceilLog2(numCtbs))
 		if h.sliceSegmentAddress >= numCtbs {
-			return nil, errInvalid
+			return nil, ErrInvalid
 		}
 	}
 
@@ -167,7 +167,7 @@ func parseSliceHeader(rbsp []byte, nalType NALType, s *sps, p *pps) (*sliceHeade
 
 		t := c.ue()
 		if t > 2 {
-			return nil, errInvalid
+			return nil, ErrInvalid
 		}
 
 		h.sliceType = sliceType(t)
@@ -193,7 +193,7 @@ func parseSliceHeader(rbsp []byte, nalType NALType, s *sps, p *pps) (*sliceHeade
 				h.stRPS = rps
 			} else {
 				if len(s.stRPS) == 0 {
-					return nil, errInvalid
+					return nil, ErrInvalid
 				}
 
 				if len(s.stRPS) > 1 {
@@ -201,7 +201,7 @@ func parseSliceHeader(rbsp []byte, nalType NALType, s *sps, p *pps) (*sliceHeade
 				}
 
 				if int(h.stRPSIdx) >= len(s.stRPS) {
-					return nil, errInvalid
+					return nil, ErrInvalid
 				}
 
 				h.stRPS = s.stRPS[h.stRPSIdx]
@@ -241,7 +241,7 @@ func parseSliceHeader(rbsp []byte, nalType NALType, s *sps, p *pps) (*sliceHeade
 			}
 
 			if h.numRefIdxL0Active > maxRefs || h.numRefIdxL1Active > maxRefs {
-				return nil, errInvalid
+				return nil, ErrInvalid
 			}
 
 			if p.listsModificationPresent && h.numPocTotalCurr > 1 {
@@ -271,7 +271,7 @@ func parseSliceHeader(rbsp []byte, nalType NALType, s *sps, p *pps) (*sliceHeade
 				if active > 1 {
 					h.collocatedRefIdx = c.ue()
 					if h.collocatedRefIdx >= active {
-						return nil, errInvalid
+						return nil, ErrInvalid
 					}
 				}
 			}
@@ -285,7 +285,7 @@ func parseSliceHeader(rbsp []byte, nalType NALType, s *sps, p *pps) (*sliceHeade
 
 			n := c.ue()
 			if n > 4 {
-				return nil, errInvalid
+				return nil, ErrInvalid
 			}
 
 			h.maxNumMergeCand = 5 - n
@@ -295,7 +295,7 @@ func parseSliceHeader(rbsp []byte, nalType NALType, s *sps, p *pps) (*sliceHeade
 		h.qpY = p.initQP + h.qpDelta
 
 		if h.qpY < -(6*int32(s.bitDepthLuma)-48) || h.qpY > 51 {
-			return nil, errInvalid
+			return nil, ErrInvalid
 		}
 
 		if p.sliceChromaQPOffsets {
@@ -304,7 +304,7 @@ func parseSliceHeader(rbsp []byte, nalType NALType, s *sps, p *pps) (*sliceHeade
 
 			if h.cbQPOffset < -12 || h.cbQPOffset > 12 ||
 				h.crQPOffset < -12 || h.crQPOffset > 12 {
-				return nil, errInvalid
+				return nil, ErrInvalid
 			}
 		}
 
@@ -321,7 +321,7 @@ func parseSliceHeader(rbsp []byte, nalType NALType, s *sps, p *pps) (*sliceHeade
 
 				if h.betaOffsetDiv2 < -6 || h.betaOffsetDiv2 > 6 ||
 					h.tcOffsetDiv2 < -6 || h.tcOffsetDiv2 > 6 {
-					return nil, errInvalid
+					return nil, ErrInvalid
 				}
 			}
 		}
@@ -334,13 +334,13 @@ func parseSliceHeader(rbsp []byte, nalType NALType, s *sps, p *pps) (*sliceHeade
 	if p.tilesEnabled || p.entropyCodingSync {
 		n := c.ue()
 		if n > numCtbs {
-			return nil, errInvalid
+			return nil, ErrInvalid
 		}
 
 		if n > 0 {
 			lenMinus1 := c.ue()
 			if lenMinus1 > 31 {
-				return nil, errInvalid
+				return nil, ErrInvalid
 			}
 
 			h.entryPointOffsets = make([]uint32, n)
@@ -351,7 +351,7 @@ func parseSliceHeader(rbsp []byte, nalType NALType, s *sps, p *pps) (*sliceHeade
 				v := c.bits(int(lenMinus1) + 1)
 
 				if cum+v+1 < cum {
-					return nil, errInvalid
+					return nil, ErrInvalid
 				}
 
 				cum += v + 1
@@ -363,20 +363,20 @@ func parseSliceHeader(rbsp []byte, nalType NALType, s *sps, p *pps) (*sliceHeade
 	if p.sliceHeaderExtensionPresen {
 		n := c.ue()
 		if n > uint32(len(rbsp)) {
-			return nil, errInvalid
+			return nil, ErrInvalid
 		}
 
 		c.skip(int(n) * 8)
 	}
 
 	if c.bit() != 1 {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	c.byteAlign()
 
 	if c.err {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	h.dataOffset = c.pos() / 8
@@ -418,7 +418,7 @@ func parseRefPicListModification(c *getBits, h *sliceHeader) error {
 		for i := range h.listModification.listEntryL0 {
 			v := c.bits(n)
 			if v >= h.numPocTotalCurr {
-				return errInvalid
+				return ErrInvalid
 			}
 
 			h.listModification.listEntryL0[i] = v
@@ -436,7 +436,7 @@ func parseRefPicListModification(c *getBits, h *sliceHeader) error {
 		for i := range h.listModification.listEntryL1 {
 			v := c.bits(n)
 			if v >= h.numPocTotalCurr {
-				return errInvalid
+				return ErrInvalid
 			}
 
 			h.listModification.listEntryL1[i] = v
@@ -457,7 +457,7 @@ func parseLongTermRPS(c *getBits, s *sps) (longTermRPS, error) {
 	numPics := c.ue()
 
 	if numSps > uint32(len(s.ltRefPicPocLsb)) || numSps+numPics > maxLongTermRefPics {
-		return lt, errInvalid
+		return lt, ErrInvalid
 	}
 
 	total := int(numSps + numPics)
@@ -475,7 +475,7 @@ func parseLongTermRPS(c *getBits, s *sps) (longTermRPS, error) {
 			}
 
 			if int(idx) >= len(s.ltRefPicPocLsb) {
-				return lt, errInvalid
+				return lt, ErrInvalid
 			}
 
 			lt.pocLsbLt[i] = s.ltRefPicPocLsb[idx]
@@ -499,7 +499,7 @@ func parsePredWeightTable(c *getBits, h *sliceHeader, s *sps) error {
 
 	denom := c.ue()
 	if denom > 7 {
-		return errInvalid
+		return ErrInvalid
 	}
 
 	w.lumaLog2Denom = uint8(denom)
@@ -509,7 +509,7 @@ func parsePredWeightTable(c *getBits, h *sliceHeader, s *sps) error {
 		chromaDenom += c.se()
 
 		if chromaDenom < 0 || chromaDenom > 7 {
-			return errInvalid
+			return ErrInvalid
 		}
 	}
 

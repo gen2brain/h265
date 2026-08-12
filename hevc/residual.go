@@ -177,7 +177,7 @@ func decodeResidual(c *cabac, s *sps, p *pps, sh *sliceHeader, coef []int32,
 	}
 
 	if lastX >= n || lastY >= n {
-		return transformSkip, errInvalid
+		return transformSkip, ErrInvalid
 	}
 
 	sbLog2 := b.log2Size - 2
@@ -193,7 +193,7 @@ func decodeResidual(c *cabac, s *sps, p *pps, sh *sliceHeader, coef []int32,
 			lastSubBlock--
 
 			if lastSubBlock < 0 {
-				return transformSkip, errInvalid
+				return transformSkip, ErrInvalid
 			}
 		}
 

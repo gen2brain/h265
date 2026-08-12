@@ -141,7 +141,7 @@ func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
 
 	s, ok := d.sps[p.spsID]
 	if !ok {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	sh, err := parseSliceHeader(nal.RBSP, nal.Type, s, p)
@@ -151,7 +151,7 @@ func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
 
 	if sh.dependentSliceSegment {
 		if d.prevSlic == nil {
-			return nil, errInvalid
+			return nil, ErrInvalid
 		}
 
 		sh.inherit(d.prevSlic)
@@ -227,7 +227,7 @@ func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
 	}
 
 	if d.cur == nil || d.ctu == nil {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	d.ctu.sh = sh
@@ -255,12 +255,12 @@ func (d *Decoder) ppsForSlice(nal NALUnit) (*pps, error) {
 
 	id := c.ue()
 	if c.err {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	p, ok := d.pps[id]
 	if !ok {
-		return nil, errInvalid
+		return nil, ErrInvalid
 	}
 
 	return p, nil
@@ -346,7 +346,7 @@ func (d *ctuDecoder) decodeSliceData(nal NALUnit, sh *sliceHeader) error {
 
 		if endOfRow || endOfTile {
 			if d.c.decodeTerminate() == 0 {
-				return errInvalid
+				return ErrInvalid
 			}
 
 			sub++
@@ -389,7 +389,7 @@ func (d *ctuDecoder) startSubstream(nal NALUnit, sh *sliceHeader, starts []int, 
 	tileStart bool,
 ) error {
 	if i >= len(starts) {
-		return errInvalid
+		return ErrInvalid
 	}
 
 	if err := d.c.init(nal.RBSP, starts[i]); err != nil {

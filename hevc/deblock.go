@@ -236,6 +236,13 @@ func (d *ctuDecoder) deblockEdge(x, y int, vertical bool) {
 			continue
 		}
 
+		// The four-sample luma segment spans 4/subHeightC chroma rows on a
+		// vertical edge, and 4/subWidthC columns on a horizontal one.
+		n := 4 / sh
+		if !vertical {
+			n = 4 / sw
+		}
+
 		for cIdx := 1; cIdx <= 2; cIdx++ {
 			off := d.p.cbQPOffset
 			if cIdx == 2 {
@@ -246,11 +253,11 @@ func (d *ctuDecoder) deblockEdge(x, y int, vertical bool) {
 
 			if d.pic.BitDepth > 8 {
 				plane, stride := d.pic.plane16(cIdx)
-				deblockChroma(plane, stride, qx/sw, qy/sh, vertical, cqp, sl, d.pic.BitDepth,
+				deblockChroma(plane, stride, qx/sw, qy/sh, n, vertical, cqp, sl, d.pic.BitDepth,
 					noP, noQ)
 			} else {
 				plane, stride := d.pic.plane8(cIdx)
-				deblockChroma(plane, stride, qx/sw, qy/sh, vertical, cqp, sl, d.pic.BitDepth,
+				deblockChroma(plane, stride, qx/sw, qy/sh, n, vertical, cqp, sl, d.pic.BitDepth,
 					noP, noQ)
 			}
 		}
@@ -371,7 +378,7 @@ func deblockLuma[P pixel](plane []P, stride, x, y int, vertical bool, bs int, qp
 }
 
 // deblockChroma is 8.7.2.5.5, which only runs where the strength is two.
-func deblockChroma[P pixel](plane []P, stride, x, y int, vertical bool, qp int32,
+func deblockChroma[P pixel](plane []P, stride, x, y, n int, vertical bool, qp int32,
 	sh *sliceHeader, bitDepth int, noP, noQ bool,
 ) {
 	_, tc := betaTc(qp, 2, sh, bitDepth)
@@ -386,7 +393,7 @@ func deblockChroma[P pixel](plane []P, stride, x, y int, vertical bool, qp int32
 
 	base := y*stride + x
 
-	for l := range 2 {
+	for l := range n {
 		off := base + l*line
 
 		p0, p1 := int32(plane[off-step]), int32(plane[off-2*step])

@@ -65,7 +65,7 @@ func conformanceStream(v conformanceVector) string {
 func decodeMD5(data []byte) (digest string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = errInvalid
+			err = ErrInvalid
 		}
 	}()
 

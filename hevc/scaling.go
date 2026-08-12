@@ -61,7 +61,7 @@ func parseScalingListData(c *getBits, sl *scalingList) error {
 			if c.bit() == 0 {
 				delta := int(c.ue()) * step
 				if delta > matrixID {
-					return errInvalid
+					return ErrInvalid
 				}
 
 				if delta == 0 {
@@ -83,7 +83,7 @@ func parseScalingListData(c *getBits, sl *scalingList) error {
 			if sizeID > 1 {
 				dc := c.se()
 				if dc < -7 || dc > 247 {
-					return errInvalid
+					return ErrInvalid
 				}
 
 				next = dc + 8
@@ -98,7 +98,7 @@ func parseScalingListData(c *getBits, sl *scalingList) error {
 			for _, p := range scan {
 				d := c.se()
 				if d < -128 || d > 127 {
-					return errInvalid
+					return ErrInvalid
 				}
 
 				next = (next + d + 256) % 256
@@ -108,7 +108,7 @@ func parseScalingListData(c *getBits, sl *scalingList) error {
 	}
 
 	if c.err {
-		return errInvalid
+		return ErrInvalid
 	}
 
 	return nil

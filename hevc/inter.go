@@ -242,7 +242,7 @@ func (d *ctuDecoder) predictionUnit(x, y, w, h, partIdx, partMode, depth, nCbS, 
 			d.sh.sliceType == sliceB)
 
 		if idx >= len(cand) {
-			return errInvalid
+			return ErrInvalid
 		}
 
 		m = cand[idx]
@@ -282,7 +282,7 @@ func (d *ctuDecoder) predictionUnit(x, y, w, h, partIdx, partMode, depth, nCbS, 
 			flag := d.c.decodeBin(ctxMVPLXFlag)
 
 			if int(ref) >= len(lists[l]) {
-				return errInvalid
+				return ErrInvalid
 			}
 
 			ab, avail := amvpCandidates(nb, x, y, w, h, l, lists[l][ref], d.poc, lists,
@@ -340,12 +340,12 @@ func (d *ctuDecoder) motionCompensate(x, y, w, h int, m *mvInfo) error {
 		}
 
 		if int(m.refIdx[l]) >= len(d.refPics[l]) {
-			return errInvalid
+			return ErrInvalid
 		}
 
 		ref := d.refPics[l][m.refIdx[l]]
 		if ref == nil {
-			return errInvalid
+			return ErrInvalid
 		}
 
 		buf[l] = d.mcBuf[l][:w*h]
@@ -474,7 +474,7 @@ func combineInto[P pixel](d *ctuDecoder, dst []P, off, stride, w, h, cIdx, bd in
 		weightUni(dst, off, stride, buf[1], w, w, h, w1, o1, denom, bd,
 			d.s.highPrecisionOffsets)
 	default:
-		return errInvalid
+		return ErrInvalid
 	}
 
 	return nil
@@ -489,7 +489,7 @@ func combinePred[P pixel](dst []P, off, stride, w, h, bd int, buf [2][]int16, m 
 	case m.pred[1]:
 		predUni(dst, off, stride, buf[1], w, w, h, bd)
 	default:
-		return errInvalid
+		return ErrInvalid
 	}
 
 	return nil
