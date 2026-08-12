@@ -12,10 +12,11 @@ type Decoder struct {
 	ctuPrev  *ctuDecoder
 	prevSlic *sliceHeader
 
-	dpb    []dpbPicture
-	pool   picPool
-	poc    pocState
-	curRPS refPicSet
+	dpb     []dpbPicture
+	pool    picPool
+	threads int
+	poc     pocState
+	curRPS  refPicSet
 
 	// 8.1.3: leading pictures associated with an intra random access point
 	// that starts decoding reference pictures that were never decoded, and
@@ -234,6 +235,7 @@ func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
 		d.cur.POC = int(poc)
 		d.curOut = sh.picOutputFlag
 		d.ctu = newCTUDecoder(d.ctuPrev, s, p, sh, d.cur)
+		d.ctu.threads = d.waveThreads()
 		d.ctuPrev = d.ctu
 		d.ctu.poc = poc
 	}
@@ -310,6 +312,10 @@ func (d *ctuDecoder) decodeSliceData(nal NALUnit, sh *sliceHeader) error {
 
 	d.slices = append(d.slices, sh)
 	cur := int32(len(d.slices) - 1)
+
+	if n := d.waveWorkers(sh, starts, wpp); n > 1 {
+		return d.decodeWavefront(nal, sh, starts, cur, n)
+	}
 
 	for ts := start; ts < total; ts++ {
 		rs := int(d.tsToRs[ts])

@@ -102,6 +102,7 @@ type ctuDecoder struct {
 	depSaved    [nContexts]uint8
 	hasDepSaved bool
 
+	threads        int
 	sliceAddrRs    int
 	simpleAvail    bool
 	ctbSliceAddr   []int32
@@ -174,6 +175,7 @@ func newCTUDecoder(prev *ctuDecoder, s *sps, p *pps, sh *sliceHeader, pic *Pictu
 
 	saoSrc8, saoSrc16 := d.saoSrc8, d.saoSrc16
 	scaling, scalingFrom := d.scaling, d.scalingFrom
+	threads := d.threads
 
 	*d = ctuDecoder{
 		s: s, p: p, sh: sh, pic: pic,
@@ -212,6 +214,7 @@ func newCTUDecoder(prev *ctuDecoder, s *sps, p *pps, sh *sliceHeader, pic *Pictu
 
 		scaling:     scaling,
 		scalingFrom: scalingFrom,
+		threads:     threads,
 
 		qpYPrev: sh.qpY,
 		qpYCur:  sh.qpY,

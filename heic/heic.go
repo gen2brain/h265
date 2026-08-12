@@ -33,6 +33,7 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"runtime"
 
 	"github.com/gen2brain/h265/hevc"
 )
@@ -72,6 +73,10 @@ type Options struct {
 	// signals, so this is for reaching the samples, not for display.
 	// DecodeColor reports what the samples actually are.
 	ToYCbCr bool
+	// Threads bounds the goroutines a decode may use, over the tiles of a grid
+	// and the wavefront rows within each. Zero means GOMAXPROCS; one decodes
+	// serially.
+	Threads int
 }
 
 func options(opts []Options) Options {
@@ -87,6 +92,21 @@ type file struct {
 	meta           *metaBox
 	movie          *movie
 	frameSizeLimit int
+	threads        int
+}
+
+// workers is how many goroutines a grid may use, never more than it has tiles.
+func (f *file) workers(n int) int {
+	w := f.threads
+	if w == 0 {
+		w = runtime.GOMAXPROCS(0)
+	}
+
+	if n <= 0 {
+		return max(w, 1)
+	}
+
+	return max(min(w, n), 1)
 }
 
 // HEIC holds the images of a file, which may be an image sequence.
@@ -210,6 +230,13 @@ func isAlphaURN(s string) bool {
 type itemDecoder struct {
 	d   hevc.Decoder
 	cfg *hevcConfig
+}
+
+// use sets how many goroutines this decoder's wavefront may take.
+func (dec *itemDecoder) use(threads int) *itemDecoder {
+	dec.d.Threads(threads)
+
+	return dec
 }
 
 func (f *file) decodeItem(dec *itemDecoder, it *item) (*hevc.Picture, error) {
@@ -369,6 +396,7 @@ func decode(r io.Reader, opts ...Options) (image.Image, ColorInfo, error) {
 
 	o := options(opts)
 	f.frameSizeLimit = o.FrameSizeLimit
+	f.threads = o.Threads
 
 	return f.decodeStill(o)
 }
@@ -388,6 +416,7 @@ func DecodeAll(r io.Reader, opts ...Options) (*HEIC, error) {
 
 	o := options(opts)
 	f.frameSizeLimit = o.FrameSizeLimit
+	f.threads = o.Threads
 
 	if f.movie != nil {
 		seq, err := f.decodeSequence(o)

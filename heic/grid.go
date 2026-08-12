@@ -1,6 +1,9 @@
 package heic
 
 import (
+	"sync"
+	"sync/atomic"
+
 	"github.com/gen2brain/h265/hevc"
 )
 
@@ -61,7 +64,7 @@ func (f *file) decodeImage(it *item) (*hevc.Picture, error) {
 	if it.typ != "grid" {
 		var dec itemDecoder
 
-		return f.decodeItem(&dec, it)
+		return f.decodeItem(dec.use(f.workers(0)), it)
 	}
 
 	g, tiles, err := f.gridOf(it)
@@ -76,54 +79,144 @@ func (f *file) decodeImage(it *item) (*hevc.Picture, error) {
 	return f.decodeTiles(g, tiles)
 }
 
-// decodeTiles decodes the tiles one at a time and copies each into the output
-// as it arrives, so only one tile is held at once and one decoder serves them
-// all.
+// decodeTiles decodes the tiles and copies each into its place in the output.
 func (f *file) decodeTiles(g gridInfo, tiles []uint32) (*hevc.Picture, error) {
-	var (
-		dec itemDecoder
-		out *hevc.Picture
-		tw  int
-		th  int
-	)
-
-	for i, id := range tiles {
-		t := f.meta.items[id]
-		if t == nil {
-			return nil, ErrInvalid
-		}
-
-		pic, err := f.decodeItem(&dec, t)
-		if err != nil {
-			return nil, err
-		}
-
-		if out == nil {
-			tw, th = pic.CropW, pic.CropH
-			if tw*g.cols < g.w || th*g.rows < g.h {
-				return nil, ErrInvalid
-			}
-
-			out = newGrid(pic, g)
-		}
-
-		if pic.CropW != tw || pic.CropH != th ||
-			pic.ChromaFormat != out.ChromaFormat || pic.BitDepth != out.BitDepth {
-			return nil, ErrInvalid
-		}
-
-		blit(out, pic, g, i, tw, th)
-
-		// The tile is copied into the mosaic, so its samples go back to the
-		// decoder for the next one. The mosaic itself is not the decoder's.
-		pic.Release()
-	}
-
-	if out == nil {
+	if len(tiles) == 0 {
 		return nil, ErrInvalid
 	}
 
+	var (
+		out    *hevc.Picture
+		tw, th int
+		ready  = make(chan struct{})
+		next   atomic.Int64
+		fail   atomic.Pointer[error]
+		wg     sync.WaitGroup
+	)
+
+	setErr := func(err error) { fail.CompareAndSwap(nil, &err) }
+
+	next.Store(1)
+
+	// The tiles already spread across the budget, so each one's wavefront
+	// takes only what is left over rather than multiplying it.
+	tileWorkers := f.workers(len(tiles))
+	perTile := max(f.workers(0)/tileWorkers, 1)
+
+	for range tileWorkers - 1 {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			var dec itemDecoder
+
+			dec.use(perTile)
+
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(tiles) || fail.Load() != nil {
+					return
+				}
+
+				p, err := f.decodeTile(&dec, tiles[i])
+				if err != nil {
+					setErr(err)
+
+					return
+				}
+
+				<-ready
+
+				if fail.Load() != nil {
+					p.Release()
+
+					return
+				}
+
+				if p.CropW != tw || p.CropH != th ||
+					p.ChromaFormat != out.ChromaFormat || p.BitDepth != out.BitDepth {
+					p.Release()
+					setErr(ErrInvalid)
+
+					return
+				}
+
+				blit(out, p, g, i, tw, th)
+				p.Release()
+			}
+		}()
+	}
+
+	var dec itemDecoder
+
+	dec.use(perTile)
+
+	func() {
+		defer close(ready)
+
+		p, err := f.decodeTile(&dec, tiles[0])
+		if err != nil {
+			setErr(err)
+
+			return
+		}
+
+		defer p.Release()
+
+		tw, th = p.CropW, p.CropH
+		if tw*g.cols < g.w || th*g.rows < g.h {
+			setErr(ErrInvalid)
+
+			return
+		}
+
+		out = newGrid(p, g)
+
+		blit(out, p, g, 0, tw, th)
+	}()
+
+	for fail.Load() == nil {
+		i := int(next.Add(1)) - 1
+		if i >= len(tiles) {
+			break
+		}
+
+		p, err := f.decodeTile(&dec, tiles[i])
+		if err != nil {
+			setErr(err)
+
+			break
+		}
+
+		if p.CropW != tw || p.CropH != th ||
+			p.ChromaFormat != out.ChromaFormat || p.BitDepth != out.BitDepth {
+			p.Release()
+			setErr(ErrInvalid)
+
+			break
+		}
+
+		blit(out, p, g, i, tw, th)
+		p.Release()
+	}
+
+	wg.Wait()
+
+	if err := fail.Load(); err != nil {
+		return nil, *err
+	}
+
 	return out, nil
+}
+
+func (f *file) decodeTile(dec *itemDecoder, id uint32) (*hevc.Picture, error) {
+	t := f.meta.items[id]
+	if t == nil {
+		return nil, ErrInvalid
+	}
+
+	return f.decodeItem(dec, t)
 }
 
 // newGrid allocates the stitched picture, which may be smaller than the tiles

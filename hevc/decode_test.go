@@ -1,6 +1,7 @@
 package hevc
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
@@ -389,5 +390,67 @@ func TestDecodeAgainstManifest(t *testing.T) {
 
 	if seen != len(want) {
 		t.Errorf("checked %d streams, manifest has %d", seen, len(want))
+	}
+}
+
+// decodeThreads is decodeFile with the wavefront bounded and errors returned
+// rather than fatal, so a stream can be decoded both ways and compared even
+// when it is one of the fuzz cases that must be rejected.
+func decodeThreads(t *testing.T, path string, threads int) ([]*Picture, error) {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		d    Decoder
+		pics []*Picture
+	)
+
+	d.Threads(threads)
+
+	for _, nal := range SplitAnnexB(data) {
+		out, err := d.DecodeNAL(nal)
+		if err != nil {
+			return pics, err
+		}
+
+		pics = append(pics, out...)
+	}
+
+	return append(pics, d.Flush()...), nil
+}
+
+// TestWavefrontMatchesSerial holds the threaded wavefront to the serial loop it
+// replaces. Only streams with entropy_coding_sync take the threaded path, so
+// the rest of the corpus is checking that the two agree trivially.
+func TestWavefrontMatchesSerial(t *testing.T) {
+	streams, err := filepath.Glob(filepath.Join("testdata", "*.h265"))
+	if err != nil || len(streams) == 0 {
+		t.Skip("no streams")
+	}
+
+	for _, stream := range streams {
+		t.Run(filepath.Base(stream), func(t *testing.T) {
+			one, errOne := decodeThreads(t, stream, 1)
+			many, errMany := decodeThreads(t, stream, 8)
+
+			if (errOne == nil) != (errMany == nil) {
+				t.Fatalf("serial err %v, threaded err %v", errOne, errMany)
+			}
+
+			if len(one) != len(many) {
+				t.Fatalf("%d pictures serial, %d threaded", len(one), len(many))
+			}
+
+			for i := range one {
+				a, b := planarYUV(one[i]), planarYUV(many[i])
+				if !bytes.Equal(a, b) {
+					t.Fatalf("picture %d (POC %d) differs", i, one[i].POC)
+				}
+			}
+		})
 	}
 }
