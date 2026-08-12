@@ -63,9 +63,9 @@ func clampInt(v, lo, hi int) int {
 func mcLuma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
 	x, y, xFrac, yFrac, w, h, bitDepth int, scratch []int32, tmp16 []int16, pad []P,
 ) {
-	shift1 := bitDepth - 8
+	shift1 := min(4, bitDepth-8)
 	shift2 := 6
-	shift3 := 14 - bitDepth
+	shift3 := max(2, 14-bitDepth)
 
 	// The eight-tap support reaches three samples back and four forward. When
 	// it leaves the picture the region is copied out once with the edge
@@ -202,9 +202,9 @@ func mcLuma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
 func mcChroma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
 	x, y, xFrac, yFrac, w, h, bitDepth int, scratch []int32, tmp16 []int16, pad []P,
 ) {
-	shift1 := bitDepth - 8
+	shift1 := min(4, bitDepth-8)
 	shift2 := 6
-	shift3 := 14 - bitDepth
+	shift3 := max(2, 14-bitDepth)
 
 	// The four-tap support reaches one sample back and two forward.
 	ox, ew := 0, w
@@ -359,7 +359,7 @@ func emulate[P pixel](dst []P, src []P, srcStride, picW, picH, x, y, w, h int) {
 
 // predUni is the default uni-prediction of 8.5.3.3.4.2.
 func predUni[P pixel](dst []P, dstOff, dstStride int, src []int16, srcStride, w, h, bitDepth int) {
-	shift := 14 - bitDepth
+	shift := max(2, 14-bitDepth)
 
 	if k := predUniAsm; k != nil && bitDepth == 8 {
 		if p, ok := any(dst).([]uint8); ok {
@@ -394,7 +394,7 @@ func predUniGo[P pixel](dst []P, dstOff, dstStride int, src []int16, srcStride, 
 
 // predBi is the default bi-prediction of 8.5.3.3.4.2.
 func predBi[P pixel](dst []P, dstOff, dstStride int, a, b []int16, srcStride, w, h, bitDepth int) {
-	shift := 15 - bitDepth
+	shift := max(2, 14-bitDepth) + 1
 
 	if k := predBiAsm; k != nil && bitDepth == 8 {
 		if p, ok := any(dst).([]uint8); ok {
@@ -433,7 +433,7 @@ func predBiGo[P pixel](dst []P, dstOff, dstStride int, a, b []int16, srcStride, 
 func weightUni[P pixel](dst []P, dstOff, dstStride int, src []int16, srcStride,
 	w, h, weight, offset, denom, bitDepth int, highPrecision bool,
 ) {
-	shift1 := 14 - bitDepth
+	shift1 := max(2, 14-bitDepth)
 	log2Wd := denom + shift1
 	maxV := int32(1)<<bitDepth - 1
 
@@ -461,7 +461,7 @@ func weightUni[P pixel](dst []P, dstOff, dstStride int, src []int16, srcStride,
 func weightBi[P pixel](dst []P, dstOff, dstStride int, a, b []int16, srcStride,
 	w, h, w0, w1, o0, o1, denom, bitDepth int, highPrecision bool,
 ) {
-	shift1 := 14 - bitDepth
+	shift1 := max(2, 14-bitDepth)
 	log2Wd := denom + shift1
 	maxV := int32(1)<<bitDepth - 1
 
