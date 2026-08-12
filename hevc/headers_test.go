@@ -219,3 +219,104 @@ func TestDefaultScalingList(t *testing.T) {
 		}
 	}
 }
+
+// bitPut writes the Exp-Golomb forms of 9.2 so a syntax structure can be
+// assembled without a stream to carry it.
+type bitPut struct {
+	b   []byte
+	n   int
+	acc byte
+}
+
+func (p *bitPut) bit(v uint32) {
+	p.acc = p.acc<<1 | byte(v&1)
+	p.n++
+
+	if p.n == 8 {
+		p.b = append(p.b, p.acc)
+		p.acc, p.n = 0, 0
+	}
+}
+
+func (p *bitPut) ue(v uint32) {
+	n := v + 1
+
+	k := 0
+	for n>>(k+1) != 0 {
+		k++
+	}
+
+	for range k {
+		p.bit(0)
+	}
+
+	for i := k; i >= 0; i-- {
+		p.bit(n >> uint(i))
+	}
+}
+
+func (p *bitPut) se(v int32) {
+	if v > 0 {
+		p.ue(uint32(2*v - 1))
+
+		return
+	}
+
+	p.ue(uint32(-2 * v))
+}
+
+func (p *bitPut) bytes() []byte {
+	for p.n != 0 {
+		p.bit(0)
+	}
+
+	return append(p.b, 0, 0, 0, 0)
+}
+
+// TestPredWeightTableOffsetRange covers 7.4.7.3's WpOffsetHalfRangeC, which is
+// the sample depth under high_precision_offsets_enabled_flag and 128 otherwise.
+func TestPredWeightTableOffsetRange(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		highPrecision bool
+		bitDepth      uint8
+		want          [2]int16
+	}{
+		{"eight bit", false, 8, [2]int16{127, -128}},
+		{"ten bit high precision", true, 10, [2]int16{300, -300}},
+		{"ten bit", false, 10, [2]int16{127, -128}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var p bitPut
+
+			p.ue(0)
+			p.se(0)
+			p.bit(0)
+			p.bit(1)
+			p.se(0)
+			p.se(300)
+			p.se(0)
+			p.se(-300)
+
+			var g getBits
+
+			g.init(p.bytes())
+
+			s := &sps{
+				chromaFormatIDC:      1,
+				bitDepthChroma:       tt.bitDepth,
+				highPrecisionOffsets: tt.highPrecision,
+			}
+
+			h := &sliceHeader{sliceType: sliceP, numRefIdxL0Active: 1}
+
+			if err := parsePredWeightTable(&g, h, s); err != nil {
+				t.Fatal(err)
+			}
+
+			if got := h.weights.chromaOffset[0][0]; got != tt.want {
+				t.Fatalf("chromaOffset = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
