@@ -192,9 +192,11 @@ func newCTUDecoder(prev *ctuDecoder, s *sps, p *pps, sh *sliceHeader, pic *Pictu
 		skipped:    reuse(d.skipped, tbW*tbH),
 		noFilter:   reuse(d.noFilter, tbW*tbH),
 
-		mvField: reuse(d.mvField, mvW*mvH),
-		mvPoc:   reuse(d.mvPoc, mvW*mvH),
-		mvLong:  reuse(d.mvLong, mvW*mvH),
+		// Only mvValid says whether the three beside it mean anything, and
+		// every read of them is behind it, so they carry over unzeroed.
+		mvField: keep(d.mvField, mvW*mvH),
+		mvPoc:   keep(d.mvPoc, mvW*mvH),
+		mvLong:  keep(d.mvLong, mvW*mvH),
 		mvValid: reuse(d.mvValid, mvW*mvH),
 		blk:     reuse(d.blk, mvW*mvH),
 

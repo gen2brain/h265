@@ -33,11 +33,13 @@ func benchStream(b *testing.B, name string) {
 
 			for _, p := range out {
 				pixels += int64(p.Width * p.Height)
+				p.Release()
 			}
 		}
 
 		for _, p := range d.Flush() {
 			pixels += int64(p.Width * p.Height)
+			p.Release()
 		}
 	}
 
