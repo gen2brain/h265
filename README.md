@@ -5,17 +5,10 @@
 [HEVC](https://en.wikipedia.org/wiki/High_Efficiency_Video_Coding) video and
 [HEIC](https://en.wikipedia.org/wiki/High_Efficiency_Image_File_Format) image decoder in pure Go.
 
-No CGo, no dependencies.
+Byte-exact on the JCT-VC HEVC v1 conformance suite. No CGo, no dependencies.
 
-SIMD support for amd64 (AVX2), arm64 (NEON) and riscv64 (RVV, with `GORISCV64=rva23u64`) is planned.
+SIMD support for amd64 (AVX2, AVX-512), arm64 (NEON) and riscv64 (RVV, with `GORISCV64=rva23u64`).
 Build with `-tags noasm` for pure Go everywhere.
-
-### Status
-
-Under development, and single threaded for now. The bitstream decoder is byte-exact on all 97
-available JCT-VC HEVC v1 conformance vectors, and covers Main, Main10, Main12, monochrome and
-4:2:0, 4:2:2 and 4:4:4 chroma. The `heic` package reads still images, grids, alpha, image
-sequences, the `clap`/`irot`/`imir` transforms and Exif/XMP.
 
 ### Decoding
 
@@ -24,12 +17,7 @@ img, err := heic.Decode(r)
 ```
 
 `heic.Decode` returns `*image.NRGBA`, or `*image.NRGBA64` above 8 bits, and registers itself with
-`image.RegisterFormat`. It converts with the matrix and range the file declares; `image.YCbCr`
-reads its planes as full-range BT.601 whatever the file signals, so it is not the default.
-`Options{ToYCbCr: true}` hands back the planes unconverted and `DecodeColor` reports what they
-are. `DecodeAll` returns every frame of an image sequence.
-
-The `hevc` package decodes the bitstream on its own, a NAL unit at a time:
+`image.RegisterFormat`. The `hevc` package decodes the bitstream on its own, a NAL unit at a time:
 
 ```go
 d := hevc.Decoder{}
@@ -39,6 +27,16 @@ for _, nal := range nals {
     ...
 }
 ```
+
+### Supported
+
+8-16 bit, 4:2:0/4:2:2/4:4:4/monochrome, tiles, wavefronts, dependent slice segments, PCM, lossless,
+scaling lists, and the range extensions other than cross-component prediction, RDPCM and CABAC bypass
+alignment, which are refused rather than decoded wrongly. In the container alpha, `grid`,
+`clap`/`irot`/`imir`, `colr`, image sequences, Exif and XMP.
+
+Decoding is threaded over grid tiles and wavefront rows; `heic.Options.Threads` and
+`hevc.Decoder.Threads` bound it.
 
 ### License
 
