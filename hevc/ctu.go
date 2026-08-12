@@ -56,8 +56,14 @@ type ctuDecoder struct {
 	qgX, qgY int
 	qpCoded  bool
 	qpDelta  int32
-	statCoef [4]uint8
-	scaling  [maxScalingListSizes][maxScalingListMats][]uint8
+
+	// 8.6.1's CuQpOffsetCb and CuQpOffsetCr, coded once per chroma
+	// quantisation group when the picture carries an offset list.
+	cuOffCoded bool
+	cuOffCb    int32
+	cuOffCr    int32
+	statCoef   [4]uint8
+	scaling    [maxScalingListSizes][maxScalingListMats][]uint8
 
 	// scalingFrom is the list d.scaling was derived from. Parsing a parameter
 	// set yields a new one, so the pointer changing is the only invalidation.
@@ -397,6 +403,14 @@ func (d *ctuDecoder) codingQuadtree(x, y, log2Size, depth int) error {
 		d.qpYCur = d.qpYPred
 	}
 
+	// 7.3.8.4 restarts the chroma offset at its own depth, which need not be
+	// the one the luma delta uses.
+	if d.sh.cuChromaQPOffset &&
+		log2Size >= int(d.s.ctbLog2SizeY)-int(d.p.diffCuChromaQPOffsetDep) {
+		d.cuOffCoded = false
+		d.cuOffCb, d.cuOffCr = 0, 0
+	}
+
 	if !split {
 		return d.codingUnit(x, y, log2Size, depth)
 	}
@@ -476,6 +490,30 @@ func (d *ctuDecoder) parseCuQPDelta() {
 	// and index the scaling tables from below.
 	m := 52 + off
 	d.qpYCur = ((d.qpYPred+d.qpDelta+52+2*off)%m+m)%m - off
+}
+
+// parseCuChromaQPOffset is 7.3.8.10's cu_chroma_qp_offset_flag and the index
+// beside it, which pick an entry out of the lists 7.4.3.3.3 carries.
+func (d *ctuDecoder) parseCuChromaQPOffset() {
+	d.cuOffCoded = true
+	d.cuOffCb, d.cuOffCr = 0, 0
+
+	if d.c.decodeBin(ctxCUChromaQPOffsetFlag) == 0 {
+		return
+	}
+
+	idx := 0
+
+	// Truncated rice, so the prefix stops at the first zero or at the end of
+	// the list.
+	for cMax := int(d.p.chromaQPOffsetListLen) - 1; idx < cMax; idx++ {
+		if d.c.decodeBin(ctxCUChromaQPOffsetIDX) == 0 {
+			break
+		}
+	}
+
+	d.cuOffCb = d.p.cbQPOffsetList[idx]
+	d.cuOffCr = d.p.crQPOffsetList[idx]
 }
 
 // fill writes one value across every minimum transform block a coding block
@@ -789,6 +827,10 @@ func (d *ctuDecoder) transformUnit(x, y, xBase, yBase, log2Size, depth, blkIdx i
 		d.parseCuQPDelta()
 	}
 
+	if cbfChroma && !d.bypass && d.sh.cuChromaQPOffset && !d.cuOffCoded {
+		d.parseCuChromaQPOffset()
+	}
+
 	d.markTU(x, y, 1<<log2Size, 1<<log2Size, cbfLuma)
 
 	if err := d.reconstruct(x, y, log2Size, 0, mode, cbfLuma); err != nil {
@@ -901,9 +943,9 @@ func reconstructPlane[P pixel](d *ctuDecoder, plane []P, stride, x, y, log2Size,
 	qp := d.qpYCur + offY
 
 	if cIdx > 0 {
-		off := d.p.cbQPOffset + d.sh.cbQPOffset
+		off := d.p.cbQPOffset + d.sh.cbQPOffset + d.cuOffCb
 		if cIdx == 2 {
-			off = d.p.crQPOffset + d.sh.crQPOffset
+			off = d.p.crQPOffset + d.sh.crQPOffset + d.cuOffCr
 		}
 
 		qp = chromaQP(clip3(d.qpYCur+off, -offC, 57), d.s.chromaArrayType()) + offC

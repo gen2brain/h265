@@ -25,7 +25,7 @@ type conformanceSuite struct {
 
 var conformanceSuites = []conformanceSuite{
 	{"JCT-VC-HEVC_V1", 97},
-	{"JCT-VC-RExt", 11},
+	{"JCT-VC-RExt", 15},
 }
 
 func (s conformanceSuite) manifest() string {
