@@ -24,6 +24,20 @@ var planarAsm func(dst []uint8, stride int, r *refSamples, shift int)
 // implementation is compiled in. w is a multiple of eight.
 var predUniAsm func(dst []uint8, dstStride int, src []int16, srcStride, w, h, shift int)
 
+// mcLumaTapAsm is one direction of the eight-tap interpolation for eight-bit
+// samples, nil unless an implementation is compiled in. w is a multiple of
+// eight and src points at the first tap.
+var mcLumaTapAsm func(dst []int16, dstStride int, src []uint8, srcStride, tapStride, w, h int,
+	f *[8]int16)
+
+// mcCopyAsm is the integer-position case of 8.5.3.3.3 for eight-bit samples.
+var mcCopyAsm func(dst []int16, dstStride int, src []uint8, srcStride, w, h, shift int)
+
+// mcLumaTapV16Asm is the vertical half of the two-pass interpolation, reading
+// the first pass at sixteen bits.
+var mcLumaTapV16Asm func(dst []int16, dstStride int, src []int16, srcStride, w, h, shift int,
+	f *[8]int32)
+
 func newDSPGo() *dspContext {
 	return &dspContext{
 		inverseTransform: inverseTransform,

@@ -99,7 +99,7 @@ func TestMCLuma(t *testing.T) {
 
 						mcLuma(got, w, src, picW, picW, picH,
 							xy[0], xy[1], xFrac, yFrac, w, h, bitDepth,
-							make([]int32, 64*80), make([]uint8, 71*71))
+							make([]int32, 64*80), make([]int16, 64*80), make([]uint8, 71*71))
 						naiveMC(want, w, src, picW, picW, picH,
 							xy[0], xy[1], xFrac, yFrac, w, h, bitDepth, 8)
 

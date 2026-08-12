@@ -1,6 +1,19 @@
 package hevc
 
 // Table 8-11.
+// lumaFilter16 is the same table at the width the kernels multiply in.
+var lumaFilter16 = func() [4][8]int16 {
+	var f [4][8]int16
+
+	for i, row := range lumaFilter {
+		for j, v := range row {
+			f[i][j] = int16(v)
+		}
+	}
+
+	return f
+}()
+
 var lumaFilter = [4][8]int32{
 	{0, 0, 0, 64, 0, 0, 0, 0},
 	{-1, 4, -10, 58, 17, -5, 1, 0},
@@ -35,7 +48,7 @@ func clampInt(v, lo, hi int) int {
 // mcLuma is the luma sample interpolation of 8.5.3.3.3.1. It writes the
 // 14-bit intermediate the weighted prediction process consumes.
 func mcLuma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
-	x, y, xFrac, yFrac, w, h, bitDepth int, scratch []int32, pad []P,
+	x, y, xFrac, yFrac, w, h, bitDepth int, scratch []int32, tmp16 []int16, pad []P,
 ) {
 	shift1 := bitDepth - 8
 	shift2 := 6
@@ -65,8 +78,26 @@ func mcLuma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
 		return int32(src[py*srcStride+px])
 	}
 
+	// The kernels cover eight-bit samples at widths they can step through
+	// whole; anything else falls to the loops below.
+	asm := mcLumaTapAsm
+	if bitDepth != 8 || w%8 != 0 {
+		asm = nil
+	}
+
+	p8, _ := any(src).([]uint8)
+	if p8 == nil {
+		asm = nil
+	}
+
 	switch {
 	case xFrac == 0 && yFrac == 0:
+		if p8 != nil && w%8 == 0 && mcCopyAsm != nil {
+			mcCopyAsm(dst, dstStride, p8[y*srcStride+x:], srcStride, w, h, shift3)
+
+			return
+		}
+
 		for j := range h {
 			for i := range w {
 				dst[j*dstStride+i] = int16(at(x+i, y+j) << shift3)
@@ -74,6 +105,13 @@ func mcLuma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
 		}
 
 	case yFrac == 0:
+		if asm != nil {
+			asm(dst, dstStride, p8[y*srcStride+x-3:], srcStride, 1, w, h,
+				&lumaFilter16[xFrac])
+
+			return
+		}
+
 		f := &lumaFilter[xFrac]
 
 		for j := range h {
@@ -88,6 +126,13 @@ func mcLuma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
 		}
 
 	case xFrac == 0:
+		if asm != nil {
+			asm(dst, dstStride, p8[(y-3)*srcStride+x:], srcStride, srcStride, w, h,
+				&lumaFilter16[yFrac])
+
+			return
+		}
+
 		f := &lumaFilter[yFrac]
 
 		for j := range h {
@@ -102,6 +147,16 @@ func mcLuma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
 		}
 
 	default:
+		if asm != nil && mcLumaTapV16Asm != nil {
+			t := tmp16[:(h+7)*w]
+
+			asm(t, w, p8[(y-3)*srcStride+x-3:], srcStride, 1, w, h+7,
+				&lumaFilter16[xFrac])
+			mcLumaTapV16Asm(dst, dstStride, t, w, w, h, shift2, &lumaFilter[yFrac])
+
+			return
+		}
+
 		fx, fy := &lumaFilter[xFrac], &lumaFilter[yFrac]
 
 		tmp := scratch[:(h+7)*w]
@@ -160,8 +215,16 @@ func mcChroma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, pic
 		return int32(src[py*srcStride+px])
 	}
 
+	p8, _ := any(src).([]uint8)
+
 	switch {
 	case xFrac == 0 && yFrac == 0:
+		if p8 != nil && w%8 == 0 && bitDepth == 8 && mcCopyAsm != nil {
+			mcCopyAsm(dst, dstStride, p8[y*srcStride+x:], srcStride, w, h, shift3)
+
+			return
+		}
+
 		for j := range h {
 			for i := range w {
 				dst[j*dstStride+i] = int16(at(x+i, y+j) << shift3)

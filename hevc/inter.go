@@ -355,13 +355,13 @@ func (d *ctuDecoder) motionCompensate(x, y, w, h int, m *mvInfo) error {
 			mcLuma(buf[l], w, src, stride, ref.Width, ref.Height,
 				x+int(m.mv[l].x>>2), y+int(m.mv[l].y>>2),
 				int(m.mv[l].x&3), int(m.mv[l].y&3), w, h, d.pic.BitDepth,
-				d.mcTmp[:], d.mcPad16[:])
+				d.mcTmp[:], d.mcTmp16[:], d.mcPad16[:])
 		} else {
 			src, stride := ref.plane8(0)
 			mcLuma(buf[l], w, src, stride, ref.Width, ref.Height,
 				x+int(m.mv[l].x>>2), y+int(m.mv[l].y>>2),
 				int(m.mv[l].x&3), int(m.mv[l].y&3), w, h, d.pic.BitDepth,
-				d.mcTmp[:], d.mcPad8[:])
+				d.mcTmp[:], d.mcTmp16[:], d.mcPad8[:])
 		}
 	}
 

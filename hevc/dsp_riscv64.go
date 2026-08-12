@@ -12,6 +12,9 @@ func odd16RVV(out *int32, in *int32, m *int8, stride int)
 func predPlanar8RVV(dst *uint8, stride int, top *int32, left *int32, tr, bl, n, shift int)
 
 //go:noescape
+func mcCopy8RVV(dst *int16, dstStride int, src *uint8, srcStride, w, h, shift int)
+
+//go:noescape
 func predUni8RVV(dst *uint8, dstStride int, src *int16, srcStride, w, h, shift int)
 
 func dspInit(d *dspContext) {
@@ -21,6 +24,10 @@ func dspInit(d *dspContext) {
 
 	oddAsm = func(out, in []int32, stride int) {
 		odd16RVV(&out[0], &in[0], &transMatrix[0][0], stride)
+	}
+
+	mcCopyAsm = func(dst []int16, dstStride int, src []uint8, srcStride, w, h, shift int) {
+		mcCopy8RVV(&dst[0], dstStride, &src[0], srcStride, w, h, shift)
 	}
 
 	predUniAsm = func(dst []uint8, dstStride int, src []int16, srcStride, w, h, shift int) {
