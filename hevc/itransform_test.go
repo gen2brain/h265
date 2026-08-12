@@ -384,7 +384,7 @@ func TestAddResidual(t *testing.T) {
 // every block size and both shifts, with the block placed at an offset so a
 // stride error shows up.
 func TestAddResidualAsm(t *testing.T) {
-	k := dsp().addResidual8
+	k := dsp.addResidual8
 	if k == nil {
 		t.Skip("no assembly for this target")
 	}
@@ -419,6 +419,43 @@ func TestAddResidualAsm(t *testing.T) {
 						t.Fatalf("n=%d shift=%d: [%d] = %d, want %d",
 							n, shift, i, got[i], want[i])
 					}
+				}
+			}
+		}
+	}
+}
+
+// TestOddAsm checks any compiled-in butterfly against the Go one, with zero
+// coefficients mixed in since a zero skips a basis row.
+func TestOddAsm(t *testing.T) {
+	if oddAsm == nil {
+		t.Skip("no assembly for this target")
+	}
+
+	r := rand.New(rand.NewPCG(17, 18))
+
+	for _, c := range []struct{ n, stride int }{{16, 1}} {
+		for iter := range 500 {
+			in := make([]int32, 2*c.n)
+			for i := range in {
+				// Later iterations are increasingly sparse.
+				if iter%4 != 0 && r.IntN(4) != 0 {
+					continue
+				}
+
+				in[i] = int32(r.IntN(1<<16) - 1<<15)
+			}
+
+			got := make([]int32, c.n)
+			want := make([]int32, c.n)
+
+			oddAsm(got, in, c.stride)
+			oddGo(want, in, c.stride)
+
+			for i := range got {
+				if got[i] != want[i] {
+					t.Fatalf("n=%d stride=%d in=%v: [%d] = %d, want %d",
+						c.n, c.stride, in, i, got[i], want[i])
 				}
 			}
 		}

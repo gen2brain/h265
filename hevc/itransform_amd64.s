@@ -68,3 +68,50 @@ cols:
 
 	VZEROUPPER
 	RET
+
+// func odd16AVX2(out *int32, in *int32, m *int8, stride int)
+//
+// out[i] = sum over j of m[(2j+1)*stride][i] * in[2j+1], sixteen wide. The
+// accumulators stay in registers, and a zero coefficient skips a row.
+TEXT ·odd16AVX2(SB), NOSPLIT, $0-32
+	MOVQ out+0(FP), DI
+	MOVQ in+8(FP), SI
+	MOVQ m+16(FP), DX
+	MOVQ stride+24(FP), R8
+
+	LEAQ 4(SI), R10
+
+	// The first basis row is stride rows in, and each step advances by two.
+	MOVQ R8, R11
+	SHLQ $5, R11
+	ADDQ R11, DX
+	SHLQ $1, R11
+
+	VPXOR Y0, Y0, Y0
+	VPXOR Y1, Y1, Y1
+
+	MOVQ $16, R12
+
+loop:
+	MOVL  (R10), AX
+	TESTL AX, AX
+	JZ    skip
+
+	VPBROADCASTD (R10), Y4
+	VPMOVSXBD    (DX), Y2
+	VPMOVSXBD    8(DX), Y3
+	VPMULLD      Y4, Y2, Y2
+	VPMULLD      Y4, Y3, Y3
+	VPADDD       Y2, Y0, Y0
+	VPADDD       Y3, Y1, Y1
+
+skip:
+	ADDQ $8, R10
+	ADDQ R11, DX
+	DECQ R12
+	JNZ  loop
+
+	VMOVDQU Y0, (DI)
+	VMOVDQU Y1, 32(DI)
+	VZEROUPPER
+	RET

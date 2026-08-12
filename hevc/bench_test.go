@@ -72,7 +72,7 @@ func BenchmarkAddResidual(b *testing.B) {
 			b.ReportMetric(float64(n*n)*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
 		})
 
-		if k := dsp().addResidual8; k != nil {
+		if k := dsp.addResidual8; k != nil {
 			b.Run(fmt.Sprintf("asm/%dx%d", n, n), func(b *testing.B) {
 				for b.Loop() {
 					k(plane, n, coef, n, 12)
@@ -81,5 +81,28 @@ func BenchmarkAddResidual(b *testing.B) {
 				b.ReportMetric(float64(n*n)*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
 			})
 		}
+	}
+}
+
+func BenchmarkOdd(b *testing.B) {
+	in := make([]int32, 32)
+	for i := range in {
+		in[i] = int32(i*4099%32768 - 16384)
+	}
+
+	out := make([]int32, 16)
+
+	b.Run("go", func(b *testing.B) {
+		for b.Loop() {
+			oddGo(out, in, 1)
+		}
+	})
+
+	if oddAsm != nil {
+		b.Run("asm", func(b *testing.B) {
+			for b.Loop() {
+				oddAsm(out, in, 1)
+			}
+		})
 	}
 }

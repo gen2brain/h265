@@ -122,7 +122,7 @@ func idct8(out, in []int32) {
 	ev[0], ev[1], ev[2], ev[3] = in[0], in[2], in[4], in[6]
 	idct4(e[:], ev[:])
 
-	odd(o[:], in, 4)
+	oddGo(o[:], in, 4)
 
 	for i, v := range e {
 		out[i] = v + o[i]
@@ -138,7 +138,7 @@ func idct16(out, in []int32) {
 	}
 
 	idct8(e[:], ev[:])
-	odd(o[:], in, 2)
+	oddGo(o[:], in, 2)
 
 	for i, v := range e {
 		out[i] = v + o[i]
@@ -154,7 +154,14 @@ func idct32(out, in []int32) {
 	}
 
 	idct16(e[:], ev[:])
-	odd(o[:], in, 1)
+
+	// Only the widest butterfly is worth an assembly call; below sixteen the
+	// call costs more than the vectors save.
+	if k := oddAsm; k != nil {
+		k(o[:], in, 1)
+	} else {
+		oddGo(o[:], in, 1)
+	}
 
 	for i, v := range e {
 		out[i] = v + o[i]
@@ -162,9 +169,9 @@ func idct32(out, in []int32) {
 	}
 }
 
-// odd accumulates the odd half of one level, a basis row at a time so the
+// oddGo accumulates the odd half of one level, a basis row at a time so the
 // matrix is indexed once per coefficient and a zero one costs nothing.
-func odd(out, in []int32, stride int) {
+func oddGo(out, in []int32, stride int) {
 	clear(out)
 
 	for j := range out {
