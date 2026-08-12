@@ -58,9 +58,13 @@ type ctuDecoder struct {
 	qpDelta  int32
 	statCoef [4]uint8
 	scaling  [maxScalingListSizes][maxScalingListMats][]uint8
-	saoType  [3]int
-	eoClass  [2]int
-	sao      [][3]saoParams
+
+	// scalingFrom is the list d.scaling was derived from. Parsing a parameter
+	// set yields a new one, so the pointer changing is the only invalidation.
+	scalingFrom *scalingList
+	saoType     [3]int
+	eoClass     [2]int
+	sao         [][3]saoParams
 
 	blk       []blockInfo
 	mvField   []mvInfo
@@ -101,7 +105,7 @@ type ctuDecoder struct {
 	sliceAddrRs    int
 	simpleAvail    bool
 	ctbSliceAddr   []int32
-	sliceLF        map[int32]bool
+	sliceLF        []bool
 	ctbSlice       []int32
 	slices         []*sliceHeader
 	depSliceAddrRs int
@@ -169,6 +173,7 @@ func newCTUDecoder(prev *ctuDecoder, s *sps, p *pps, sh *sliceHeader, pic *Pictu
 	ctbs := int(s.picWidthInCtbs) * int(s.picHeightInCtbs)
 
 	saoSrc8, saoSrc16 := d.saoSrc8, d.saoSrc16
+	scaling, scalingFrom := d.scaling, d.scalingFrom
 
 	*d = ctuDecoder{
 		s: s, p: p, sh: sh, pic: pic,
@@ -194,7 +199,7 @@ func newCTUDecoder(prev *ctuDecoder, s *sps, p *pps, sh *sliceHeader, pic *Pictu
 		ctbSliceAddr: reuse(d.ctbSliceAddr, ctbs),
 		ctbSlice:     reuse(d.ctbSlice, ctbs),
 		sao:          reuse(d.sao, ctbs),
-		sliceLF:      make(map[int32]bool),
+		sliceLF:      reuse(d.sliceLF, ctbs),
 
 		rsToTs:  d.rsToTs,
 		tsToRs:  d.tsToRs,
@@ -204,6 +209,9 @@ func newCTUDecoder(prev *ctuDecoder, s *sps, p *pps, sh *sliceHeader, pic *Pictu
 
 		saoSrc8:  saoSrc8,
 		saoSrc16: saoSrc16,
+
+		scaling:     scaling,
+		scalingFrom: scalingFrom,
 
 		qpYPrev: sh.qpY,
 		qpYCur:  sh.qpY,
@@ -222,11 +230,21 @@ func newCTUDecoder(prev *ctuDecoder, s *sps, p *pps, sh *sliceHeader, pic *Pictu
 		d.buildMinTbAddr(tbH)
 	}
 
+	sl := (*scalingList)(nil)
+
 	if s.scalingListEnabled {
+		sl = &s.scalingList
 		if p.scalingListPresent {
-			d.scaling = p.scalingList.factors()
-		} else {
-			d.scaling = s.scalingList.factors()
+			sl = &p.scalingList
+		}
+	}
+
+	if sl != d.scalingFrom {
+		d.scalingFrom = sl
+		d.scaling = [maxScalingListSizes][maxScalingListMats][]uint8{}
+
+		if sl != nil {
+			d.scaling = sl.factors()
 		}
 	}
 

@@ -13,6 +13,7 @@ type Decoder struct {
 	prevSlic *sliceHeader
 
 	dpb    []dpbPicture
+	pool   picPool
 	poc    pocState
 	curRPS refPicSet
 
@@ -108,7 +109,14 @@ func (d *Decoder) Flush() []*Picture {
 		out = append(out, p)
 	}
 
-	d.cur, d.ctu, d.prevSlic, d.dpb = nil, nil, nil, nil
+	d.cur, d.ctu, d.prevSlic = nil, nil, nil
+
+	for i := range d.dpb {
+		d.dpb[i].pic.release()
+	}
+
+	clear(d.dpb)
+	d.dpb = d.dpb[:0]
 
 	return out
 }
@@ -222,7 +230,7 @@ func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
 
 		d.curRPS = rps
 
-		d.cur = newPicture(s)
+		d.cur = newPicture(&d.pool, s)
 		d.cur.POC = int(poc)
 		d.curOut = sh.picOutputFlag
 		d.ctu = newCTUDecoder(d.ctuPrev, s, p, sh, d.cur)
@@ -298,7 +306,7 @@ func (d *ctuDecoder) decodeSliceData(nal NALUnit, sh *sliceHeader) error {
 
 	wpp := d.p.entropyCodingSync
 
-	d.sliceLF[int32(d.sliceAddrRs)] = sh.loopFilterAcross
+	d.sliceLF[d.sliceAddrRs] = sh.loopFilterAcross
 
 	d.slices = append(d.slices, sh)
 	cur := int32(len(d.slices) - 1)

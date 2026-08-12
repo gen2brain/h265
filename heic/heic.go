@@ -204,9 +204,15 @@ func isAlphaURN(s string) bool {
 		s == "urn:mpeg:hevc:2015:auxid:1"
 }
 
-// decodeItem decodes one hvc1 item to a picture. d is reused across the tiles
-// of a grid, which keeps the per-picture buffers allocated once.
-func (f *file) decodeItem(d *hevc.Decoder, it *item) (*hevc.Picture, error) {
+// itemDecoder carries the decoder across the tiles of a grid, which keeps the
+// per-picture buffers allocated once, together with the configuration already
+// fed to it so the tiles after the first skip the parameter sets they share.
+type itemDecoder struct {
+	d   hevc.Decoder
+	cfg *hevcConfig
+}
+
+func (f *file) decodeItem(dec *itemDecoder, it *item) (*hevc.Picture, error) {
 	if it.typ == "grid" {
 		return nil, ErrUnsupported
 	}
@@ -231,21 +237,25 @@ func (f *file) decodeItem(d *hevc.Decoder, it *item) (*hevc.Picture, error) {
 		}
 	}
 
-	for _, nal := range cfg.hvcC.paramSets {
-		u, ok := hevc.ParseNAL(nal)
-		if !ok {
-			return nil, ErrInvalid
+	if dec.cfg != cfg.hvcC {
+		for _, nal := range cfg.hvcC.paramSets {
+			u, ok := hevc.ParseNAL(nal)
+			if !ok {
+				return nil, ErrInvalid
+			}
+
+			if _, err := dec.d.DecodeNAL(u); err != nil {
+				return nil, wrap(err)
+			}
 		}
 
-		if _, err := d.DecodeNAL(u); err != nil {
-			return nil, wrap(err)
-		}
+		dec.cfg = cfg.hvcC
 	}
 
 	var out []*hevc.Picture
 
 	for _, u := range hevc.SplitHVCC(data, cfg.hvcC.lengthSize) {
-		pics, err := d.DecodeNAL(u)
+		pics, err := dec.d.DecodeNAL(u)
 		if err != nil {
 			return nil, wrap(err)
 		}
@@ -253,7 +263,7 @@ func (f *file) decodeItem(d *hevc.Decoder, it *item) (*hevc.Picture, error) {
 		out = append(out, pics...)
 	}
 
-	out = append(out, d.Flush()...)
+	out = append(out, dec.d.Flush()...)
 
 	if len(out) == 0 {
 		return nil, ErrInvalid

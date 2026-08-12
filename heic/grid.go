@@ -59,9 +59,9 @@ func (f *file) decodeImage(it *item) (*hevc.Picture, error) {
 	}
 
 	if it.typ != "grid" {
-		var d hevc.Decoder
+		var dec itemDecoder
 
-		return f.decodeItem(&d, it)
+		return f.decodeItem(&dec, it)
 	}
 
 	g, tiles, err := f.gridOf(it)
@@ -81,7 +81,7 @@ func (f *file) decodeImage(it *item) (*hevc.Picture, error) {
 // all.
 func (f *file) decodeTiles(g gridInfo, tiles []uint32) (*hevc.Picture, error) {
 	var (
-		d   hevc.Decoder
+		dec itemDecoder
 		out *hevc.Picture
 		tw  int
 		th  int
@@ -93,7 +93,7 @@ func (f *file) decodeTiles(g gridInfo, tiles []uint32) (*hevc.Picture, error) {
 			return nil, ErrInvalid
 		}
 
-		pic, err := f.decodeItem(&d, t)
+		pic, err := f.decodeItem(&dec, t)
 		if err != nil {
 			return nil, err
 		}
@@ -113,6 +113,10 @@ func (f *file) decodeTiles(g gridInfo, tiles []uint32) (*hevc.Picture, error) {
 		}
 
 		blit(out, pic, g, i, tw, th)
+
+		// The tile is copied into the mosaic, so its samples go back to the
+		// decoder for the next one. The mosaic itself is not the decoder's.
+		pic.Release()
 	}
 
 	if out == nil {

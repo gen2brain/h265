@@ -1,6 +1,9 @@
 package heic
 
-import "errors"
+import (
+	"errors"
+	"slices"
+)
 
 // ErrInvalid is returned when a file is not a HEIF, or is malformed past the
 // point where anything can be decoded from it.
@@ -64,10 +67,33 @@ func (r *reader) u16() uint16 { return uint16(r.uint(2)) }
 func (r *reader) u32() uint32 { return uint32(r.uint(4)) }
 func (r *reader) u64() uint64 { return r.uint(8) }
 
+// boxNames interns the four-character codes the parser compares against, so
+// reading a header allocates nothing. An unknown box is skipped on its size
+// alone, and its name never leaves this function.
+var boxNames = func() map[[4]byte]string {
+	m := make(map[[4]byte]string)
+
+	for _, s := range []string{
+		"ftyp", "meta", "hdlr", "pitm", "iinf", "infe", "iloc", "iref", "iprp",
+		"ipco", "ipma", "hvcC", "ispe", "colr", "pixi", "irot", "imir", "clap",
+		"auxC", "idat", "mdat", "moov", "trak", "mdia", "minf", "stbl", "stsd",
+		"stts", "stsc", "stsz", "stco", "co64", "tkhd", "mvhd", "hvc1", "hvc2",
+		"grid", "Exif", "mime", "iprd", "free", "skip", "url ", "dinf", "dref",
+	} {
+		m[[4]byte([]byte(s))] = s
+	}
+
+	return m
+}()
+
 func (r *reader) str4() string {
 	b := r.bytes(4)
 	if b == nil {
 		return ""
+	}
+
+	if s, ok := boxNames[[4]byte(b)]; ok {
+		return s
 	}
 
 	return string(b)
@@ -512,6 +538,8 @@ func (m *metaBox) parseIpma(b []byte) error {
 		it := m.item(id)
 
 		n := int(r.u8())
+		it.props = slices.Grow(it.props, n)
+
 		for range n {
 			var idx int
 			var essential bool
@@ -631,6 +659,8 @@ func parseHvcC(r *reader) (*hevcConfig, error) {
 		r.skip(1)
 
 		n := int(r.u16())
+		c.paramSets = slices.Grow(c.paramSets, n)
+
 		for range n {
 			nal := r.bytes(int(r.u16()))
 			if r.err {

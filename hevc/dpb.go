@@ -246,7 +246,11 @@ func (d *Decoder) dpbRemoveUnused() {
 	for _, e := range d.dpb {
 		if e.ref || e.output {
 			kept = append(kept, e)
+
+			continue
 		}
+
+		e.pic.release()
 	}
 
 	clear(d.dpb[len(kept):])
@@ -282,6 +286,10 @@ func (d *Decoder) dpbBump() *Picture {
 
 	p := d.dpb[best].pic
 	d.dpb[best].output = false
+
+	// The caller takes a reference of its own; the buffer entry may be the
+	// last one and drop in dpbRemoveUnused.
+	p.acquire()
 
 	d.dpbRemoveUnused()
 
@@ -375,7 +383,7 @@ func (d *Decoder) generateUnavailable(rps *refPicSet, s *sps) {
 			return
 		}
 
-		p := newPicture(s)
+		p := newPicture(&d.pool, s)
 		p.POC = int(poc)
 
 		mid8 := uint8(1) << (p.BitDepth - 1)
