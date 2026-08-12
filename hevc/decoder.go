@@ -327,16 +327,19 @@ func (d *ctuDecoder) decodeSliceData(nal NALUnit, sh *sliceHeader) error {
 
 		if wpp && rs%w == 0 {
 			// 9.3.1 syncs from the block above-right, but only when 6.4.1
-			// makes it available; a new slice starting on a row boundary has
-			// to initialise instead.
+			// makes it available. A new slice starting on a row boundary has
+			// to initialise instead, and so does every row of a picture one
+			// block wide, which never has that neighbour at all.
 			top := rs - w + 1
-			availT := rs >= w && top >= d.sliceAddrRs &&
+			availT := w >= 2 && rs >= w && top >= d.sliceAddrRs &&
 				d.tileID[d.rsToTs[rs]] == d.tileID[d.rsToTs[top]]
+
+			oneWide := w < 2 && rs > 0
 
 			switch {
 			case availT && d.hasSaved:
 				d.c.state = d.saved
-			case ts > start:
+			case ts > start || oneWide:
 				d.c.initContexts(sh.qpY, sh.sliceType, sh.cabacInit)
 			}
 

@@ -24,7 +24,7 @@ type conformanceSuite struct {
 }
 
 var conformanceSuites = []conformanceSuite{
-	{"JCT-VC-HEVC_V1", 97},
+	{"JCT-VC-HEVC_V1", 147},
 	{"JCT-VC-RExt", 22},
 }
 

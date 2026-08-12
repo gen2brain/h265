@@ -24,7 +24,10 @@ func (d *Decoder) waveThreads() int {
 func (d *ctuDecoder) waveWorkers(sh *sliceHeader, starts []int, wpp bool) int {
 	w := int(d.s.picWidthInCtbs)
 
-	if !wpp || d.p.tilesEnabled || len(starts) < 2 {
+	// 9.3.1 hands a row the state of the block above-right, which a picture one
+	// block wide does not have: every row initialises instead, and each one
+	// needs the whole row above reconstructed before it starts.
+	if !wpp || d.p.tilesEnabled || len(starts) < 2 || w < 2 {
 		return 1
 	}
 
