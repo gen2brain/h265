@@ -73,3 +73,88 @@ next:
 
 	VZEROUPPER
 	RET
+
+// func predUni8AVX512(dst *uint8, dstStride int, src *int16, srcStride, w, h, shift int)
+//
+// The 512-bit down-convert saturates unsigned only, so the negative half of the
+// clip is a max against zero rather than a signed pack.
+TEXT ·predUni8AVX512(SB), NOSPLIT, $0-56
+	MOVQ dst+0(FP), DI
+	MOVQ dstStride+8(FP), SI
+	MOVQ src+16(FP), DX
+	MOVQ w+32(FP), R8
+	MOVQ h+40(FP), R9
+	MOVQ shift+48(FP), R10
+
+	MOVQ $1, AX
+	MOVQ R10, CX
+	DECQ CX
+	SHLQ CX, AX
+	MOVQ AX, X1
+
+	VPBROADCASTW X1, Z1
+	MOVQ         R10, X2
+	VPXORD       Z3, Z3, Z3
+
+	MOVQ srcStride+24(FP), CX
+	SHLQ $1, CX
+
+rows512:
+	MOVQ DI, R11
+	MOVQ DX, R12
+	MOVQ R8, R13
+
+wide512:
+	CMPQ R13, $32
+	JLT  half512
+
+	VMOVDQU32 (R12), Z0
+	VPADDSW   Z1, Z0, Z0
+	VPSRAW    X2, Z0, Z0
+	VPMAXSW   Z3, Z0, Z0
+	VPMOVUSWB Z0, (R11)
+
+	ADDQ $64, R12
+	ADDQ $32, R11
+	SUBQ $32, R13
+	JMP  wide512
+
+half512:
+	CMPQ R13, $16
+	JLT  narrow512
+
+	VMOVDQU   (R12), Y0
+	VPADDSW   Y1, Y0, Y0
+	VPSRAW    X2, Y0, Y0
+	VPACKUSWB Y0, Y0, Y0
+	VPERMQ    $0xd8, Y0, Y0
+	VMOVDQU   X0, (R11)
+
+	ADDQ $32, R12
+	ADDQ $16, R11
+	SUBQ $16, R13
+	JMP  half512
+
+narrow512:
+	TESTQ R13, R13
+	JZ    next512
+
+	VMOVDQU   (R12), X0
+	VPADDSW   X1, X0, X0
+	VPSRAW    X2, X0, X0
+	VPACKUSWB X0, X0, X0
+	MOVQ      X0, (R11)
+
+	ADDQ $16, R12
+	ADDQ $8, R11
+	SUBQ $8, R13
+	JMP  narrow512
+
+next512:
+	ADDQ SI, DI
+	ADDQ CX, DX
+	DECQ R9
+	JNZ  rows512
+
+	VZEROUPPER
+	RET

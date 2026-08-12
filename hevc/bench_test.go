@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func benchStream(b *testing.B, name string) {
@@ -56,6 +57,84 @@ func BenchmarkDecode720p(b *testing.B)  { benchStream(b, "realworld_720p.h265") 
 func BenchmarkDecode1080p(b *testing.B) { benchStream(b, "1080p.h265") }
 func BenchmarkDecodeTiles(b *testing.B) { benchStream(b, "tiles.h265") }
 func BenchmarkDecode10Bit(b *testing.B) { benchStream(b, "10bit_128x128.h265") }
+
+// wideSpeedup times f with the wide kernels on and off, alternating which runs
+// first and keeping the fastest observation of each. Ordinary benchmarks cannot
+// do this: their sub-benchmarks run in sequence, which on a laptop charges the
+// first one for whatever the machine was doing when it started.
+func wideSpeedup(t *testing.T, rounds, inner int, f func()) (on, off time.Duration) {
+	t.Helper()
+
+	on, off = time.Hour, time.Hour
+
+	for r := range rounds {
+		for i := range 2 {
+			wide := i == 0
+			if r%2 == 1 {
+				wide = !wide
+			}
+
+			setWideKernels(wide)
+
+			start := time.Now()
+
+			for range inner {
+				f()
+			}
+
+			d := time.Since(start) / time.Duration(inner)
+
+			if wide && d < on {
+				on = d
+			} else if !wide && d < off {
+				off = d
+			}
+		}
+	}
+
+	setWideKernels(true)
+
+	return on, off
+}
+
+// TestWideSpeedup reports what the 512-bit kernels are worth end to end. It is
+// a measurement rather than a gate: the ratio is well inside the noise of any
+// machine that also has something else to do.
+func TestWideSpeedup(t *testing.T) {
+	if testing.Short() || !wideKernels() {
+		t.Skip("no wide kernels to compare")
+	}
+
+	for _, name := range []string{"realworld_320x240.h265", "realworld_720p.h265", "1080p.h265"} {
+		data, err := os.ReadFile(filepath.Join("testdata", name))
+		if err != nil {
+			t.Skip(err)
+		}
+
+		nals := SplitAnnexB(data)
+
+		on, off := wideSpeedup(t, 20, 1, func() {
+			var d Decoder
+
+			for _, nal := range nals {
+				out, err := d.DecodeNAL(nal)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				for _, p := range out {
+					p.Release()
+				}
+			}
+
+			for _, p := range d.Flush() {
+				p.Release()
+			}
+		})
+
+		t.Logf("%-24s wide %v narrow %v  %.3fx", name, on, off, float64(off)/float64(on))
+	}
+}
 
 func BenchmarkAddResidual(b *testing.B) {
 	for _, n := range []int{8, 16, 32} {

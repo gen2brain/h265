@@ -2,9 +2,14 @@
 
 package hevc
 
-var hasAVX2 = cpuidAVX2()
+var (
+	hasAVX2   = cpuidAVX2()
+	hasAVX512 = cpuidAVX512ICL()
+)
 
 func cpuidAVX2() bool
+
+func cpuidAVX512ICL() bool
 
 //go:noescape
 func addResidual8AVX2(dst *uint8, stride int, coef *int32, n, shift int)
@@ -22,6 +27,9 @@ func predPlanar8AVX2(dst *uint8, stride int, top *int32, left *int32, tr, bl, n,
 func predUni8AVX2(dst *uint8, dstStride int, src *int16, srcStride, w, h, shift int)
 
 //go:noescape
+func predUni8AVX512(dst *uint8, dstStride int, src *int16, srcStride, w, h, shift int)
+
+//go:noescape
 func mcTap8AVX2(dst *int16, dstStride int, src *uint8, srcStride, tapStride, w, h int, f *int16)
 
 //go:noescape
@@ -37,7 +45,13 @@ func mcTapV16x4AVX2(dst *int16, dstStride int, src *int16, srcStride, w, h, shif
 func mcCopy8AVX2(dst *int16, dstStride int, src *uint8, srcStride, w, h, shift int)
 
 //go:noescape
+func mcCopy8AVX512(dst *int16, dstStride int, src *uint8, srcStride, w, h, shift int)
+
+//go:noescape
 func predBi8AVX2(dst *uint8, dstStride int, a, b *int16, srcStride, w, h, shift int)
+
+//go:noescape
+func predBi8AVX512(dst *uint8, dstStride int, a, b *int16, srcStride, w, h, shift int)
 
 //go:noescape
 func idctCols8AVX2(dst, src, m *int32, n, mstride, shift int, rnd, lo, hi int32)
@@ -47,6 +61,9 @@ func transpose8AVX2(dst, src *int32, n int)
 
 //go:noescape
 func dequant32AVX2(coef *int32, m *uint8, n int, ls, rnd, sh, lo, hi int32)
+
+//go:noescape
+func dequant32AVX512(coef *int32, m *uint8, n int, ls, rnd, sh, lo, hi int32)
 
 func dspInit(d *dspContext) {
 	if !hasAVX2 {
@@ -104,18 +121,42 @@ func dspInit(d *dspContext) {
 			mp = &m[0]
 		}
 
+		if hasAVX512 && len(coef) >= 64 {
+			dequant32AVX512(&coef[0], mp, len(coef), ls, rnd, int32(sh), lo, hi)
+
+			return
+		}
+
 		dequant32AVX2(&coef[0], mp, len(coef), ls, rnd, int32(sh), lo, hi)
 	}
 
 	mcCopyAsm = func(dst []int16, dstStride int, src []uint8, srcStride, w, h, shift int) {
+		if hasAVX512 && w >= 32 {
+			mcCopy8AVX512(&dst[0], dstStride, &src[0], srcStride, w, h, shift)
+
+			return
+		}
+
 		mcCopy8AVX2(&dst[0], dstStride, &src[0], srcStride, w, h, shift)
 	}
 
 	predBiAsm = func(dst []uint8, dstStride int, a, b []int16, srcStride, w, h, shift int) {
+		if hasAVX512 && w >= 32 {
+			predBi8AVX512(&dst[0], dstStride, &a[0], &b[0], srcStride, w, h, shift)
+
+			return
+		}
+
 		predBi8AVX2(&dst[0], dstStride, &a[0], &b[0], srcStride, w, h, shift)
 	}
 
 	predUniAsm = func(dst []uint8, dstStride int, src []int16, srcStride, w, h, shift int) {
+		if hasAVX512 && w >= 32 {
+			predUni8AVX512(&dst[0], dstStride, &src[0], srcStride, w, h, shift)
+
+			return
+		}
+
 		predUni8AVX2(&dst[0], dstStride, &src[0], srcStride, w, h, shift)
 	}
 

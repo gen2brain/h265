@@ -200,76 +200,78 @@ func TestInverseTransform2D(t *testing.T) {
 }
 
 func TestDequant(t *testing.T) {
-	r := rand.New(rand.NewPCG(7, 8))
+	eachWidth(t, func(t *testing.T) {
+		r := rand.New(rand.NewPCG(7, 8))
 
-	for _, bitDepth := range []int{8, 10, 12} {
-		for _, n := range []int{4, 8, 16, 32} {
-			for qp := 0; qp <= 51+6*(bitDepth-8); qp++ {
-				coef := make([]int32, n*n)
-				m := make([]uint8, n*n)
+		for _, bitDepth := range []int{8, 10, 12} {
+			for _, n := range []int{4, 8, 16, 32} {
+				for qp := 0; qp <= 51+6*(bitDepth-8); qp++ {
+					coef := make([]int32, n*n)
+					m := make([]uint8, n*n)
 
-				for i := range coef {
-					coef[i] = int32(r.IntN(1<<17) - 1<<16)
-					m[i] = uint8(1 + r.IntN(255))
-				}
-
-				want := make([]int32, n*n)
-
-				rng := transformRange(bitDepth, false)
-				shift := bitDepth + log2(n) + 10 - rng
-				lo, hi := int32(-1<<rng), int32(1<<rng-1)
-
-				// 8.6.3 scales at full precision and clips afterwards, so the
-				// product must not be truncated to the coefficient width.
-				for i, c := range coef {
-					v := int64(c) * int64(m[i]) * (int64(levelScale[qp%6]) << (qp / 6))
-					v = (v + 1<<(shift-1)) >> shift
-
-					switch {
-					case v < int64(lo):
-						want[i] = lo
-					case v > int64(hi):
-						want[i] = hi
-					default:
-						want[i] = int32(v)
-					}
-				}
-
-				got := make([]int32, n*n)
-				copy(got, coef)
-				dequant(got, m, n, qp, bitDepth, false)
-
-				for i := range got {
-					if got[i] != want[i] {
-						t.Fatalf("bd=%d n=%d qp=%d: [%d] = %d, want %d",
-							bitDepth, n, qp, i, got[i], want[i])
-					}
-				}
-
-				copy(got, coef)
-				dequant(got, nil, n, qp, bitDepth, false)
-
-				for i, c := range coef {
-					v := int64(c) * 16 * (int64(levelScale[qp%6]) << (qp / 6))
-					v = (v + 1<<(shift-1)) >> shift
-
-					w := int32(v)
-
-					switch {
-					case v < int64(lo):
-						w = lo
-					case v > int64(hi):
-						w = hi
+					for i := range coef {
+						coef[i] = int32(r.IntN(1<<17) - 1<<16)
+						m[i] = uint8(1 + r.IntN(255))
 					}
 
-					if got[i] != w {
-						t.Fatalf("flat bd=%d n=%d qp=%d: [%d] = %d, want %d",
-							bitDepth, n, qp, i, got[i], w)
+					want := make([]int32, n*n)
+
+					rng := transformRange(bitDepth, false)
+					shift := bitDepth + log2(n) + 10 - rng
+					lo, hi := int32(-1<<rng), int32(1<<rng-1)
+
+					// 8.6.3 scales at full precision and clips afterwards, so the
+					// product must not be truncated to the coefficient width.
+					for i, c := range coef {
+						v := int64(c) * int64(m[i]) * (int64(levelScale[qp%6]) << (qp / 6))
+						v = (v + 1<<(shift-1)) >> shift
+
+						switch {
+						case v < int64(lo):
+							want[i] = lo
+						case v > int64(hi):
+							want[i] = hi
+						default:
+							want[i] = int32(v)
+						}
+					}
+
+					got := make([]int32, n*n)
+					copy(got, coef)
+					dequant(got, m, n, qp, bitDepth, false)
+
+					for i := range got {
+						if got[i] != want[i] {
+							t.Fatalf("bd=%d n=%d qp=%d: [%d] = %d, want %d",
+								bitDepth, n, qp, i, got[i], want[i])
+						}
+					}
+
+					copy(got, coef)
+					dequant(got, nil, n, qp, bitDepth, false)
+
+					for i, c := range coef {
+						v := int64(c) * 16 * (int64(levelScale[qp%6]) << (qp / 6))
+						v = (v + 1<<(shift-1)) >> shift
+
+						w := int32(v)
+
+						switch {
+						case v < int64(lo):
+							w = lo
+						case v > int64(hi):
+							w = hi
+						}
+
+						if got[i] != w {
+							t.Fatalf("flat bd=%d n=%d qp=%d: [%d] = %d, want %d",
+								bitDepth, n, qp, i, got[i], w)
+						}
 					}
 				}
 			}
 		}
-	}
+	})
 }
 
 func TestLog2(t *testing.T) {

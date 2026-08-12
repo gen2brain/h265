@@ -70,3 +70,63 @@ flat:
 
 	VZEROUPPER
 	RET
+
+// dequant32AVX512 is dequant32AVX2 over sixteen coefficients at a time.
+TEXT ·dequant32AVX512(SB), NOSPLIT, $0-44
+	MOVQ coef+0(FP), DI
+	MOVQ m+8(FP), SI
+	MOVQ n+16(FP), CX
+
+	MOVL         ls+24(FP), AX
+	VPBROADCASTD AX, Z1
+	MOVL         rnd+28(FP), AX
+	VPBROADCASTD AX, Z2
+	MOVL         lo+36(FP), AX
+	VPBROADCASTD AX, Z4
+	MOVL         hi+40(FP), AX
+	VPBROADCASTD AX, Z5
+
+	MOVL sh+32(FP), AX
+	MOVQ AX, X3
+
+	MOVL         $16, AX
+	VPBROADCASTD AX, Z6
+
+	TESTQ SI, SI
+	JZ    flat512
+
+scaled512:
+	VMOVDQU32 (DI), Z0
+	VPMOVZXBD (SI), Z7
+	VPMULLD   Z7, Z0, Z0
+	VPMULLD   Z1, Z0, Z0
+	VPADDD    Z2, Z0, Z0
+	VPSRAD    X3, Z0, Z0
+	VPMAXSD   Z4, Z0, Z0
+	VPMINSD   Z5, Z0, Z0
+	VMOVDQU32 Z0, (DI)
+
+	ADDQ $64, DI
+	ADDQ $16, SI
+	SUBQ $16, CX
+	JNZ  scaled512
+
+	VZEROUPPER
+	RET
+
+flat512:
+	VMOVDQU32 (DI), Z0
+	VPMULLD   Z6, Z0, Z0
+	VPMULLD   Z1, Z0, Z0
+	VPADDD    Z2, Z0, Z0
+	VPSRAD    X3, Z0, Z0
+	VPMAXSD   Z4, Z0, Z0
+	VPMINSD   Z5, Z0, Z0
+	VMOVDQU32 Z0, (DI)
+
+	ADDQ $64, DI
+	SUBQ $16, CX
+	JNZ  flat512
+
+	VZEROUPPER
+	RET

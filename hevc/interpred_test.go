@@ -76,88 +76,94 @@ func naiveMC(dst []int16, dstStride int, src []uint8, srcStride, picW, picH,
 }
 
 func TestMCLuma(t *testing.T) {
-	r := rand.New(rand.NewPCG(1, 2))
 
-	const picW, picH = 24, 24
+	eachWidth(t, func(t *testing.T) {
+		r := rand.New(rand.NewPCG(1, 2))
 
-	src := make([]uint8, picW*picH)
-	for i := range src {
-		src[i] = uint8(r.IntN(256))
-	}
+		const picW, picH = 24, 24
 
-	for _, bitDepth := range []int{8, 10, 12} {
-		for _, wh := range [][2]int{{4, 4}, {8, 4}, {8, 8}, {16, 12}} {
-			w, h := wh[0], wh[1]
+		src := make([]uint8, picW*picH)
+		for i := range src {
+			src[i] = uint8(r.IntN(256))
+		}
 
-			for xFrac := range 4 {
-				for yFrac := range 4 {
-					for _, xy := range [][2]int{
-						{4, 4}, {0, 0}, {-4, -4}, {picW - 2, picH - 2}, {picW - w, 4},
-					} {
-						got := make([]int16, w*h)
-						want := make([]int16, w*h)
+		for _, bitDepth := range []int{8, 10, 12} {
+			for _, wh := range [][2]int{{4, 4}, {8, 4}, {8, 8}, {16, 12}} {
+				w, h := wh[0], wh[1]
 
-						mcLuma(got, w, src, picW, picW, picH,
-							xy[0], xy[1], xFrac, yFrac, w, h, bitDepth,
-							make([]int32, 64*80), make([]int16, 64*80), make([]uint8, 71*71))
-						naiveMC(want, w, src, picW, picW, picH,
-							xy[0], xy[1], xFrac, yFrac, w, h, bitDepth, 8)
+				for xFrac := range 4 {
+					for yFrac := range 4 {
+						for _, xy := range [][2]int{
+							{4, 4}, {0, 0}, {-4, -4}, {picW - 2, picH - 2}, {picW - w, 4},
+						} {
+							got := make([]int16, w*h)
+							want := make([]int16, w*h)
 
-						for i := range got {
-							if got[i] != want[i] {
-								t.Fatalf("bd=%d %dx%d frac=%d,%d at %v: [%d] = %d, want %d",
-									bitDepth, w, h, xFrac, yFrac, xy, i, got[i], want[i])
+							mcLuma(got, w, src, picW, picW, picH,
+								xy[0], xy[1], xFrac, yFrac, w, h, bitDepth,
+								make([]int32, 64*80), make([]int16, 64*80), make([]uint8, 71*71))
+							naiveMC(want, w, src, picW, picW, picH,
+								xy[0], xy[1], xFrac, yFrac, w, h, bitDepth, 8)
+
+							for i := range got {
+								if got[i] != want[i] {
+									t.Fatalf("bd=%d %dx%d frac=%d,%d at %v: [%d] = %d, want %d",
+										bitDepth, w, h, xFrac, yFrac, xy, i, got[i], want[i])
+								}
 							}
 						}
 					}
 				}
 			}
 		}
-	}
+	})
 }
 
 func TestMCChroma(t *testing.T) {
-	r := rand.New(rand.NewPCG(3, 4))
 
-	const picW, picH = 40, 40
+	eachWidth(t, func(t *testing.T) {
+		r := rand.New(rand.NewPCG(3, 4))
 
-	src := make([]uint8, picW*picH)
-	for i := range src {
-		src[i] = uint8(r.IntN(256))
-	}
+		const picW, picH = 40, 40
 
-	for _, bitDepth := range []int{8, 10} {
-		for _, wh := range [][2]int{{2, 2}, {4, 4}, {8, 6}, {16, 8}, {24, 4}} {
-			w, h := wh[0], wh[1]
+		src := make([]uint8, picW*picH)
+		for i := range src {
+			src[i] = uint8(r.IntN(256))
+		}
 
-			for xFrac := range 8 {
-				for yFrac := range 8 {
-					// The corners and the far edges are what exercise the
-					// edge emulation; an interior block never reaches it.
-					for _, xy := range [][2]int{
-						{3, 3}, {0, 0}, {-2, -2}, {picW - 1, picH - 1},
-						{picW - w, 3}, {3, picH - h},
-					} {
-						got := make([]int16, w*h)
-						want := make([]int16, w*h)
+		for _, bitDepth := range []int{8, 10} {
+			for _, wh := range [][2]int{{2, 2}, {4, 4}, {8, 6}, {16, 8}, {24, 4}} {
+				w, h := wh[0], wh[1]
 
-						mcChroma(got, w, src, picW, picW, picH, xy[0], xy[1], xFrac, yFrac,
-							w, h, bitDepth, make([]int32, 64*80), make([]int16, 64*80),
-							make([]uint8, 71*71))
-						naiveMC(want, w, src, picW, picW, picH, xy[0], xy[1], xFrac, yFrac,
-							w, h, bitDepth, 4)
+				for xFrac := range 8 {
+					for yFrac := range 8 {
+						// The corners and the far edges are what exercise the
+						// edge emulation; an interior block never reaches it.
+						for _, xy := range [][2]int{
+							{3, 3}, {0, 0}, {-2, -2}, {picW - 1, picH - 1},
+							{picW - w, 3}, {3, picH - h},
+						} {
+							got := make([]int16, w*h)
+							want := make([]int16, w*h)
 
-						for i := range got {
-							if got[i] != want[i] {
-								t.Fatalf("bd=%d %dx%d frac=%d,%d at %v: [%d] = %d, want %d",
-									bitDepth, w, h, xFrac, yFrac, xy, i, got[i], want[i])
+							mcChroma(got, w, src, picW, picW, picH, xy[0], xy[1], xFrac, yFrac,
+								w, h, bitDepth, make([]int32, 64*80), make([]int16, 64*80),
+								make([]uint8, 71*71))
+							naiveMC(want, w, src, picW, picW, picH, xy[0], xy[1], xFrac, yFrac,
+								w, h, bitDepth, 4)
+
+							for i := range got {
+								if got[i] != want[i] {
+									t.Fatalf("bd=%d %dx%d frac=%d,%d at %v: [%d] = %d, want %d",
+										bitDepth, w, h, xFrac, yFrac, xy, i, got[i], want[i])
+								}
 							}
 						}
 					}
 				}
 			}
 		}
-	}
+	})
 }
 
 // TestMCFilterTaps holds each filter to the normalisation the shifts assume.
@@ -291,45 +297,64 @@ func TestWeightedPrediction(t *testing.T) {
 // TestPredUniAsm checks any compiled-in kernel against the Go one, over the
 // prediction unit widths HEVC uses, including the ones with a remainder the
 // kernel does not take.
+// eachWidth runs f once per instruction set the target has, so a wide kernel
+// and its narrower sibling are both held to the Go reference.
+func eachWidth(t *testing.T, f func(t *testing.T)) {
+	t.Helper()
+
+	f(t)
+
+	if !wideKernels() {
+		return
+	}
+
+	setWideKernels(false)
+	defer setWideKernels(true)
+
+	f(t)
+}
+
 func TestPredUniAsm(t *testing.T) {
 	if predUniAsm == nil {
 		t.Skip("no assembly for this target")
 	}
 
-	r := rand.New(rand.NewPCG(23, 24))
+	eachWidth(t, func(t *testing.T) {
+		r := rand.New(rand.NewPCG(23, 24))
 
-	for _, w := range []int{4, 8, 12, 16, 24, 32, 48, 64} {
-		for _, h := range []int{4, 8, 16} {
-			srcStride := w + 3
-			dstStride := w + 9
+		for _, w := range []int{4, 8, 12, 16, 24, 32, 48, 64} {
+			for _, h := range []int{4, 8, 16} {
+				srcStride := w + 3
+				dstStride := w + 9
 
-			src := make([]int16, srcStride*h)
-			for i := range src {
-				// Spans the range the interpolation produces, including the
-				// values that clip at both ends.
-				src[i] = int16(r.IntN(1<<16) - 1<<15)
-			}
+				src := make([]int16, srcStride*h)
+				for i := range src {
+					// Spans the range the interpolation produces, including the
+					// values that clip at both ends.
+					src[i] = int16(r.IntN(1<<16) - 1<<15)
+				}
 
-			got := make([]uint8, dstStride*(h+2))
-			for i := range got {
-				got[i] = uint8(r.IntN(256))
-			}
+				got := make([]uint8, dstStride*(h+2))
+				for i := range got {
+					got[i] = uint8(r.IntN(256))
+				}
 
-			want := make([]uint8, len(got))
-			copy(want, got)
+				want := make([]uint8, len(got))
+				copy(want, got)
 
-			off := 2*dstStride + 5
+				off := 2*dstStride + 5
 
-			predUni(got, off, dstStride, src, srcStride, w, h, 8)
-			predUniGo(want, off, dstStride, src, srcStride, w, h, 8, 6)
+				predUni(got, off, dstStride, src, srcStride, w, h, 8)
+				predUniGo(want, off, dstStride, src, srcStride, w, h, 8, 6)
 
-			for i := range got {
-				if got[i] != want[i] {
-					t.Fatalf("w=%d h=%d: [%d] = %d, want %d", w, h, i, got[i], want[i])
+				for i := range got {
+					if got[i] != want[i] {
+						t.Fatalf("w=%d h=%d: [%d] = %d, want %d", w, h, i, got[i], want[i])
+					}
 				}
 			}
 		}
-	}
+	})
 }
 
 // TestPredBiAsm checks any compiled-in kernel against the Go one, over the
@@ -339,39 +364,41 @@ func TestPredBiAsm(t *testing.T) {
 		t.Skip("no assembly for this target")
 	}
 
-	r := rand.New(rand.NewPCG(25, 26))
+	eachWidth(t, func(t *testing.T) {
+		r := rand.New(rand.NewPCG(25, 26))
 
-	for _, w := range []int{4, 8, 12, 16, 24, 32, 48, 64} {
-		for _, h := range []int{4, 8, 16} {
-			srcStride := w + 3
-			dstStride := w + 9
+		for _, w := range []int{4, 8, 12, 16, 24, 32, 48, 64} {
+			for _, h := range []int{4, 8, 16} {
+				srcStride := w + 3
+				dstStride := w + 9
 
-			a := make([]int16, srcStride*h)
-			b := make([]int16, srcStride*h)
+				a := make([]int16, srcStride*h)
+				b := make([]int16, srcStride*h)
 
-			for i := range a {
-				a[i] = int16(r.IntN(1<<16) - 1<<15)
-				b[i] = int16(r.IntN(1<<16) - 1<<15)
-			}
+				for i := range a {
+					a[i] = int16(r.IntN(1<<16) - 1<<15)
+					b[i] = int16(r.IntN(1<<16) - 1<<15)
+				}
 
-			got := make([]uint8, dstStride*(h+2))
-			for i := range got {
-				got[i] = uint8(r.IntN(256))
-			}
+				got := make([]uint8, dstStride*(h+2))
+				for i := range got {
+					got[i] = uint8(r.IntN(256))
+				}
 
-			want := make([]uint8, len(got))
-			copy(want, got)
+				want := make([]uint8, len(got))
+				copy(want, got)
 
-			off := 2*dstStride + 5
+				off := 2*dstStride + 5
 
-			predBi(got, off, dstStride, a, b, srcStride, w, h, 8)
-			predBiGo(want, off, dstStride, a, b, srcStride, w, h, 8, 7)
+				predBi(got, off, dstStride, a, b, srcStride, w, h, 8)
+				predBiGo(want, off, dstStride, a, b, srcStride, w, h, 8, 7)
 
-			for i := range got {
-				if got[i] != want[i] {
-					t.Fatalf("w=%d h=%d: [%d] = %d, want %d", w, h, i, got[i], want[i])
+				for i := range got {
+					if got[i] != want[i] {
+						t.Fatalf("w=%d h=%d: [%d] = %d, want %d", w, h, i, got[i], want[i])
+					}
 				}
 			}
 		}
-	}
+	})
 }
