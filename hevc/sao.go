@@ -174,8 +174,6 @@ func saoPlane[P pixel](d *ctuDecoder, plane []P, stride, cIdx int, src []P) {
 		return
 	}
 
-	copy(src, plane)
-
 	maxV := int32(1)<<d.pic.BitDepth - 1
 	shift := d.pic.BitDepth - 5
 
@@ -184,65 +182,194 @@ func saoPlane[P pixel](d *ctuDecoder, plane []P, stride, cIdx int, src []P) {
 
 	picW := int(d.s.picWidthInCtbs)
 
+	// 8.7.3 reads the picture as deblocking left it, so the rows that filter
+	// are copied first, with one row of margin for the classes reaching across.
+	lo, hi := len(d.sao), -1
+
 	for ctb := range d.sao {
+		if !d.saoEnabled(ctb, cIdx) {
+			continue
+		}
+
+		lo, hi = min(lo, ctb/picW), max(hi, ctb/picW)
+	}
+
+	if hi < 0 {
+		return
+	}
+
+	from := max(lo*ctbH-1, 0) * stride
+	to := min(min((hi+1)*ctbH+1, h)*stride, len(plane))
+
+	copy(src[from:to], plane[from:to])
+
+	for ctb := range d.sao {
+		if !d.saoEnabled(ctb, cIdx) {
+			continue
+		}
+
 		p := &d.sao[ctb][cIdx]
-		if p.typeIdx == saoOff {
-			continue
-		}
-
-		sl := d.slices[d.ctbSlice[ctb]]
-
-		if (cIdx == 0 && !sl.saoLuma) || (cIdx > 0 && !sl.saoChroma) {
-			continue
-		}
 
 		x0, y0 := ctb%picW*ctbW, ctb/picW*ctbH
 
+		a := eoOffsets[p.class][0]
+		b := eoOffsets[p.class][1]
+
+		band := p.typeIdx == saoBand
+
+		xhi := min(x0+ctbW, w)
+
 		for y := y0; y < min(y0+ctbH, h); y++ {
-			for x := x0; x < min(x0+ctbW, w); x++ {
-				if d.noFilter[d.tbIndex(x*sw, y*sh)] {
+			xlo := x0
+
+			if !band {
+				if y+a[1] < 0 || y+a[1] >= h || y+b[1] < 0 || y+b[1] >= h {
 					continue
 				}
 
-				v := int32(src[y*stride+x])
+				xlo = max(xlo, max(-a[0], -b[0]))
+				xhi = min(min(x0+ctbW, w), w-max(a[0], b[0]))
+			}
 
-				if p.typeIdx == saoBand {
-					if k := (int(v>>shift) - p.band) & 31; k < 4 {
-						plane[y*stride+x] = P(clip3(v+p.offset[k], 0, maxV))
-					}
+			// Only the first and last row and column of a coding tree block
+			// can reach across one, so the interior needs no availability test.
+			ilo, ihi := xlo, xhi
 
-					continue
-				}
-
-				a := eoOffsets[p.class][0]
-				b := eoOffsets[p.class][1]
-
-				if x+a[0] < 0 || x+a[0] >= w || y+a[1] < 0 || y+a[1] >= h ||
-					x+b[0] < 0 || x+b[0] >= w || y+b[1] < 0 || y+b[1] >= h {
-					continue
-				}
-
-				if !d.saoNeighbour(x, y, a, sw, sh) || !d.saoNeighbour(x, y, b, sw, sh) {
-					continue
-				}
-
-				va := int32(src[(y+a[1])*stride+x+a[0]])
-				vb := int32(src[(y+b[1])*stride+x+b[0]])
-
-				cat := sign(v-va) + sign(v-vb)
-
-				switch {
-				case cat == -2:
-					plane[y*stride+x] = P(clip3(v+p.offset[0], 0, maxV))
-				case cat == -1:
-					plane[y*stride+x] = P(clip3(v+p.offset[1], 0, maxV))
-				case cat == 1:
-					plane[y*stride+x] = P(clip3(v+p.offset[2], 0, maxV))
-				case cat == 2:
-					plane[y*stride+x] = P(clip3(v+p.offset[3], 0, maxV))
+			if !band {
+				if a[1] != 0 && (y == y0 || y == min(y0+ctbH, h)-1) {
+					ihi = ilo
+				} else if a[0] != 0 {
+					ilo = min(max(xlo, x0+1), xhi)
+					ihi = max(min(xhi, x0+ctbW-1), ilo)
 				}
 			}
+
+			for x := xlo; x < ilo; x++ {
+				saoSample(d, plane, src, stride, x, y, w, h, sw, sh, p, a, b, shift, maxV)
+			}
+
+			for x := ihi; x < xhi; x++ {
+				saoSample(d, plane, src, stride, x, y, w, h, sw, sh, p, a, b, shift, maxV)
+			}
+
+			// The next sample whose transform block may differ.
+			next := func(x int) int {
+				return min((x*sw>>d.minTbLog2+1)<<d.minTbLog2/sw, ihi)
+			}
+
+			for x := ilo; x < ihi; {
+				if d.noFilter[d.tbIndex(x*sw, y*sh)] {
+					x = next(x)
+
+					continue
+				}
+
+				run := x
+				for run < ihi && !d.noFilter[d.tbIndex(run*sw, y*sh)] {
+					run = next(run)
+				}
+
+				o := &p.offset
+
+				if band {
+					saoBandRow(plane[y*stride+x:], src[y*stride+x:], run-x, p.band, o,
+						shift, maxV)
+				} else {
+					base := y*stride + x
+					saoEdgeRow(plane[base:], src[base:],
+						src[base+a[1]*stride+a[0]:], src[base+b[1]*stride+b[0]:],
+						run-x, o, maxV)
+				}
+
+				x = run
+			}
 		}
+	}
+}
+
+func (d *ctuDecoder) saoEnabled(ctb, cIdx int) bool {
+	if d.sao[ctb][cIdx].typeIdx == saoOff {
+		return false
+	}
+
+	sl := d.slices[d.ctbSlice[ctb]]
+
+	if cIdx == 0 {
+		return sl.saoLuma
+	}
+
+	return sl.saoChroma
+}
+
+// saoSample is 8.7.3 for one sample, for the block edges where a neighbour may
+// be across a tile or slice boundary the filter may not cross.
+func saoSample[P pixel](d *ctuDecoder, plane, src []P, stride, x, y, w, h, sw, sh int,
+	p *saoParams, a, b [2]int, shift int, maxV int32,
+) {
+	if d.noFilter[d.tbIndex(x*sw, y*sh)] {
+		return
+	}
+
+	v := int32(src[y*stride+x])
+
+	if p.typeIdx == saoBand {
+		if k := (int(v>>shift) - p.band) & 31; k < 4 {
+			plane[y*stride+x] = P(clip3(v+p.offset[k], 0, maxV))
+		}
+
+		return
+	}
+
+	if x+a[0] < 0 || x+a[0] >= w || y+a[1] < 0 || y+a[1] >= h ||
+		x+b[0] < 0 || x+b[0] >= w || y+b[1] < 0 || y+b[1] >= h {
+		return
+	}
+
+	if !d.saoNeighbour(x, y, a, sw, sh) || !d.saoNeighbour(x, y, b, sw, sh) {
+		return
+	}
+
+	va := int32(src[(y+a[1])*stride+x+a[0]])
+	vb := int32(src[(y+b[1])*stride+x+b[0]])
+
+	if cat := sign(v-va) + sign(v-vb); cat != 0 {
+		k := cat + 2
+		if cat > 0 {
+			k = cat + 1
+		}
+
+		plane[y*stride+x] = P(clip3(v+p.offset[k], 0, maxV))
+	}
+}
+
+// saoBandRow is the band offset of 8.7.3 over a run of samples.
+func saoBandRow[P pixel](dst, src []P, n, band int, offset *[4]int32, shift int, maxV int32) {
+	for i, s := range src[:n] {
+		v := int32(s)
+
+		if k := (int(v>>shift) - band) & 31; k < 4 {
+			dst[i] = P(clip3(v+offset[k], 0, maxV))
+		}
+	}
+}
+
+// saoEdgeRow is the edge offset of 8.7.3 over a run of samples, with the two
+// neighbours the class compares against passed as their own rows.
+func saoEdgeRow[P pixel](dst, src, na, nb []P, n int, offset *[4]int32, maxV int32) {
+	for i, s := range src[:n] {
+		v := int32(s)
+
+		cat := sign(v-int32(na[i])) + sign(v-int32(nb[i]))
+		if cat == 0 {
+			continue
+		}
+
+		k := cat + 2
+		if cat > 0 {
+			k = cat + 1
+		}
+
+		dst[i] = P(clip3(v+offset[k], 0, maxV))
 	}
 }
 

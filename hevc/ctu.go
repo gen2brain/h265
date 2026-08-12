@@ -908,10 +908,16 @@ func reconstructPlane[P pixel](d *ctuDecoder, plane []P, stride, x, y, log2Size,
 
 // addResidual is bdShift of 8.6.2 and the sum of 8.6.6, in one pass.
 func addResidual[P pixel](plane []P, stride, x, y, n, shift int, coef []int32, bitDepth int) {
-	if bitDepth == 8 && n >= 8 {
-		if k := dsp.addResidual8; k != nil {
-			if p, ok := any(plane).([]uint8); ok {
+	if n >= 8 {
+		if p, ok := any(plane).([]uint8); ok && bitDepth == 8 {
+			if k := dsp.addResidual8; k != nil {
 				k(p[y*stride+x:], stride, coef[:n*n], n, shift)
+
+				return
+			}
+		} else if p, ok := any(plane).([]uint16); ok {
+			if k := dsp.addResidual16; k != nil {
+				k(p[y*stride+x:], stride, coef[:n*n], n, shift, int32(1)<<bitDepth-1)
 
 				return
 			}

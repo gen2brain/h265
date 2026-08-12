@@ -119,7 +119,7 @@ func TestMCLuma(t *testing.T) {
 func TestMCChroma(t *testing.T) {
 	r := rand.New(rand.NewPCG(3, 4))
 
-	const picW, picH = 20, 20
+	const picW, picH = 40, 40
 
 	src := make([]uint8, picW*picH)
 	for i := range src {
@@ -127,7 +127,7 @@ func TestMCChroma(t *testing.T) {
 	}
 
 	for _, bitDepth := range []int{8, 10} {
-		for _, wh := range [][2]int{{2, 2}, {4, 4}, {8, 6}} {
+		for _, wh := range [][2]int{{2, 2}, {4, 4}, {8, 6}, {16, 8}, {24, 4}} {
 			w, h := wh[0], wh[1]
 
 			for xFrac := range 8 {
@@ -142,7 +142,8 @@ func TestMCChroma(t *testing.T) {
 						want := make([]int16, w*h)
 
 						mcChroma(got, w, src, picW, picW, picH, xy[0], xy[1], xFrac, yFrac,
-							w, h, bitDepth, make([]int32, 64*80), make([]uint8, 71*71))
+							w, h, bitDepth, make([]int32, 64*80), make([]int16, 64*80),
+							make([]uint8, 71*71))
 						naiveMC(want, w, src, picW, picW, picH, xy[0], xy[1], xFrac, yFrac,
 							w, h, bitDepth, 4)
 
@@ -321,6 +322,50 @@ func TestPredUniAsm(t *testing.T) {
 
 			predUni(got, off, dstStride, src, srcStride, w, h, 8)
 			predUniGo(want, off, dstStride, src, srcStride, w, h, 8, 6)
+
+			for i := range got {
+				if got[i] != want[i] {
+					t.Fatalf("w=%d h=%d: [%d] = %d, want %d", w, h, i, got[i], want[i])
+				}
+			}
+		}
+	}
+}
+
+// TestPredBiAsm checks any compiled-in kernel against the Go one, over the
+// prediction unit widths HEVC uses and the full range of the intermediate.
+func TestPredBiAsm(t *testing.T) {
+	if predBiAsm == nil {
+		t.Skip("no assembly for this target")
+	}
+
+	r := rand.New(rand.NewPCG(25, 26))
+
+	for _, w := range []int{4, 8, 12, 16, 24, 32, 48, 64} {
+		for _, h := range []int{4, 8, 16} {
+			srcStride := w + 3
+			dstStride := w + 9
+
+			a := make([]int16, srcStride*h)
+			b := make([]int16, srcStride*h)
+
+			for i := range a {
+				a[i] = int16(r.IntN(1<<16) - 1<<15)
+				b[i] = int16(r.IntN(1<<16) - 1<<15)
+			}
+
+			got := make([]uint8, dstStride*(h+2))
+			for i := range got {
+				got[i] = uint8(r.IntN(256))
+			}
+
+			want := make([]uint8, len(got))
+			copy(want, got)
+
+			off := 2*dstStride + 5
+
+			predBi(got, off, dstStride, a, b, srcStride, w, h, 8)
+			predBiGo(want, off, dstStride, a, b, srcStride, w, h, 8, 7)
 
 			for i := range got {
 				if got[i] != want[i] {

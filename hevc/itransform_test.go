@@ -2,6 +2,7 @@ package hevc
 
 import (
 	"bytes"
+	"math"
 	"math/rand/v2"
 	"testing"
 )
@@ -428,6 +429,144 @@ func TestAddResidualAsm(t *testing.T) {
 	}
 }
 
+// TestAddResidual16Asm is TestAddResidualAsm for the high bit depth planes,
+// where the clamp is the bit depth rather than a fixed 255.
+func TestAddResidual16Asm(t *testing.T) {
+	k := dsp.addResidual16
+	if k == nil {
+		t.Skip("no assembly for this target")
+	}
+
+	r := rand.New(rand.NewPCG(31, 32))
+
+	for _, bitDepth := range []int{10, 12} {
+		maxV := int32(1)<<bitDepth - 1
+
+		for _, n := range []int{8, 16, 32} {
+			for _, shift := range []int{0, 8, 20 - bitDepth} {
+				stride := n + 5
+
+				coef := make([]int32, n*n)
+				for i := range coef {
+					coef[i] = int32(r.IntN(1<<20) - 1<<19)
+				}
+
+				src := make([]uint16, stride*(n+3))
+				for i := range src {
+					src[i] = uint16(r.IntN(int(maxV) + 1))
+				}
+
+				got := make([]uint16, len(src))
+				copy(got, src)
+				k(got[2*stride+3:], stride, coef, n, shift, maxV)
+
+				want := make([]uint16, len(src))
+				copy(want, src)
+				addResidualGo(want, stride, 3, 2, n, shift, coef, bitDepth)
+
+				for i := range got {
+					if got[i] != want[i] {
+						t.Fatalf("bd=%d n=%d shift=%d: [%d] = %d, want %d",
+							bitDepth, n, shift, i, got[i], want[i])
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestIDCTColsAsm checks any compiled-in column kernel against the Go form of
+// the same decomposition, over both passes: the first shifts and clips, the
+// second neither.
+func TestIDCTColsAsm(t *testing.T) {
+	k := idctColsAsm
+	if k == nil {
+		t.Skip("no assembly for this target")
+	}
+
+	r := rand.New(rand.NewPCG(41, 42))
+
+	for _, n := range []int{8, 16, 32} {
+		for _, pass := range []struct {
+			rnd    int32
+			shift  int
+			lo, hi int32
+		}{
+			{64, 7, -1 << 15, 1<<15 - 1},
+			{0, 0, math.MinInt32, math.MaxInt32},
+		} {
+			// A block that is dense, and one that is zero above a last
+			// significant position, which is what the row skip is for.
+			for _, last := range []int{n * n, n * 3} {
+				src := make([]int32, n*n)
+				for i := range last {
+					src[i] = int32(r.IntN(1<<16) - 1<<15)
+				}
+
+				got := make([]int32, n*n)
+				want := make([]int32, n*n)
+
+				k(got, src, n, pass.rnd, pass.shift, pass.lo, pass.hi)
+				idctColsGo(want, src, n, pass.rnd, pass.shift, pass.lo, pass.hi)
+
+				for i := range got {
+					if got[i] != want[i] {
+						t.Fatalf("n=%d shift=%d last=%d: [%d] = %d, want %d",
+							n, pass.shift, last, i, got[i], want[i])
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestIDCTColsMatchesButterfly holds the column decomposition to the recursive
+// one, which is what the decoder runs when no kernel is compiled in.
+func TestIDCTColsMatchesButterfly(t *testing.T) {
+	r := rand.New(rand.NewPCG(43, 44))
+
+	var s transformScratch
+
+	for _, n := range []int{8, 16, 32} {
+		for _, bitDepth := range []int{8, 10} {
+			for _, last := range []int{n * n, n * 2, 1} {
+				src := make([]int32, n*n)
+				for i := range last {
+					src[i] = int32(r.IntN(1<<16) - 1<<15)
+				}
+
+				got := make([]int32, n*n)
+				copy(got, src)
+
+				want := make([]int32, n*n)
+				copy(want, src)
+
+				rng := transformRange(bitDepth, false)
+				lo, hi := int32(-1<<rng), int32(1<<rng-1)
+
+				block, block2 := s.block[:n*n], s.block2[:n*n]
+
+				idctColsGo(block, got, n, 64, 7, lo, hi)
+				transposeBlock(block2, block, n)
+				idctColsGo(block, block2, n, 0, 0, math.MinInt32, math.MaxInt32)
+				transposeBlock(got, block, n)
+
+				save := idctColsAsm
+				idctColsAsm = nil
+				inverseTransform(want, n, false, bitDepth, false, &s)
+				idctColsAsm = save
+
+				for i := range got {
+					if got[i] != want[i] {
+						t.Fatalf("n=%d bd=%d last=%d: [%d] = %d, want %d",
+							n, bitDepth, last, i, got[i], want[i])
+					}
+				}
+			}
+		}
+	}
+}
+
 // TestOddAsm checks any compiled-in butterfly against the Go one, with zero
 // coefficients mixed in since a zero skips a basis row.
 func TestOddAsm(t *testing.T) {
@@ -459,6 +598,36 @@ func TestOddAsm(t *testing.T) {
 				if got[i] != want[i] {
 					t.Fatalf("n=%d stride=%d in=%v: [%d] = %d, want %d",
 						c.n, c.stride, in, i, got[i], want[i])
+				}
+			}
+		}
+	}
+}
+
+// TestTransposeAsm checks any compiled-in transpose against the Go one at
+// every block size the transform uses.
+func TestTransposeAsm(t *testing.T) {
+	k := transposeAsm
+	if k == nil {
+		t.Skip("no assembly for this target")
+	}
+
+	r := rand.New(rand.NewPCG(45, 46))
+
+	for _, n := range []int{8, 16, 32} {
+		src := make([]int32, n*n)
+		for i := range src {
+			src[i] = int32(r.IntN(1 << 30))
+		}
+
+		got := make([]int32, n*n)
+		k(got, src, n)
+
+		for y := range n {
+			for x := range n {
+				if got[x*n+y] != src[y*n+x] {
+					t.Fatalf("n=%d: [%d][%d] = %d, want %d",
+						n, x, y, got[x*n+y], src[y*n+x])
 				}
 			}
 		}

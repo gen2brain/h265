@@ -400,11 +400,13 @@ func (d *ctuDecoder) motionCompensate(x, y, w, h int, m *mvInfo) error {
 			if d.pic.BitDepth > 8 {
 				src, stride := ref.plane16(cIdx)
 				mcChroma(cbuf[l], cw, src, stride, ref.WidthC, ref.HeightC,
-					px, py, fx, fy, cw, ch, d.pic.BitDepth, d.mcTmp[:], d.mcPad16[:])
+					px, py, fx, fy, cw, ch, d.pic.BitDepth, d.mcTmp[:], d.mcTmp16[:],
+					d.mcPad16[:])
 			} else {
 				src, stride := ref.plane8(cIdx)
 				mcChroma(cbuf[l], cw, src, stride, ref.WidthC, ref.HeightC,
-					px, py, fx, fy, cw, ch, d.pic.BitDepth, d.mcTmp[:], d.mcPad8[:])
+					px, py, fx, fy, cw, ch, d.pic.BitDepth, d.mcTmp[:], d.mcTmp16[:],
+					d.mcPad8[:])
 			}
 		}
 

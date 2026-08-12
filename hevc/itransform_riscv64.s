@@ -55,6 +55,59 @@ cols:
 
 	RET
 
+// func addResidual16RVV(dst *uint16, stride int, coef *int32, n, shift int, maxV int32)
+TEXT ·addResidual16RVV(SB), NOSPLIT, $0-44
+	MOV  dst+0(FP), X10
+	MOV  stride+8(FP), X11
+	MOV  coef+16(FP), X12
+	MOV  n+24(FP), X13
+	MOV  shift+32(FP), X14
+	MOVW maxV+40(FP), X17
+
+	SLLI $1, X11
+
+	MOV  $0, X15
+	BLEZ X14, havernd16
+	MOV  $1, X15
+	ADD  $-1, X14, X16
+	SLL  X16, X15, X15
+
+havernd16:
+	MOV X13, X18
+
+rows16:
+	MOV X10, X19
+	MOV X13, X20
+
+cols16:
+	VSETVLI X20, E32, M1, TA, MA, X21
+
+	VLE32V   (X12), V1
+	VADDVX   X15, V1, V1
+	VSRAVX   X14, V1, V1
+	VLE16V   (X19), V2
+	VZEXTVF2 V2, V3
+	VADDVV   V3, V1, V1
+	VMAXVX   X0, V1, V1
+	VMINVX   X17, V1, V1
+
+	VSETVLI X20, E16, MF2, TA, MA, X21
+	VNSRLWI $0, V1, V4
+	VSE16V  V4, (X19)
+
+	SLLI $2, X21, X22
+	ADD  X22, X12
+	SLLI $1, X21, X22
+	ADD  X22, X19
+	SUB  X21, X20
+	BNEZ X20, cols16
+
+	ADD  X11, X10
+	ADD  $-1, X18
+	BNEZ X18, rows16
+
+	RET
+
 // func odd16RVV(out *int32, in *int32, m *int8, stride int)
 //
 // The sixteen-wide butterfly of 8.6.4.2, chunked by the vector length so it

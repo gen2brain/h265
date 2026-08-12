@@ -22,6 +22,19 @@ var lumaFilter = [4][8]int32{
 }
 
 // Table 8-12.
+// chromaFilter16 is the same table at the width the kernels multiply in.
+var chromaFilter16 = func() [8][4]int16 {
+	var f [8][4]int16
+
+	for i, row := range chromaFilter {
+		for j, v := range row {
+			f[i][j] = int16(v)
+		}
+	}
+
+	return f
+}()
+
 var chromaFilter = [8][4]int32{
 	{0, 64, 0, 0},
 	{-2, 58, 10, -2},
@@ -80,7 +93,7 @@ func mcLuma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
 
 	// The kernels cover eight-bit samples at widths they can step through
 	// whole; anything else falls to the loops below.
-	asm := mcLumaTapAsm
+	asm := mcTapAsm
 	if bitDepth != 8 || w%8 != 0 {
 		asm = nil
 	}
@@ -107,7 +120,7 @@ func mcLuma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
 	case yFrac == 0:
 		if asm != nil {
 			asm(dst, dstStride, p8[y*srcStride+x-3:], srcStride, 1, w, h,
-				&lumaFilter16[xFrac])
+				lumaFilter16[xFrac][:])
 
 			return
 		}
@@ -128,7 +141,7 @@ func mcLuma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
 	case xFrac == 0:
 		if asm != nil {
 			asm(dst, dstStride, p8[(y-3)*srcStride+x:], srcStride, srcStride, w, h,
-				&lumaFilter16[yFrac])
+				lumaFilter16[yFrac][:])
 
 			return
 		}
@@ -147,12 +160,12 @@ func mcLuma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
 		}
 
 	default:
-		if asm != nil && mcLumaTapV16Asm != nil {
+		if asm != nil && mcTapV16Asm != nil {
 			t := tmp16[:(h+7)*w]
 
 			asm(t, w, p8[(y-3)*srcStride+x-3:], srcStride, 1, w, h+7,
-				&lumaFilter16[xFrac])
-			mcLumaTapV16Asm(dst, dstStride, t, w, w, h, shift2, &lumaFilter[yFrac])
+				lumaFilter16[xFrac][:])
+			mcTapV16Asm(dst, dstStride, t, w, w, h, shift2, lumaFilter16[yFrac][:])
 
 			return
 		}
@@ -187,7 +200,7 @@ func mcLuma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
 
 // mcChroma is the chroma sample interpolation of 8.5.3.3.3.2.
 func mcChroma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, picH,
-	x, y, xFrac, yFrac, w, h, bitDepth int, scratch []int32, pad []P,
+	x, y, xFrac, yFrac, w, h, bitDepth int, scratch []int32, tmp16 []int16, pad []P,
 ) {
 	shift1 := bitDepth - 8
 	shift2 := 6
@@ -217,6 +230,11 @@ func mcChroma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, pic
 
 	p8, _ := any(src).([]uint8)
 
+	asm := mcTapAsm
+	if bitDepth != 8 || w%8 != 0 || p8 == nil {
+		asm = nil
+	}
+
 	switch {
 	case xFrac == 0 && yFrac == 0:
 		if p8 != nil && w%8 == 0 && bitDepth == 8 && mcCopyAsm != nil {
@@ -232,6 +250,13 @@ func mcChroma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, pic
 		}
 
 	case yFrac == 0:
+		if asm != nil {
+			asm(dst, dstStride, p8[y*srcStride+x-1:], srcStride, 1, w, h,
+				chromaFilter16[xFrac][:])
+
+			return
+		}
+
 		f := &chromaFilter[xFrac]
 
 		for j := range h {
@@ -246,6 +271,13 @@ func mcChroma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, pic
 		}
 
 	case xFrac == 0:
+		if asm != nil {
+			asm(dst, dstStride, p8[(y-1)*srcStride+x:], srcStride, srcStride, w, h,
+				chromaFilter16[yFrac][:])
+
+			return
+		}
+
 		f := &chromaFilter[yFrac]
 
 		for j := range h {
@@ -260,6 +292,16 @@ func mcChroma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, pic
 		}
 
 	default:
+		if asm != nil && mcTapV16Asm != nil {
+			t := tmp16[:(h+3)*w]
+
+			asm(t, w, p8[(y-1)*srcStride+x-1:], srcStride, 1, w, h+3,
+				chromaFilter16[xFrac][:])
+			mcTapV16Asm(dst, dstStride, t, w, w, h, shift2, chromaFilter16[yFrac][:])
+
+			return
+		}
+
 		fx, fy := &chromaFilter[xFrac], &chromaFilter[yFrac]
 
 		tmp := scratch[:(h+3)*w]
@@ -353,6 +395,29 @@ func predUniGo[P pixel](dst []P, dstOff, dstStride int, src []int16, srcStride, 
 // predBi is the default bi-prediction of 8.5.3.3.4.2.
 func predBi[P pixel](dst []P, dstOff, dstStride int, a, b []int16, srcStride, w, h, bitDepth int) {
 	shift := 15 - bitDepth
+
+	if k := predBiAsm; k != nil && bitDepth == 8 {
+		if p, ok := any(dst).([]uint8); ok {
+			if n := w &^ 7; n != 0 {
+				k(p[dstOff:], dstStride, a, b, srcStride, n, h, shift)
+
+				if n == w {
+					return
+				}
+
+				dstOff += n
+				a, b = a[n:], b[n:]
+				w -= n
+			}
+		}
+	}
+
+	predBiGo(dst, dstOff, dstStride, a, b, srcStride, w, h, bitDepth, shift)
+}
+
+func predBiGo[P pixel](dst []P, dstOff, dstStride int, a, b []int16, srcStride, w, h,
+	bitDepth, shift int,
+) {
 	off := int32(1) << (shift - 1)
 	maxV := int32(1)<<bitDepth - 1
 

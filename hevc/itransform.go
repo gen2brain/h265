@@ -1,5 +1,7 @@
 package hevc
 
+import "math"
+
 var levelScale = [6]int32{40, 45, 51, 57, 64, 72}
 
 var dstMatrix = [4][4]int8{
@@ -46,8 +48,16 @@ func dequant(coef []int32, m []uint8, n, qp, bitDepth int, extended bool) {
 	shift := bitDepth + log2(n) + 10 - rng
 	lo, hi := int32(-1<<rng), int32(1<<rng-1)
 
-	// The product needs more than 32 bits before 8.6.3 clips it: a level near
-	// the coefficient limit times the largest scale overflows.
+	// 8.6.3 scales by levelScale[qp%6] << (qp/6) and then shifts right by
+	// shift. Folding the left shift into the right one keeps the product
+	// inside 32 bits: a coefficient is at most fifteen bits, the matrix entry
+	// eight and levelScale seven.
+	if sh := shift - qp/6; sh >= 1 && rng <= 15 {
+		dequant32(coef, m, int32(levelScale[qp%6]), sh, lo, hi)
+
+		return
+	}
+
 	scale := int64(levelScale[qp%6]) << (qp / 6)
 	rnd := int64(1) << (shift - 1)
 
@@ -82,6 +92,36 @@ func dequant(coef []int32, m []uint8, n, qp, bitDepth int, extended bool) {
 		}
 
 		coef[i] = clip((int64(c)*int64(m[i])*scale + rnd) >> shift)
+	}
+}
+
+func dequant32(coef []int32, m []uint8, ls int32, sh int, lo, hi int32) {
+	rnd := int32(1) << (sh - 1)
+
+	if k := dequant32Asm; k != nil && len(coef)%8 == 0 {
+		k(coef, m, ls, rnd, sh, lo, hi)
+
+		return
+	}
+
+	if m == nil {
+		for i, c := range coef {
+			if c == 0 {
+				continue
+			}
+
+			coef[i] = clip3((c*16*ls+rnd)>>sh, lo, hi)
+		}
+
+		return
+	}
+
+	for i, c := range coef {
+		if c == 0 {
+			continue
+		}
+
+		coef[i] = clip3((c*int32(m[i])*ls+rnd)>>sh, lo, hi)
 	}
 }
 
@@ -207,16 +247,109 @@ type transformScratch struct {
 	// odd is the sixteen-wide butterfly accumulator. It lives here rather
 	// than on the stack because passing a local array to a kernel through a
 	// function value makes it escape.
-	odd   [16]int32
-	col   [32]int32
-	out   [32]int32
-	block [32 * 32]int32
+	odd    [16]int32
+	col    [32]int32
+	out    [32]int32
+	block  [32 * 32]int32
+	block2 [32 * 32]int32
+}
+
+// idctColsGo is 8.6.4.2 over eight columns at a time, dense but for the
+// even/odd split: M[j][n-1-i] is M[j][i] for even j and its negation for odd j.
+func idctColsGo(dst, src []int32, n int, rnd int32, shift int, lo, hi int32) {
+	half := n / 2
+	step := 32 / n
+
+	var acc [2][16 * 8]int32
+
+	for x0 := 0; x0 < n; x0 += 8 {
+		clear(acc[0][:half*8])
+		clear(acc[1][:half*8])
+
+		for j := range n {
+			c := src[j*n+x0:][:8]
+
+			var any int32
+			for _, v := range c {
+				any |= v
+			}
+
+			if any == 0 {
+				continue
+			}
+
+			row := transMatrix[j*step][:half]
+			a := acc[j&1][:half*8]
+
+			for i, m := range row {
+				w := int32(m)
+
+				for lane, v := range c {
+					a[i*8+lane] += w * v
+				}
+			}
+		}
+
+		for i := range half {
+			e := acc[0][i*8:][:8]
+			o := acc[1][i*8:][:8]
+
+			lowRow := dst[i*n+x0:][:8]
+			highRow := dst[(n-1-i)*n+x0:][:8]
+
+			for lane := range 8 {
+				lowRow[lane] = clip3((e[lane]+o[lane]+rnd)>>shift, lo, hi)
+				highRow[lane] = clip3((e[lane]-o[lane]+rnd)>>shift, lo, hi)
+			}
+		}
+	}
+}
+
+// transMatrix32 is the basis matrix at the width the kernels broadcast from.
+var transMatrix32 = func() [32][32]int32 {
+	var m [32][32]int32
+
+	for j, row := range transMatrix {
+		for i, v := range row {
+			m[j][i] = int32(v)
+		}
+	}
+
+	return m
+}()
+
+// transposeBlock writes the transpose of an n by n block.
+func transposeBlock(dst, src []int32, n int) {
+	if k := transposeAsm; k != nil {
+		k(dst, src, n)
+
+		return
+	}
+
+	for y := range n {
+		row := src[y*n : y*n+n]
+
+		for x, v := range row {
+			dst[x*n+y] = v
+		}
+	}
 }
 
 // 8.6.4.1.
 func inverseTransform(coef []int32, n int, dst bool, bitDepth int, extended bool, s *transformScratch) {
 	rng := transformRange(bitDepth, extended)
 	lo, hi := int32(-1<<rng), int32(1<<rng-1)
+
+	if k := idctColsAsm; k != nil && !dst && n >= 8 {
+		block, block2 := s.block[:n*n], s.block2[:n*n]
+
+		k(block, coef[:n*n], n, 64, 7, lo, hi)
+		transposeBlock(block2, block, n)
+		k(block, block2, n, 0, 0, math.MinInt32, math.MaxInt32)
+		transposeBlock(coef[:n*n], block, n)
+
+		return
+	}
 
 	// A column of zeros transforms to zeros, and residual blocks are mostly
 	// zero above the last significant coefficient.

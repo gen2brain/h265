@@ -69,6 +69,65 @@ cols:
 	VZEROUPPER
 	RET
 
+// func addResidual16AVX2(dst *uint16, stride int, coef *int32, n, shift int, maxV int32)
+TEXT ·addResidual16AVX2(SB), NOSPLIT, $0-44
+	MOVQ dst+0(FP), DI
+	MOVQ stride+8(FP), SI
+	MOVQ coef+16(FP), DX
+	MOVQ n+24(FP), BX
+	MOVQ shift+32(FP), R8
+
+	SHLQ $1, SI
+
+	XORQ  R9, R9
+	TESTQ R8, R8
+	JLE   havernd16
+	MOVQ  R8, CX
+	DECQ  CX
+	MOVQ  $1, R9
+	SHLQ  CX, R9
+
+havernd16:
+	MOVQ         R9, X0
+	VPBROADCASTD X0, Y0
+	MOVQ         R8, X1
+	VPXOR        Y2, Y2, Y2
+	MOVL         maxV+40(FP), AX
+	MOVQ         AX, X3
+	VPBROADCASTD X3, Y3
+
+	MOVQ BX, R10
+
+rows16:
+	MOVQ DI, R12
+	MOVQ BX, R11
+
+cols16:
+	VMOVDQU   (DX), Y4
+	VPADDD    Y0, Y4, Y4
+	VPSRAD    X1, Y4, Y4
+	VPMOVZXWD (R12), Y5
+	VPADDD    Y5, Y4, Y4
+	VPMAXSD   Y2, Y4, Y4
+	VPMINSD   Y3, Y4, Y4
+
+	VPACKUSDW    Y4, Y4, Y4
+	VEXTRACTI128 $1, Y4, X7
+	MOVQ         X4, (R12)
+	MOVQ         X7, 8(R12)
+
+	ADDQ $32, DX
+	ADDQ $16, R12
+	SUBQ $8, R11
+	JNZ  cols16
+
+	ADDQ SI, DI
+	DECQ R10
+	JNZ  rows16
+
+	VZEROUPPER
+	RET
+
 // func odd16AVX2(out *int32, in *int32, m *int8, stride int)
 //
 // out[i] = sum over j of m[(2j+1)*stride][i] * in[2j+1], sixteen wide. The
