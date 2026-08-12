@@ -88,7 +88,7 @@ func dequant(coef []int32, m []uint8, n, qp, bitDepth int, extended bool) {
 // idct is 8.6.4.2, split by size so the even half unrolls instead of
 // recursing. Each level transforms the even coefficients at half the size and
 // combines them with an odd half computed from the basis rows.
-func idct(out, in []int32, n int) {
+func idct(out, in []int32, n int, s *transformScratch) {
 	switch n {
 	case 4:
 		idct4(out, in)
@@ -97,7 +97,7 @@ func idct(out, in []int32, n int) {
 	case 16:
 		idct16(out, in)
 	default:
-		idct32(out, in)
+		idct32(out, in, s)
 	}
 }
 
@@ -146,8 +146,8 @@ func idct16(out, in []int32) {
 	}
 }
 
-func idct32(out, in []int32) {
-	var ev, e, o [16]int32
+func idct32(out, in []int32, s *transformScratch) {
+	var ev, e [16]int32
 
 	for i := range ev {
 		ev[i] = in[2*i]
@@ -155,12 +155,14 @@ func idct32(out, in []int32) {
 
 	idct16(e[:], ev[:])
 
+	o := s.odd[:]
+
 	// Only the widest butterfly is worth an assembly call; below sixteen the
 	// call costs more than the vectors save.
 	if k := oddAsm; k != nil {
-		k(o[:], in, 1)
+		k(o, in, 1)
 	} else {
-		oddGo(o[:], in, 1)
+		oddGo(o, in, 1)
 	}
 
 	for i, v := range e {
@@ -202,6 +204,10 @@ func idst1D(out, in []int32) {
 }
 
 type transformScratch struct {
+	// odd is the sixteen-wide butterfly accumulator. It lives here rather
+	// than on the stack because passing a local array to a kernel through a
+	// function value makes it escape.
+	odd   [16]int32
 	col   [32]int32
 	out   [32]int32
 	block [32 * 32]int32
@@ -236,7 +242,7 @@ func inverseTransform(coef []int32, n int, dst bool, bitDepth int, extended bool
 		if dst {
 			idst1D(out, col)
 		} else {
-			idct(out, col, n)
+			idct(out, col, n, s)
 		}
 
 		for y, v := range out {
@@ -250,7 +256,7 @@ func inverseTransform(coef []int32, n int, dst bool, bitDepth int, extended bool
 		if dst {
 			idst1D(out, row)
 		} else {
-			idct(out, row, n)
+			idct(out, row, n, s)
 		}
 
 		copy(coef[y*n:y*n+n], out)

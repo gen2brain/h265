@@ -9,6 +9,7 @@ type Decoder struct {
 	cur      *Picture
 	curOut   bool
 	ctu      *ctuDecoder
+	ctuPrev  *ctuDecoder
 	prevSlic *sliceHeader
 
 	dpb    []dpbPicture
@@ -128,6 +129,8 @@ func (d *Decoder) finishPicture() []*Picture {
 
 	d.dpbStore(d.cur, d.curOut)
 
+	// ctu is the signal that a picture is in progress; ctuPrev keeps its
+	// buffers and its scan tables for the next one.
 	d.cur, d.ctu = nil, nil
 
 	return d.dpbDrain(false)
@@ -222,7 +225,8 @@ func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
 		d.cur = newPicture(s)
 		d.cur.POC = int(poc)
 		d.curOut = sh.picOutputFlag
-		d.ctu = newCTUDecoder(d.ctu, s, p, sh, d.cur)
+		d.ctu = newCTUDecoder(d.ctuPrev, s, p, sh, d.cur)
+		d.ctuPrev = d.ctu
 		d.ctu.poc = poc
 	}
 

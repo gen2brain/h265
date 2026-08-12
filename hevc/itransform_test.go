@@ -22,7 +22,10 @@ func naive1D(out, in []int32, n int) {
 }
 
 func TestIDCT1D(t *testing.T) {
-	var got, want [32]int32
+	var (
+		got, want [32]int32
+		scratch   transformScratch
+	)
 
 	r := rand.New(rand.NewPCG(1, 2))
 
@@ -33,7 +36,7 @@ func TestIDCT1D(t *testing.T) {
 				in[i] = int32(r.IntN(1<<16) - 1<<15)
 			}
 
-			idct(got[:n], in[:n], n)
+			idct(got[:n], in[:n], n, &scratch)
 			naive1D(want[:n], in, n)
 
 			for i := range n {

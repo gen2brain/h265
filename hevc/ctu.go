@@ -1,5 +1,7 @@
 package hevc
 
+import "slices"
+
 const (
 	partMode2Nx2N = iota
 	partMode2NxN
@@ -84,9 +86,11 @@ type ctuDecoder struct {
 	colPic         *Picture
 	noBackwardPred bool
 
-	rsToTs []int32
-	tsToRs []int32
-	tileID []int32
+	rsToTs  []int32
+	tsToRs  []int32
+	tileID  []int32
+	scanFor scanGeometry
+	built   bool
 
 	saved    [nContexts]uint8
 	hasSaved bool
@@ -120,6 +124,35 @@ type ctuDecoder struct {
 	avail   [4*32 + 1]bool
 }
 
+// scanGeometry is everything the tile scan and the z-scan address table are
+// built from. Every picture of a sequence shares it, and the tables cost more
+// than the rest of the per-picture setup put together.
+type scanGeometry struct {
+	widthInCtbs  uint32
+	heightInCtbs uint32
+	ctbLog2SizeY uint8
+	minTbLog2    uint8
+	cols         []uint32
+	rows         []uint32
+}
+
+func geometryOf(s *sps, p *pps) scanGeometry {
+	return scanGeometry{
+		widthInCtbs:  s.picWidthInCtbs,
+		heightInCtbs: s.picHeightInCtbs,
+		ctbLog2SizeY: s.ctbLog2SizeY,
+		minTbLog2:    s.minTbLog2SizeY,
+		cols:         p.colWidthsInCtbs,
+		rows:         p.rowHeightsInCtbs,
+	}
+}
+
+func (g scanGeometry) same(o scanGeometry) bool {
+	return g.widthInCtbs == o.widthInCtbs && g.heightInCtbs == o.heightInCtbs &&
+		g.ctbLog2SizeY == o.ctbLog2SizeY && g.minTbLog2 == o.minTbLog2 &&
+		slices.Equal(g.cols, o.cols) && slices.Equal(g.rows, o.rows)
+}
+
 // newCTUDecoder prepares the per-picture state, reusing prev's buffers. They
 // are sized from the sequence and grow when a larger one arrives.
 func newCTUDecoder(prev *ctuDecoder, s *sps, p *pps, sh *sliceHeader, pic *Picture) *ctuDecoder {
@@ -144,7 +177,7 @@ func newCTUDecoder(prev *ctuDecoder, s *sps, p *pps, sh *sliceHeader, pic *Pictu
 		minTbWidth: tbW,
 		mvWidth:    mvW,
 
-		minTbAddr:  reuse(d.minTbAddr, tbW*tbH),
+		minTbAddr:  keep(d.minTbAddr, tbW*tbH),
 		intraMode:  reuse(d.intraMode, tbW*tbH),
 		intraModeC: reuse(d.intraModeC, tbW*tbH),
 		cuDepth:    reuse(d.cuDepth, tbW*tbH),
@@ -163,9 +196,11 @@ func newCTUDecoder(prev *ctuDecoder, s *sps, p *pps, sh *sliceHeader, pic *Pictu
 		sao:          reuse(d.sao, ctbs),
 		sliceLF:      make(map[int32]bool),
 
-		rsToTs: d.rsToTs,
-		tsToRs: d.tsToRs,
-		tileID: d.tileID,
+		rsToTs:  d.rsToTs,
+		tsToRs:  d.tsToRs,
+		tileID:  d.tileID,
+		scanFor: d.scanFor,
+		built:   d.built,
 
 		saoSrc8:  saoSrc8,
 		saoSrc16: saoSrc16,
@@ -174,8 +209,18 @@ func newCTUDecoder(prev *ctuDecoder, s *sps, p *pps, sh *sliceHeader, pic *Pictu
 		qpYCur:  sh.qpY,
 	}
 
-	d.buildTileScan()
-	d.buildMinTbAddr(tbH)
+	if g := geometryOf(s, p); !g.same(d.scanFor) {
+		d.scanFor = g
+		d.built = false
+
+		d.buildTileScan()
+	}
+
+	if !d.built {
+		d.built = true
+
+		d.buildMinTbAddr(tbH)
+	}
 
 	if s.scalingListEnabled {
 		if p.scalingListPresent {
@@ -186,6 +231,16 @@ func newCTUDecoder(prev *ctuDecoder, s *sps, p *pps, sh *sliceHeader, pic *Pictu
 	}
 
 	return d
+}
+
+// keep returns a buffer of n elements without clearing it, for a table that is
+// either rewritten in full or carried over.
+func keep[T any](b []T, n int) []T {
+	if cap(b) < n {
+		return make([]T, n)
+	}
+
+	return b[:n]
 }
 
 // reuse returns a zeroed buffer of n elements, keeping b's memory when it fits.
