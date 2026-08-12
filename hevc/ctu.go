@@ -474,13 +474,13 @@ func (d *ctuDecoder) parseCuQPDelta() {
 // fill writes one value across every minimum transform block a coding block
 // covers, which is the granularity every per-block array uses.
 func fill[T any](d *ctuDecoder, dst []T, x, y, size int, v T) {
-	step := 1 << d.minTbLog2
+	nw, nh := d.blocksIn(x, y, size, size, d.minTbLog2)
 
-	for j := y; j < y+size; j += step {
-		for i := x; i < x+size; i += step {
-			if i < int(d.s.picWidthInLumaSamples) && j < int(d.s.picHeightInLumaSamples) {
-				dst[d.tbIndex(i, j)] = v
-			}
+	for j := range nh {
+		row := dst[(y>>d.minTbLog2+j)*d.minTbWidth+x>>d.minTbLog2:][:nw]
+
+		for i := range row {
+			row[i] = v
 		}
 	}
 }

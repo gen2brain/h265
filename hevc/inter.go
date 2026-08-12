@@ -52,17 +52,21 @@ func (d *ctuDecoder) setMV(x, y, w, h int, m mvInfo) {
 		}
 	}
 
-	for j := y; j < y+h; j += 4 {
-		for i := x; i < x+w; i += 4 {
-			if i >= int(d.s.picWidthInLumaSamples) || j >= int(d.s.picHeightInLumaSamples) {
-				continue
-			}
+	nw, nh := d.blocksIn(x, y, w, h, 2)
 
-			k := d.mvIndex(i, j)
-			d.mvField[k] = m
-			d.mvPoc[k] = poc
-			d.mvLong[k] = long
-			d.mvValid[k] = true
+	for j := range nh {
+		k := (y>>2+j)*d.mvWidth + x>>2
+
+		field := d.mvField[k:][:nw]
+		pocs := d.mvPoc[k:][:nw]
+		longs := d.mvLong[k:][:nw]
+		valid := d.mvValid[k:][:nw]
+
+		for i := range field {
+			field[i] = m
+			pocs[i] = poc
+			longs[i] = long
+			valid[i] = true
 		}
 	}
 }

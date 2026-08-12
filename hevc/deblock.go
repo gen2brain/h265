@@ -29,33 +29,58 @@ func (d *ctuDecoder) blkIndex(x, y int) int {
 	return (y>>2)*d.mvWidth + x>>2
 }
 
-func (d *ctuDecoder) markTU(x, y, w, h int, cbf bool) {
-	for j := y; j < y+h; j += 4 {
-		for i := x; i < x+w; i += 4 {
-			if i >= int(d.s.picWidthInLumaSamples) || j >= int(d.s.picHeightInLumaSamples) {
-				continue
-			}
+// blocksIn is how many blocks of a region fall inside the picture, so the
+// loops that walk one need no bound on each block.
+func (d *ctuDecoder) blocksIn(x, y, w, h, log2 int) (int, int) {
+	last := 1<<log2 - 1
 
-			b := &d.blk[d.blkIndex(i, j)]
-			b.cbf = b.cbf || cbf
-			b.tuV = b.tuV || i == x
-			b.tuH = b.tuH || j == y
+	nw := min(x+w, int(d.s.picWidthInLumaSamples)) - x
+	nh := min(y+h, int(d.s.picHeightInLumaSamples)) - y
+
+	return max(nw+last, 0) >> log2, max(nh+last, 0) >> log2
+}
+
+func (d *ctuDecoder) markTU(x, y, w, h int, cbf bool) {
+	nw, nh := d.blocksIn(x, y, w, h, 2)
+
+	for j := range nh {
+		row := d.blk[(y>>2+j)*d.mvWidth+x>>2:][:nw]
+
+		if cbf {
+			for i := range row {
+				row[i].cbf = true
+			}
 		}
+
+		// The edges of 8.7.2 are the first column and the first row of the
+		// block, so only those carry a flag.
+		if j == 0 {
+			for i := range row {
+				row[i].tuH = true
+			}
+		}
+
+		row[0].tuV = true
 	}
 }
 
 func (d *ctuDecoder) markPU(x, y, w, h int, intra bool) {
-	for j := y; j < y+h; j += 4 {
-		for i := x; i < x+w; i += 4 {
-			if i >= int(d.s.picWidthInLumaSamples) || j >= int(d.s.picHeightInLumaSamples) {
-				continue
-			}
+	nw, nh := d.blocksIn(x, y, w, h, 2)
 
-			b := &d.blk[d.blkIndex(i, j)]
-			b.intra = intra
-			b.puV = b.puV || i == x
-			b.puH = b.puH || j == y
+	for j := range nh {
+		row := d.blk[(y>>2+j)*d.mvWidth+x>>2:][:nw]
+
+		for i := range row {
+			row[i].intra = intra
 		}
+
+		if j == 0 {
+			for i := range row {
+				row[i].puH = true
+			}
+		}
+
+		row[0].puV = true
 	}
 }
 
