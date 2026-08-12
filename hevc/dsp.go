@@ -16,6 +16,10 @@ type dspContext struct {
 // initialisation cycle.
 var oddAsm func(out, in []int32, stride int)
 
+// planarAsm is 8.4.4.2.4 for eight-bit output, nil unless an implementation is
+// compiled in. It handles n of at least eight.
+var planarAsm func(dst []uint8, stride int, r *refSamples, shift int)
+
 func newDSPGo() *dspContext {
 	return &dspContext{
 		inverseTransform: inverseTransform,

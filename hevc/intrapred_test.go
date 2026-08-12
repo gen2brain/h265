@@ -479,3 +479,45 @@ func TestIntraAngular(t *testing.T) {
 		}
 	}
 }
+
+// TestPredPlanarAsm checks any compiled-in planar prediction against the Go
+// one, over every size and with the block at an offset so a stride error shows.
+func TestPredPlanarAsm(t *testing.T) {
+	if planarAsm == nil {
+		t.Skip("no assembly for this target")
+	}
+
+	rnd := rand.New(rand.NewPCG(19, 20))
+
+	for _, n := range []int{8, 16, 32} {
+		for range 200 {
+			var r refSamples
+
+			r.n = n
+			for i := range 4*n + 1 {
+				r.s[i] = int32(rnd.IntN(256))
+			}
+
+			stride := n + 7
+			off := 2*stride + 3
+
+			got := make([]uint8, stride*(n+4))
+			want := make([]uint8, len(got))
+
+			for i := range got {
+				got[i] = uint8(rnd.IntN(256))
+			}
+
+			copy(want, got)
+
+			planarAsm(got[off:], stride, &r, log2(n)+1)
+			predPlanarGo(want, off, stride, &r, n, log2(n)+1)
+
+			for i := range got {
+				if got[i] != want[i] {
+					t.Fatalf("n=%d: [%d] = %d, want %d", n, i, got[i], want[i])
+				}
+			}
+		}
+	}
+}

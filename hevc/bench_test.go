@@ -106,3 +106,35 @@ func BenchmarkOdd(b *testing.B) {
 		})
 	}
 }
+
+func BenchmarkPredPlanar(b *testing.B) {
+	for _, n := range []int{8, 16, 32} {
+		var r refSamples
+
+		r.n = n
+		for i := range 4*n + 1 {
+			r.s[i] = int32(i * 7 % 256)
+		}
+
+		dst := make([]uint8, n*n)
+		shift := log2(n) + 1
+
+		b.Run(fmt.Sprintf("go/%d", n), func(b *testing.B) {
+			for b.Loop() {
+				predPlanarGo(dst, 0, n, &r, n, shift)
+			}
+
+			b.ReportMetric(float64(n*n)*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
+		})
+
+		if planarAsm != nil {
+			b.Run(fmt.Sprintf("asm/%d", n), func(b *testing.B) {
+				for b.Loop() {
+					planarAsm(dst, n, &r, shift)
+				}
+
+				b.ReportMetric(float64(n*n)*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
+			})
+		}
+	}
+}

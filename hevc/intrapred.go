@@ -165,6 +165,18 @@ func predPlanar[P pixel](dst []P, off, stride int, r *refSamples) {
 	n := r.n
 	shift := log2(n) + 1
 
+	if k := planarAsm; k != nil && n >= 8 {
+		if p, ok := any(dst).([]uint8); ok {
+			k(p[off:], stride, r, shift)
+
+			return
+		}
+	}
+
+	predPlanarGo(dst, off, stride, r, n, shift)
+}
+
+func predPlanarGo[P pixel](dst []P, off, stride int, r *refSamples, n, shift int) {
 	tr, bl := r.top(n), r.left(n)
 
 	for y := range n {
