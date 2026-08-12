@@ -61,8 +61,10 @@ func (d *ctuDecoder) markPU(x, y, w, h int, intra bool) {
 
 // boundaryStrength is 8.7.2.4.
 func (d *ctuDecoder) boundaryStrength(xP, yP, xQ, yQ int, vertical bool) int {
-	p := &d.blk[d.blkIndex(xP, yP)]
-	q := &d.blk[d.blkIndex(xQ, yQ)]
+	pi, qi := d.blkIndex(xP, yP), d.blkIndex(xQ, yQ)
+
+	p := &d.blk[pi]
+	q := &d.blk[qi]
 
 	tu := q.tuV
 	pu := q.puV
@@ -85,8 +87,6 @@ func (d *ctuDecoder) boundaryStrength(xP, yP, xQ, yQ int, vertical bool) int {
 		return 1
 	}
 
-	pi, qi := d.blkIndex(xP, yP), d.blkIndex(xQ, yQ)
-
 	if !d.mvValid[pi] || !d.mvValid[qi] {
 		return 1
 	}
@@ -105,31 +105,33 @@ func mvFar(a, b mv) bool {
 // differentMotion is the motion part of 8.7.2.4, comparing the pictures each
 // block recorded when it was decoded.
 func differentMotion(p, q *mvInfo, pPoc, qPoc [2]int32) bool {
-	var pp, qp []int32
-
-	var pv, qv []mv
+	var (
+		pp, qp [2]int32
+		pv, qv [2]mv
+		np, nq int
+	)
 
 	for l := range 2 {
 		if p.pred[l] {
-			pp = append(pp, pPoc[l])
-			pv = append(pv, p.mv[l])
+			pp[np], pv[np] = pPoc[l], p.mv[l]
+			np++
 		}
 
 		if q.pred[l] {
-			qp = append(qp, qPoc[l])
-			qv = append(qv, q.mv[l])
+			qp[nq], qv[nq] = qPoc[l], q.mv[l]
+			nq++
 		}
 	}
 
-	if len(pp) != len(qp) {
+	if np != nq {
 		return true
 	}
 
-	if len(pp) == 1 {
+	if np == 1 {
 		return pp[0] != qp[0] || mvFar(pv[0], qv[0])
 	}
 
-	if len(pp) == 0 {
+	if np == 0 {
 		return false
 	}
 
@@ -188,6 +190,15 @@ func (d *ctuDecoder) deblock() {
 }
 
 func (d *ctuDecoder) deblockEdge(x, y int, vertical bool) {
+	// The two sides share a coding tree block unless the edge sits on one of
+	// its boundaries, and 8.7.2 only asks about tiles and slices when they do.
+	ctb := 1<<d.s.ctbLog2SizeY - 1
+
+	across := x&ctb == 0
+	if !vertical {
+		across = y&ctb == 0
+	}
+
 	for k := 0; k < 8; k += 4 {
 		var px, py, qx, qy int
 
@@ -203,7 +214,7 @@ func (d *ctuDecoder) deblockEdge(x, y int, vertical bool) {
 			continue
 		}
 
-		if !d.filterEdge(px, py, qx, qy) {
+		if across && !d.filterEdge(px, py, qx, qy) {
 			continue
 		}
 
@@ -217,11 +228,13 @@ func (d *ctuDecoder) deblockEdge(x, y int, vertical bool) {
 			continue
 		}
 
-		qp := (int32(d.qpY[d.tbIndex(px, py)]) + int32(d.qpY[d.tbIndex(qx, qy)]) + 1) >> 1
+		pt, qt := d.tbIndex(px, py), d.tbIndex(qx, qy)
+
+		qp := (int32(d.qpY[pt]) + int32(d.qpY[qt]) + 1) >> 1
 
 		// 8.7.2.5.3 leaves a side untouched when its coding unit bypassed the
 		// transform, or is pulse code modulated with filtering turned off.
-		noP, noQ := d.noFilter[d.tbIndex(px, py)], d.noFilter[d.tbIndex(qx, qy)]
+		noP, noQ := d.noFilter[pt], d.noFilter[qt]
 
 		if d.pic.BitDepth > 8 {
 			plane, stride := d.pic.plane16(0)
