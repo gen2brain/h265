@@ -11,9 +11,19 @@ import (
 	"testing"
 )
 
-// The JCT-VC corpora are large and live outside the repository. Point these at
-// a fluster checkout and its downloaded resources.
-const conformanceRoot = "/temp/h265"
+// The JCT-VC corpora are large and live outside the repository. Set
+// CONFORMANCE_DIR to a fluster checkout with its resources downloaded beside
+// it to run against them.
+func conformanceRoot(t *testing.T) string {
+	t.Helper()
+
+	dir := os.Getenv("CONFORMANCE_DIR")
+	if dir == "" {
+		t.Skip("set CONFORMANCE_DIR")
+	}
+
+	return dir
+}
 
 // conformanceSuite is one downloaded corpus and the tally it currently reaches.
 // Raise baseline whenever the tally improves, so a regression fails rather than
@@ -28,12 +38,12 @@ var conformanceSuites = []conformanceSuite{
 	{"JCT-VC-RExt", 22},
 }
 
-func (s conformanceSuite) manifest() string {
-	return filepath.Join(conformanceRoot, "fluster/test_suites/h.265", s.name+".json")
+func (s conformanceSuite) manifest(root string) string {
+	return filepath.Join(root, "fluster/test_suites/h.265", s.name+".json")
 }
 
-func (s conformanceSuite) dir() string {
-	return filepath.Join(conformanceRoot, "conformance", s.name)
+func (s conformanceSuite) dir(root string) string {
+	return filepath.Join(root, "conformance", s.name)
 }
 
 type conformanceVector struct {
@@ -42,12 +52,12 @@ type conformanceVector struct {
 	Result string `json:"result"`
 }
 
-func conformanceVectors(t *testing.T, s conformanceSuite) []conformanceVector {
+func conformanceVectors(t *testing.T, s conformanceSuite, root string) []conformanceVector {
 	t.Helper()
 
-	b, err := os.ReadFile(s.manifest())
+	b, err := os.ReadFile(s.manifest(root))
 	if err != nil {
-		t.Skipf("no conformance manifest at %s", s.manifest())
+		t.Skipf("no conformance manifest at %s", s.manifest(root))
 	}
 
 	var suite struct {
@@ -120,14 +130,16 @@ func TestConformance(t *testing.T) {
 		t.Skip("conformance corpus is large")
 	}
 
+	root := conformanceRoot(t)
+
 	for _, suite := range conformanceSuites {
 		t.Run(suite.name, func(t *testing.T) {
-			runConformance(t, suite)
+			runConformance(t, suite, root)
 		})
 	}
 }
 
-func runConformance(t *testing.T, suite conformanceSuite) {
+func runConformance(t *testing.T, suite conformanceSuite, root string) {
 	t.Helper()
 
 	var exact, wrong, broken, absent int
@@ -136,8 +148,8 @@ func runConformance(t *testing.T, suite conformanceSuite) {
 
 	errs := map[string]int{}
 
-	for _, v := range conformanceVectors(t, suite) {
-		stream := conformanceStream(suite.dir(), v)
+	for _, v := range conformanceVectors(t, suite, root) {
+		stream := conformanceStream(suite.dir(root), v)
 		if stream == "" {
 			absent++
 
