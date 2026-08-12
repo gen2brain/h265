@@ -274,3 +274,47 @@ func TestWeightedPrediction(t *testing.T) {
 		}
 	}
 }
+
+// TestPredUniAsm checks any compiled-in kernel against the Go one, over the
+// prediction unit widths HEVC uses, including the ones with a remainder the
+// kernel does not take.
+func TestPredUniAsm(t *testing.T) {
+	if predUniAsm == nil {
+		t.Skip("no assembly for this target")
+	}
+
+	r := rand.New(rand.NewPCG(23, 24))
+
+	for _, w := range []int{4, 8, 12, 16, 24, 32, 48, 64} {
+		for _, h := range []int{4, 8, 16} {
+			srcStride := w + 3
+			dstStride := w + 9
+
+			src := make([]int16, srcStride*h)
+			for i := range src {
+				// Spans the range the interpolation produces, including the
+				// values that clip at both ends.
+				src[i] = int16(r.IntN(1<<16) - 1<<15)
+			}
+
+			got := make([]uint8, dstStride*(h+2))
+			for i := range got {
+				got[i] = uint8(r.IntN(256))
+			}
+
+			want := make([]uint8, len(got))
+			copy(want, got)
+
+			off := 2*dstStride + 5
+
+			predUni(got, off, dstStride, src, srcStride, w, h, 8)
+			predUniGo(want, off, dstStride, src, srcStride, w, h, 8, 6)
+
+			for i := range got {
+				if got[i] != want[i] {
+					t.Fatalf("w=%d h=%d: [%d] = %d, want %d", w, h, i, got[i], want[i])
+				}
+			}
+		}
+	}
+}

@@ -11,6 +11,9 @@ func odd16NEON(out *int32, in *int32, m *int8, stride int)
 //go:noescape
 func predPlanar8NEON(dst *uint8, stride int, top *int32, left *int32, tr, bl, n, shift int)
 
+//go:noescape
+func predUni8NEON(dst *uint8, dstStride int, src *int16, srcStride, w, h, shift int)
+
 func dspInit(d *dspContext) {
 	d.addResidual8 = func(dst []uint8, stride int, coef []int32, n, shift int) {
 		addResidual8NEON(&dst[0], stride, &coef[0], n, shift)
@@ -18,6 +21,10 @@ func dspInit(d *dspContext) {
 
 	oddAsm = func(out, in []int32, stride int) {
 		odd16NEON(&out[0], &in[0], &transMatrix[0][0], stride)
+	}
+
+	predUniAsm = func(dst []uint8, dstStride int, src []int16, srcStride, w, h, shift int) {
+		predUni8NEON(&dst[0], dstStride, &src[0], srcStride, w, h, shift)
 	}
 
 	planarAsm = func(dst []uint8, stride int, r *refSamples, shift int) {

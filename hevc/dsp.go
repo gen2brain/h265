@@ -20,6 +20,10 @@ var oddAsm func(out, in []int32, stride int)
 // compiled in. It handles n of at least eight.
 var planarAsm func(dst []uint8, stride int, r *refSamples, shift int)
 
+// predUniAsm is 8.5.3.3.4.2 for eight-bit output, nil unless an
+// implementation is compiled in. w is a multiple of eight.
+var predUniAsm func(dst []uint8, dstStride int, src []int16, srcStride, w, h, shift int)
+
 func newDSPGo() *dspContext {
 	return &dspContext{
 		inverseTransform: inverseTransform,

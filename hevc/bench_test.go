@@ -138,3 +138,34 @@ func BenchmarkPredPlanar(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkPredUni(b *testing.B) {
+	for _, w := range []int{16, 64} {
+		h := w
+
+		src := make([]int16, w*h)
+		for i := range src {
+			src[i] = int16(i*911%16384 - 4096)
+		}
+
+		dst := make([]uint8, w*h)
+
+		b.Run(fmt.Sprintf("go/%d", w), func(b *testing.B) {
+			for b.Loop() {
+				predUniGo(dst, 0, w, src, w, w, h, 8, 6)
+			}
+
+			b.ReportMetric(float64(w*h)*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
+		})
+
+		if predUniAsm != nil {
+			b.Run(fmt.Sprintf("asm/%d", w), func(b *testing.B) {
+				for b.Loop() {
+					predUniAsm(dst, w, src, w, w, h, 6)
+				}
+
+				b.ReportMetric(float64(w*h)*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
+			})
+		}
+	}
+}

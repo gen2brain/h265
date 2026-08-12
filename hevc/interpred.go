@@ -197,6 +197,27 @@ func mcChroma[P pixel](dst []int16, dstStride int, src []P, srcStride, picW, pic
 // predUni is the default uni-prediction of 8.5.3.3.4.2.
 func predUni[P pixel](dst []P, dstOff, dstStride int, src []int16, srcStride, w, h, bitDepth int) {
 	shift := 14 - bitDepth
+
+	if k := predUniAsm; k != nil && bitDepth == 8 {
+		if p, ok := any(dst).([]uint8); ok {
+			if n := w &^ 7; n != 0 {
+				k(p[dstOff:], dstStride, src, srcStride, n, h, shift)
+
+				if n == w {
+					return
+				}
+
+				dstOff += n
+				src = src[n:]
+				w -= n
+			}
+		}
+	}
+
+	predUniGo(dst, dstOff, dstStride, src, srcStride, w, h, bitDepth, shift)
+}
+
+func predUniGo[P pixel](dst []P, dstOff, dstStride int, src []int16, srcStride, w, h, bitDepth, shift int) {
 	off := int32(1) << (shift - 1)
 	maxV := int32(1)<<bitDepth - 1
 
