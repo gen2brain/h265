@@ -898,7 +898,7 @@ func (d *ctuDecoder) chromaMode(x, y int) int {
 }
 
 func (d *ctuDecoder) reconstruct(x, y, log2Size, cIdx, mode int, cbf bool) error {
-	if d.pic.BitDepth > 8 {
+	if d.pic.deep() {
 		plane, stride := d.pic.plane16(cIdx)
 
 		return reconstructPlane(d, plane, stride, x, y, log2Size, cIdx, mode, cbf)
@@ -913,7 +913,7 @@ func reconstructPlane[P pixel](d *ctuDecoder, plane []P, stride, x, y, log2Size,
 	cbf bool,
 ) error {
 	n := 1 << log2Size
-	bitDepth := d.pic.BitDepth
+	bitDepth := d.pic.depth(cIdx)
 
 	if d.curIntra {
 		gatherRef(d, plane, stride, x, y, n, cIdx)
@@ -1094,7 +1094,7 @@ func gatherRef[P pixel](d *ctuDecoder, plane []P, stride, x, y, n, cIdx int) {
 		}
 	}
 
-	d.ref.substitute(d.avail[:4*n+1], d.pic.BitDepth)
+	d.ref.substitute(d.avail[:4*n+1], d.pic.depth(cIdx))
 }
 
 // buildTileScan is 6.5.1, the raster to tile scan conversion and the tile
@@ -1310,7 +1310,7 @@ func (d *ctuDecoder) pcmSample(x, y, log2Size int) error {
 
 	depth := int(d.s.pcmBitDepthLuma)
 
-	if d.pic.BitDepth > 8 {
+	if d.pic.deep() {
 		plane, stride := d.pic.plane16(0)
 		readPCM(&g, plane, stride, x, y, size, size, depth, d.pic.BitDepth)
 	} else {
@@ -1323,12 +1323,12 @@ func (d *ctuDecoder) pcmSample(x, y, log2Size int) error {
 		depth = int(d.s.pcmBitDepthChroma)
 
 		for cIdx := 1; cIdx <= 2; cIdx++ {
-			if d.pic.BitDepth > 8 {
+			if d.pic.deep() {
 				plane, stride := d.pic.plane16(cIdx)
-				readPCM(&g, plane, stride, x/sw, y/sh, size/sw, size/sh, depth, d.pic.BitDepth)
+				readPCM(&g, plane, stride, x/sw, y/sh, size/sw, size/sh, depth, d.pic.BitDepthC)
 			} else {
 				plane, stride := d.pic.plane8(cIdx)
-				readPCM(&g, plane, stride, x/sw, y/sh, size/sw, size/sh, depth, d.pic.BitDepth)
+				readPCM(&g, plane, stride, x/sw, y/sh, size/sw, size/sh, depth, d.pic.BitDepthC)
 			}
 		}
 	}

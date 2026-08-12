@@ -230,7 +230,7 @@ func (d *ctuDecoder) deblockEdge(x, y int, vertical bool) {
 		return
 	}
 
-	deep := d.pic.BitDepth > 8
+	deep := d.pic.deep()
 	luma8, lumaStride8 := d.pic.plane8(0)
 	luma16, lumaStride16 := d.pic.plane16(0)
 
@@ -299,13 +299,13 @@ func (d *ctuDecoder) deblockEdge(x, y int, vertical bool) {
 
 			cqp := chromaQP(clip3(qp+off, 0, 57), d.s.chromaArrayType())
 
-			if d.pic.BitDepth > 8 {
+			if d.pic.deep() {
 				plane, stride := d.pic.plane16(cIdx)
-				deblockChroma(plane, stride, qx/sw, qy/sh, n, vertical, cqp, sl, d.pic.BitDepth,
+				deblockChroma(plane, stride, qx/sw, qy/sh, n, vertical, cqp, sl, d.pic.BitDepthC,
 					noP, noQ)
 			} else {
 				plane, stride := d.pic.plane8(cIdx)
-				deblockChroma(plane, stride, qx/sw, qy/sh, n, vertical, cqp, sl, d.pic.BitDepth,
+				deblockChroma(plane, stride, qx/sw, qy/sh, n, vertical, cqp, sl, d.pic.BitDepthC,
 					noP, noQ)
 			}
 		}

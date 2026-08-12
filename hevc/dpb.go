@@ -386,18 +386,19 @@ func (d *Decoder) generateUnavailable(rps *refPicSet, s *sps) {
 		p := newPicture(&d.pool, s)
 		p.POC = int(poc)
 
-		mid8 := uint8(1) << (p.BitDepth - 1)
-		mid16 := uint16(1) << (p.BitDepth - 1)
+		for cIdx, plane := range [][]uint8{p.Y, p.Cb, p.Cr} {
+			mid := uint8(1) << (p.depth(cIdx) - 1)
 
-		for _, plane := range [][]uint8{p.Y, p.Cb, p.Cr} {
 			for i := range plane {
-				plane[i] = mid8
+				plane[i] = mid
 			}
 		}
 
-		for _, plane := range [][]uint16{p.Y16, p.Cb16, p.Cr16} {
+		for cIdx, plane := range [][]uint16{p.Y16, p.Cb16, p.Cr16} {
+			mid := uint16(1) << (p.depth(cIdx) - 1)
+
 			for i := range plane {
-				plane[i] = mid16
+				plane[i] = mid
 			}
 		}
 

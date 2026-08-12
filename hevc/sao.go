@@ -57,8 +57,6 @@ func (d *ctuDecoder) parseSAO(x, y int) {
 		nComp = 3
 	}
 
-	cMax := 1<<(min(d.pic.BitDepth, 10)-5) - 1
-
 	for cIdx := range nComp {
 		if cIdx == 0 && !d.sh.saoLuma {
 			continue
@@ -67,6 +65,8 @@ func (d *ctuDecoder) parseSAO(x, y int) {
 		if cIdx > 0 && !d.sh.saoChroma {
 			continue
 		}
+
+		cMax := 1<<(min(d.pic.depth(cIdx), 10)-5) - 1
 
 		typeIdx := 0
 
@@ -157,7 +157,7 @@ func (d *ctuDecoder) applySAO() {
 	}
 
 	for cIdx := range nComp {
-		if d.pic.BitDepth > 8 {
+		if d.pic.deep() {
 			plane, stride := d.pic.plane16(cIdx)
 			d.saoSrc16 = grow(d.saoSrc16, len(plane))
 			saoPlane(d, plane, stride, cIdx, d.saoSrc16)
@@ -180,8 +180,8 @@ func saoPlane[P pixel](d *ctuDecoder, plane []P, stride, cIdx int, src []P) {
 		return
 	}
 
-	maxV := int32(1)<<d.pic.BitDepth - 1
-	shift := d.pic.BitDepth - 5
+	maxV := int32(1)<<d.pic.depth(cIdx) - 1
+	shift := d.pic.depth(cIdx) - 5
 
 	ctbW := int(d.s.ctbSizeY) / sw
 	ctbH := int(d.s.ctbSizeY) / sh

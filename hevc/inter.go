@@ -354,7 +354,7 @@ func (d *ctuDecoder) motionCompensate(x, y, w, h int, m *mvInfo) error {
 
 		buf[l] = d.mcBuf[l][:w*h]
 
-		if d.pic.BitDepth > 8 {
+		if d.pic.deep() {
 			src, stride := ref.plane16(0)
 			mcLuma(buf[l], w, src, stride, ref.Width, ref.Height,
 				x+int(m.mv[l].x>>2), y+int(m.mv[l].y>>2),
@@ -401,15 +401,15 @@ func (d *ctuDecoder) motionCompensate(x, y, w, h int, m *mvInfo) error {
 			px, py := x/sw+mvx>>3, y/sh+mvy>>3
 			fx, fy := mvx&7, mvy&7
 
-			if d.pic.BitDepth > 8 {
+			if d.pic.deep() {
 				src, stride := ref.plane16(cIdx)
 				mcChroma(cbuf[l], cw, src, stride, ref.WidthC, ref.HeightC,
-					px, py, fx, fy, cw, ch, d.pic.BitDepth, d.mcTmp[:], d.mcTmp16[:],
+					px, py, fx, fy, cw, ch, d.pic.BitDepthC, d.mcTmp[:], d.mcTmp16[:],
 					d.mcPad16[:])
 			} else {
 				src, stride := ref.plane8(cIdx)
 				mcChroma(cbuf[l], cw, src, stride, ref.WidthC, ref.HeightC,
-					px, py, fx, fy, cw, ch, d.pic.BitDepth, d.mcTmp[:], d.mcTmp16[:],
+					px, py, fx, fy, cw, ch, d.pic.BitDepthC, d.mcTmp[:], d.mcTmp16[:],
 					d.mcPad8[:])
 			}
 		}
@@ -428,9 +428,9 @@ func (d *ctuDecoder) weighted() bool {
 }
 
 func (d *ctuDecoder) combine(x, y, w, h, cIdx int, buf [2][]int16, m *mvInfo) error {
-	bd := d.pic.BitDepth
+	bd := d.pic.depth(cIdx)
 
-	if d.pic.BitDepth > 8 {
+	if d.pic.deep() {
 		plane, stride := d.pic.plane16(cIdx)
 
 		return combineInto(d, plane, y*stride+x, stride, w, h, cIdx, bd, buf, m)

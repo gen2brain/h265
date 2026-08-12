@@ -12,8 +12,13 @@ type Picture struct {
 	CropW, CropH int
 
 	ChromaFormat int
-	BitDepth     int
-	POC          int
+
+	// BitDepth and BitDepthC are the luma and chroma sample depths, which
+	// 7.4.3.2 lets differ. Both planes are stored 16-bit if either exceeds 8.
+	BitDepth  int
+	BitDepthC int
+
+	POC int
 
 	Y, Cb, Cr       []uint8
 	Y16, Cb16, Cr16 []uint16
@@ -144,6 +149,7 @@ func newPicture(pool *picPool, s *sps) *Picture {
 		Height:       int(s.picHeightInLumaSamples),
 		ChromaFormat: int(s.chromaFormatIDC),
 		BitDepth:     int(s.bitDepthLuma),
+		BitDepthC:    int(s.bitDepthChroma),
 	}
 
 	p.CropX = int(s.confWinLeft) * s.subWidthC
@@ -166,7 +172,7 @@ func newPicture(pool *picPool, s *sps) *Picture {
 		strideY: p.StrideY, height: p.Height,
 		strideC: p.StrideC, heightC: p.HeightC,
 		colLen: p.ColW * ((p.Height + 15) / 16),
-		deep:   s.bitDepthLuma > 8,
+		deep:   max(s.bitDepthLuma, s.bitDepthChroma) > 8,
 	}
 
 	// A recycled picture keeps only its buffers; everything derived from the
@@ -206,6 +212,20 @@ func newPicture(pool *picPool, s *sps) *Picture {
 	p.Cr = make([]uint8, p.StrideC*p.HeightC)
 
 	return p
+}
+
+// deep reports whether the planes hold 16-bit samples.
+func (p *Picture) deep() bool {
+	return p.Y16 != nil
+}
+
+// depth is the sample depth of one component.
+func (p *Picture) depth(cIdx int) int {
+	if cIdx == 0 {
+		return p.BitDepth
+	}
+
+	return p.BitDepthC
 }
 
 func (p *Picture) plane8(cIdx int) ([]uint8, int) {

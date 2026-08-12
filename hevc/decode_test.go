@@ -48,7 +48,7 @@ func planarYUV(p *Picture) []byte {
 		cw, ch = p.CropW*p.WidthC/p.Width, p.CropH*p.HeightC/p.Height
 	}
 
-	if p.BitDepth > 8 {
+	if p.deep() {
 		crop16 := func(plane []uint16, stride, x, y, w, h int) {
 			for j := range h {
 				for i := range w {
