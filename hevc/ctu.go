@@ -470,7 +470,12 @@ func (d *ctuDecoder) parseCuQPDelta() {
 	d.qpCoded = true
 
 	off := 6 * (int32(d.s.bitDepthLuma) - 8)
-	d.qpYCur = (d.qpYPred+d.qpDelta+52+2*off)%(52+off) - off
+
+	// 8.6.1 wraps into [-QpBdOffsetY, 51]. Go's remainder keeps the sign of
+	// the dividend, so a delta outside its legal range would land outside that
+	// and index the scaling tables from below.
+	m := 52 + off
+	d.qpYCur = ((d.qpYPred+d.qpDelta+52+2*off)%m+m)%m - off
 }
 
 // fill writes one value across every minimum transform block a coding block

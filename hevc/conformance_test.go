@@ -4,18 +4,37 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
 )
 
-// The JCT-VC corpus is large and lives outside the repository. Point these at
+// The JCT-VC corpora are large and live outside the repository. Point these at
 // a fluster checkout and its downloaded resources.
-const (
-	conformanceManifest = "/temp/h265/fluster/test_suites/h.265/JCT-VC-HEVC_V1.json"
-	conformanceDir      = "/temp/h265/conformance/JCT-VC-HEVC_V1"
-)
+const conformanceRoot = "/temp/h265"
+
+// conformanceSuite is one downloaded corpus and the tally it currently reaches.
+// Raise baseline whenever the tally improves, so a regression fails rather than
+// passing quietly.
+type conformanceSuite struct {
+	name     string
+	baseline int
+}
+
+var conformanceSuites = []conformanceSuite{
+	{"JCT-VC-HEVC_V1", 97},
+	{"JCT-VC-RExt", 11},
+}
+
+func (s conformanceSuite) manifest() string {
+	return filepath.Join(conformanceRoot, "fluster/test_suites/h.265", s.name+".json")
+}
+
+func (s conformanceSuite) dir() string {
+	return filepath.Join(conformanceRoot, "conformance", s.name)
+}
 
 type conformanceVector struct {
 	Name   string `json:"name"`
@@ -23,12 +42,12 @@ type conformanceVector struct {
 	Result string `json:"result"`
 }
 
-func conformanceVectors(t *testing.T) []conformanceVector {
+func conformanceVectors(t *testing.T, s conformanceSuite) []conformanceVector {
 	t.Helper()
 
-	b, err := os.ReadFile(conformanceManifest)
+	b, err := os.ReadFile(s.manifest())
 	if err != nil {
-		t.Skipf("no conformance manifest at %s", conformanceManifest)
+		t.Skipf("no conformance manifest at %s", s.manifest())
 	}
 
 	var suite struct {
@@ -42,13 +61,13 @@ func conformanceVectors(t *testing.T) []conformanceVector {
 	return suite.Vectors
 }
 
-func conformanceStream(v conformanceVector) string {
-	p := filepath.Join(conformanceDir, v.Name, v.Input)
+func conformanceStream(dir string, v conformanceVector) string {
+	p := filepath.Join(dir, v.Name, v.Input)
 	if _, err := os.Stat(p); err == nil {
 		return p
 	}
 
-	all, _ := filepath.Glob(filepath.Join(conformanceDir, v.Name, "*"))
+	all, _ := filepath.Glob(filepath.Join(dir, v.Name, "*"))
 
 	for _, m := range all {
 		switch filepath.Ext(m) {
@@ -63,9 +82,11 @@ func conformanceStream(v conformanceVector) string {
 // decodeMD5 returns the digest of the decoded output in the same layout the
 // manifest records, which is what FFmpeg writes with -f rawvideo.
 func decodeMD5(data []byte) (digest string, err error) {
+	// A panic is a decoder bug rather than a bad stream, so it is caught to
+	// keep the sweep going but reported as itself.
 	defer func() {
 		if r := recover(); r != nil {
-			err = ErrInvalid
+			err = fmt.Errorf("panic: %v", r)
 		}
 	}()
 
@@ -99,14 +120,24 @@ func TestConformance(t *testing.T) {
 		t.Skip("conformance corpus is large")
 	}
 
+	for _, suite := range conformanceSuites {
+		t.Run(suite.name, func(t *testing.T) {
+			runConformance(t, suite)
+		})
+	}
+}
+
+func runConformance(t *testing.T, suite conformanceSuite) {
+	t.Helper()
+
 	var exact, wrong, broken, absent int
 
-	var passing []string
+	var passing, failing []string
 
 	errs := map[string]int{}
 
-	for _, v := range conformanceVectors(t) {
-		stream := conformanceStream(v)
+	for _, v := range conformanceVectors(t, suite) {
+		stream := conformanceStream(suite.dir(), v)
 		if stream == "" {
 			absent++
 
@@ -127,18 +158,23 @@ func TestConformance(t *testing.T) {
 			broken++
 
 			errs[err.Error()]++
+
+			failing = append(failing, v.Name+" (error)")
 		case got == v.Result:
 			exact++
 
 			passing = append(passing, v.Name)
 		default:
 			wrong++
+
+			failing = append(failing, v.Name)
 		}
 	}
 
 	sort.Strings(passing)
+	sort.Strings(failing)
 
-	t.Logf("JCT-VC-HEVC_V1: exact=%d wrong=%d error=%d absent=%d", exact, wrong, broken, absent)
+	t.Logf("%s: exact=%d wrong=%d error=%d absent=%d", suite.name, exact, wrong, broken, absent)
 
 	for k, n := range errs {
 		t.Logf("  %3d x %s", n, k)
@@ -148,11 +184,11 @@ func TestConformance(t *testing.T) {
 		t.Logf("  exact: %v", passing)
 	}
 
-	if exact < conformanceBaseline {
-		t.Errorf("conformance regressed: %d exact, baseline is %d", exact, conformanceBaseline)
+	for _, n := range failing {
+		t.Logf("  not yet: %s", n)
+	}
+
+	if exact < suite.baseline {
+		t.Errorf("%s regressed: %d exact, baseline is %d", suite.name, exact, suite.baseline)
 	}
 }
-
-// conformanceBaseline is what the decoder currently reaches. Raise it whenever
-// the tally improves, so a regression fails rather than passing quietly.
-const conformanceBaseline = 97
