@@ -1,3 +1,56 @@
+/*
+Package hevc decodes an HEVC (H.265) bitstream.
+
+[Decoder.DecodeNAL] takes one NAL unit at a time and returns the pictures that
+are ready, which is not the same as the pictures it just decoded: a stream that
+codes out of display order is held back by sps_max_num_reorder_pics and released
+by picture order count. [Decoder.Flush] drains what is left at the end.
+
+	var d hevc.Decoder
+
+	for _, nal := range hevc.SplitAnnexB(data) {
+		pics, err := d.DecodeNAL(nal)
+		if err != nil {
+			return err
+		}
+
+		for _, p := range pics {
+			p.Release()
+		}
+	}
+
+[SplitAnnexB] frames a start-code delimited stream and [SplitHVCC] a
+length-prefixed one.
+
+# Pictures
+
+A [Picture] holds its planes as either 8-bit or 16-bit samples, in Y/Cb/Cr or
+Y16/Cb16/Cr16, chosen by the sequence rather than by the plane: both are 16-bit
+if either [Picture.BitDepth] or [Picture.BitDepthC] exceeds 8, which 7.4.3.2
+allows to differ. Width and Height stay as decoded because prediction reads the
+whole plane; CropX, CropY, CropW and CropH are what a caller should display.
+
+[Picture.Release] hands the planes back to the decoder to be reused by a later
+picture. It is optional, since a picture that is never released is collected
+like any other value, but it keeps a long sequence from allocating a fresh set
+of planes per frame. Reading the planes afterwards is a mistake; releasing twice
+is not.
+
+# Threading
+
+[Decoder.Threads] bounds the goroutines a picture may be spread over, across
+wavefront rows and the loop filter row bands. Zero means GOMAXPROCS and one
+decodes serially. A picture without entropy_coding_sync_enabled_flag, or one a
+single block wide, is serial whatever the bound.
+
+# Errors
+
+[ErrInvalid] means the bitstream is malformed. [ErrUnsupported] means it is
+valid and declares a coding tool this decoder does not implement, which is
+refused rather than decoded into a picture that merely looks plausible. Those
+tools are cross-component prediction, implicit and explicit RDPCM, and CABAC
+bypass alignment; everything else in the range extensions is applied.
+*/
 package hevc
 
 // Decoder decodes a HEVC bitstream one NAL unit at a time.
