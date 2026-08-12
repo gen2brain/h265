@@ -203,88 +203,92 @@ func saoPlane[P pixel](d *ctuDecoder, plane []P, stride, cIdx int, src []P) {
 
 	copy(src[from:to], plane[from:to])
 
-	for ctb := range d.sao {
-		if !d.saoEnabled(ctb, cIdx) {
-			continue
+	// Every block reads the copy and writes only its own samples, so the
+	// blocks spread over the workers once the copy is in place.
+	d.overRows(len(d.sao), func(c0, c1 int) {
+		for ctb := c0; ctb < c1; ctb++ {
+			if !d.saoEnabled(ctb, cIdx) {
+				continue
+			}
+
+			p := &d.sao[ctb][cIdx]
+
+			x0, y0 := ctb%picW*ctbW, ctb/picW*ctbH
+
+			a := eoOffsets[p.class][0]
+			b := eoOffsets[p.class][1]
+
+			band := p.typeIdx == saoBand
+
+			xhi := min(x0+ctbW, w)
+
+			for y := y0; y < min(y0+ctbH, h); y++ {
+				xlo := x0
+
+				if !band {
+					if y+a[1] < 0 || y+a[1] >= h || y+b[1] < 0 || y+b[1] >= h {
+						continue
+					}
+
+					xlo = max(xlo, max(-a[0], -b[0]))
+					xhi = min(min(x0+ctbW, w), w-max(a[0], b[0]))
+				}
+
+				// Only the first and last row and column of a coding tree block
+				// can reach across one, so the interior needs no availability test.
+				ilo, ihi := xlo, xhi
+
+				if !band {
+					if a[1] != 0 && (y == y0 || y == min(y0+ctbH, h)-1) {
+						ihi = ilo
+					} else if a[0] != 0 {
+						ilo = min(max(xlo, x0+1), xhi)
+						ihi = max(min(xhi, x0+ctbW-1), ilo)
+					}
+				}
+
+				for x := xlo; x < ilo; x++ {
+					saoSample(d, plane, src, stride, x, y, w, h, sw, sh, p, a, b, shift, maxV)
+				}
+
+				for x := ihi; x < xhi; x++ {
+					saoSample(d, plane, src, stride, x, y, w, h, sw, sh, p, a, b, shift, maxV)
+				}
+
+				// The next sample whose transform block may differ.
+				next := func(x int) int {
+					return min((x*sw>>d.minTbLog2+1)<<d.minTbLog2/sw, ihi)
+				}
+
+				for x := ilo; x < ihi; {
+					if d.noFilter[d.tbIndex(x*sw, y*sh)] {
+						x = next(x)
+
+						continue
+					}
+
+					run := x
+					for run < ihi && !d.noFilter[d.tbIndex(run*sw, y*sh)] {
+						run = next(run)
+					}
+
+					o := &p.offset
+
+					if band {
+						saoBandRow(plane[y*stride+x:], src[y*stride+x:], run-x, p.band, o,
+							shift, maxV)
+					} else {
+						base := y*stride + x
+						saoEdgeRow(plane[base:], src[base:],
+							src[base+a[1]*stride+a[0]:], src[base+b[1]*stride+b[0]:],
+							run-x, o, maxV)
+					}
+
+					x = run
+				}
+			}
 		}
-
-		p := &d.sao[ctb][cIdx]
-
-		x0, y0 := ctb%picW*ctbW, ctb/picW*ctbH
-
-		a := eoOffsets[p.class][0]
-		b := eoOffsets[p.class][1]
-
-		band := p.typeIdx == saoBand
-
-		xhi := min(x0+ctbW, w)
-
-		for y := y0; y < min(y0+ctbH, h); y++ {
-			xlo := x0
-
-			if !band {
-				if y+a[1] < 0 || y+a[1] >= h || y+b[1] < 0 || y+b[1] >= h {
-					continue
-				}
-
-				xlo = max(xlo, max(-a[0], -b[0]))
-				xhi = min(min(x0+ctbW, w), w-max(a[0], b[0]))
-			}
-
-			// Only the first and last row and column of a coding tree block
-			// can reach across one, so the interior needs no availability test.
-			ilo, ihi := xlo, xhi
-
-			if !band {
-				if a[1] != 0 && (y == y0 || y == min(y0+ctbH, h)-1) {
-					ihi = ilo
-				} else if a[0] != 0 {
-					ilo = min(max(xlo, x0+1), xhi)
-					ihi = max(min(xhi, x0+ctbW-1), ilo)
-				}
-			}
-
-			for x := xlo; x < ilo; x++ {
-				saoSample(d, plane, src, stride, x, y, w, h, sw, sh, p, a, b, shift, maxV)
-			}
-
-			for x := ihi; x < xhi; x++ {
-				saoSample(d, plane, src, stride, x, y, w, h, sw, sh, p, a, b, shift, maxV)
-			}
-
-			// The next sample whose transform block may differ.
-			next := func(x int) int {
-				return min((x*sw>>d.minTbLog2+1)<<d.minTbLog2/sw, ihi)
-			}
-
-			for x := ilo; x < ihi; {
-				if d.noFilter[d.tbIndex(x*sw, y*sh)] {
-					x = next(x)
-
-					continue
-				}
-
-				run := x
-				for run < ihi && !d.noFilter[d.tbIndex(run*sw, y*sh)] {
-					run = next(run)
-				}
-
-				o := &p.offset
-
-				if band {
-					saoBandRow(plane[y*stride+x:], src[y*stride+x:], run-x, p.band, o,
-						shift, maxV)
-				} else {
-					base := y*stride + x
-					saoEdgeRow(plane[base:], src[base:],
-						src[base+a[1]*stride+a[0]:], src[base+b[1]*stride+b[0]:],
-						run-x, o, maxV)
-				}
-
-				x = run
-			}
-		}
-	}
+	})
 }
 
 func (d *ctuDecoder) saoEnabled(ctb, cIdx int) bool {

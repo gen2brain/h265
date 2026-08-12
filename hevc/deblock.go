@@ -161,24 +161,29 @@ func (d *ctuDecoder) sliceAt(x, y int) *sliceHeader {
 }
 
 // deblock is 8.7.2: every vertical edge in the picture, then every horizontal
-// one, both on the eight-sample grid.
+// one, both on the eight-sample grid. Within a pass each edge writes its own
+// band of eight lines, so the bands split across workers.
 func (d *ctuDecoder) deblock() {
 	w, h := int(d.s.picWidthInLumaSamples), int(d.s.picHeightInLumaSamples)
 
 	for _, vertical := range []bool{true, false} {
-		for y := 0; y < h; y += 8 {
-			for x := 0; x < w; x += 8 {
-				if vertical && x == 0 {
-					continue
-				}
+		d.overRows((h+7)/8, func(r0, r1 int) {
+			for r := r0; r < r1; r++ {
+				y := r * 8
 
 				if !vertical && y == 0 {
 					continue
 				}
 
-				d.deblockEdge(x, y, vertical)
+				for x := 0; x < w; x += 8 {
+					if vertical && x == 0 {
+						continue
+					}
+
+					d.deblockEdge(x, y, vertical)
+				}
 			}
-		}
+		})
 	}
 }
 

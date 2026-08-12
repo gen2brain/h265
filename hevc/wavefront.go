@@ -244,3 +244,35 @@ func (d *ctuDecoder) decodeWaveRow(nal NALUnit, sh *sliceHeader, starts []int, v
 
 	return nil
 }
+
+// minBandsPerWorker keeps a small picture serial, where handing out the work
+// costs more than doing it.
+const minBandsPerWorker = 16
+
+// overRows runs fn over row bands of [0, rows), on as many goroutines as the
+// picture is allowed. The loop filters use it: their passes are ordered against
+// each other but every band writes samples no other band touches.
+func (d *ctuDecoder) overRows(rows int, fn func(r0, r1 int)) {
+	n := min(d.threads, rows/minBandsPerWorker)
+	if n <= 1 {
+		fn(0, rows)
+
+		return
+	}
+
+	chunk := (rows + n - 1) / n
+
+	var wg sync.WaitGroup
+
+	for r0 := 0; r0 < rows; r0 += chunk {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			fn(r0, min(r0+chunk, rows))
+		}()
+	}
+
+	wg.Wait()
+}
