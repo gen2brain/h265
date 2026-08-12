@@ -951,9 +951,19 @@ func reconstructPlane[P pixel](d *ctuDecoder, plane []P, stride, x, y, log2Size,
 		qp = chromaQP(clip3(d.qpYCur+off, -offC, 57), d.s.chromaArrayType()) + offC
 	}
 
+	// 8.6.2 turns a four by four intra block end for end, whether it reaches
+	// the residual by skipping the transform or by bypassing it.
+	rotate := d.s.transformSkipRotation && n == 4 && d.curIntra
+
 	// 8.6.2: a bypassed unit takes the coefficients as the residual, with no
 	// scaling and no transform.
 	shift := 0
+
+	if d.bypass && rotate {
+		for i, j := 0, len(coef)-1; i < j; i, j = i+1, j-1 {
+			coef[i], coef[j] = coef[j], coef[i]
+		}
+	}
 
 	if !d.bypass {
 		k := dsp
@@ -962,7 +972,7 @@ func reconstructPlane[P pixel](d *ctuDecoder, plane []P, stride, x, y, log2Size,
 			d.s.extendedPrecision)
 
 		if skip {
-			k.transformSkip(coef, n, false)
+			k.transformSkip(coef, n, rotate)
 		} else {
 			k.inverseTransform(coef, n, d.curIntra && cIdx == 0 && log2Size == 2, bitDepth,
 				d.s.extendedPrecision, &d.scratch)

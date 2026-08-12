@@ -84,13 +84,26 @@ type sigCtxSet struct {
 	prevCsbf int
 	is4x4    bool
 	sbDC     bool
+
+	// 9.3.4.2.5 gives a skipped block one context for every position.
+	flat bool
 }
 
-func newSigCtxSet(xS, yS, log2Size, cIdx, scanIdx, prevCsbf int) sigCtxSet {
+func newSigCtxSet(xS, yS, log2Size, cIdx, scanIdx, prevCsbf int, flat bool) sigCtxSet {
 	c := sigCtxSet{
 		prevCsbf: prevCsbf,
 		is4x4:    log2Size == 2,
 		sbDC:     xS|yS == 0,
+		flat:     flat,
+	}
+
+	if flat {
+		c.base = 42
+		if cIdx != 0 {
+			c.base = 27 + 16
+		}
+
+		return c
 	}
 
 	if cIdx != 0 {
@@ -122,6 +135,8 @@ func newSigCtxSet(xS, yS, log2Size, cIdx, scanIdx, prevCsbf int) sigCtxSet {
 
 func (c sigCtxSet) at(x, y int) int {
 	switch {
+	case c.flat:
+		return c.base
 	case c.is4x4:
 		return c.small + int(sigCtxMap4x4[y<<2+x])
 	case c.sbDC && x|y == 0:
@@ -194,6 +209,10 @@ func decodeResidual(c *cabac, s *sps, p *pps, sh *sliceHeader, coef []int32,
 		b.log2Size <= int(p.log2MaxTransformSkipSize) {
 		transformSkip = c.decodeBin(ctxTransformSkipFlag+min(b.cIdx, 1)) != 0
 	}
+
+	// 9.3.4.2.5 gives a block that skips the transform one significance
+	// context throughout, rather than one derived from the position.
+	flatCtx := s.transformSkipContext && (transformSkip || b.transquantBypass)
 
 	scanIdx := scanIndex(b.log2Size, b.cIdx, b.predModeIntra, b.intra, s.chromaArrayType())
 
@@ -302,7 +321,7 @@ func decodeResidual(c *cabac, s *sps, p *pps, sh *sliceHeader, coef []int32,
 
 		// 9.3.4.2.5 varies with the coefficient only through its place inside
 		// the sub-block; everything else is fixed for the whole of it.
-		sigSet := newSigCtxSet(xS, yS, b.log2Size, b.cIdx, scanIdx, prevCsbf)
+		sigSet := newSigCtxSet(xS, yS, b.log2Size, b.cIdx, scanIdx, prevCsbf, flatCtx)
 
 		for k := start; k >= 0; k-- {
 			if k == 0 && inferSbDcSig && !anyTrue(sig[1:]) {

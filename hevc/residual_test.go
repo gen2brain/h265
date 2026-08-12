@@ -311,7 +311,7 @@ func TestSigCtxSetMatchesDerivation(t *testing.T) {
 				for prevCsbf := range 4 {
 					for yS := 0; yS < n/4; yS++ {
 						for xS := 0; xS < n/4; xS++ {
-							set := newSigCtxSet(xS, yS, log2Size, cIdx, scanIdx, prevCsbf)
+							set := newSigCtxSet(xS, yS, log2Size, cIdx, scanIdx, prevCsbf, false)
 
 							for y := range 4 {
 								for x := range 4 {
