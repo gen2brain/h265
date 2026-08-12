@@ -75,7 +75,64 @@ func (c *cabac) coeffAbsLevelRemaining(rice int) int32 {
 	return int32((1<<k+2)<<rice) + int32(c.decodeBypassBits(k+rice))
 }
 
-// sigCoeffCtx is 9.3.4.2.5.
+// sigCtxSet is 9.3.4.2.5 with everything that is fixed for a sub-block already
+// resolved, so a coefficient costs one table lookup and an add.
+type sigCtxSet struct {
+	base     int
+	dc       int
+	small    int
+	prevCsbf int
+	is4x4    bool
+	sbDC     bool
+}
+
+func newSigCtxSet(xS, yS, log2Size, cIdx, scanIdx, prevCsbf int) sigCtxSet {
+	c := sigCtxSet{
+		prevCsbf: prevCsbf,
+		is4x4:    log2Size == 2,
+		sbDC:     xS|yS == 0,
+	}
+
+	if cIdx != 0 {
+		c.dc, c.small = 27, 27
+		c.base = 27 + 12
+
+		if log2Size == 3 {
+			c.base = 27 + 9
+		}
+
+		return c
+	}
+
+	if xS+yS > 0 {
+		c.base = 3
+	}
+
+	switch {
+	case log2Size == 3 && scanIdx == scanDiag:
+		c.base += 9
+	case log2Size == 3:
+		c.base += 15
+	default:
+		c.base += 21
+	}
+
+	return c
+}
+
+func (c sigCtxSet) at(x, y int) int {
+	switch {
+	case c.is4x4:
+		return c.small + int(sigCtxMap4x4[y<<2+x])
+	case c.sbDC && x|y == 0:
+		return c.dc
+	}
+
+	return c.base + int(sigCtxByCsbf[c.prevCsbf][y&3<<2|x&3])
+}
+
+// sigCoeffCtx is 9.3.4.2.5 transcribed, which sigCtxSet is held to by
+// TestSigCtxSetMatchesDerivation.
 func sigCoeffCtx(xC, yC, log2Size, cIdx, scanIdx int, prevCsbf int) int {
 	var sig int
 
@@ -85,33 +142,7 @@ func sigCoeffCtx(xC, yC, log2Size, cIdx, scanIdx int, prevCsbf int) int {
 	case xC+yC == 0:
 		sig = 0
 	default:
-		xP, yP := xC&3, yC&3
-
-		switch prevCsbf {
-		case 0:
-			switch {
-			case xP+yP == 0:
-				sig = 2
-			case xP+yP < 3:
-				sig = 1
-			}
-		case 1:
-			switch {
-			case yP == 0:
-				sig = 2
-			case yP == 1:
-				sig = 1
-			}
-		case 2:
-			switch {
-			case xP == 0:
-				sig = 2
-			case xP == 1:
-				sig = 1
-			}
-		default:
-			sig = 2
-		}
+		sig = int(sigCtxByCsbf[prevCsbf][yC&3<<2|xC&3])
 
 		if cIdx == 0 {
 			if xC>>2+yC>>2 > 0 {
@@ -269,6 +300,10 @@ func decodeResidual(c *cabac, s *sps, p *pps, sh *sliceHeader, coef []int32,
 			sig[lastScanPos] = true
 		}
 
+		// 9.3.4.2.5 varies with the coefficient only through its place inside
+		// the sub-block; everything else is fixed for the whole of it.
+		sigSet := newSigCtxSet(xS, yS, b.log2Size, b.cIdx, scanIdx, prevCsbf)
+
 		for k := start; k >= 0; k-- {
 			if k == 0 && inferSbDcSig && !anyTrue(sig[1:]) {
 				sig[0] = true
@@ -277,9 +312,8 @@ func decodeResidual(c *cabac, s *sps, p *pps, sh *sliceHeader, coef []int32,
 			}
 
 			pos := coeffScan[k]
-			xC, yC := xS<<2+int(pos.x), yS<<2+int(pos.y)
 
-			ctx := sigCoeffCtx(xC, yC, b.log2Size, b.cIdx, scanIdx, prevCsbf)
+			ctx := sigSet.at(int(pos.x), int(pos.y))
 			sig[k] = c.decodeBin(ctxSignificantCoeffFlag+ctx) != 0
 		}
 
@@ -342,17 +376,20 @@ func decodeSubBlockLevels(c *cabac, s *sps, p *pps, coef []int32,
 	// positions are gathered once instead of rescanning all sixteen.
 	var posBuf [numSbCoeff]int8
 
-	pos := posBuf[:0]
+	npos := 0
 
 	for k := numSbCoeff - 1; k >= 0; k-- {
 		if sig[k] {
-			pos = append(pos, int8(k))
+			posBuf[npos] = int8(k)
+			npos++
 		}
 	}
 
-	if len(pos) == 0 {
+	if npos == 0 {
 		return
 	}
+
+	pos := posBuf[:npos]
 
 	firstSig, lastSig := int(pos[len(pos)-1]), int(pos[0])
 	lastGreater1 := -1
@@ -496,3 +533,48 @@ func updateStatCoeff(stat *[4]uint8, i int, rem int32) {
 		stat[i]--
 	}
 }
+
+// sigCtxByCsbf is the position part of 9.3.4.2.5, which depends only on the
+// coefficient's place within its sub-block and on the two neighbouring
+// sub-block flags. Built from the derivation rather than transcribed.
+var sigCtxByCsbf = func() [4][numSbCoeff]uint8 {
+	var t [4][numSbCoeff]uint8
+
+	for csbf := range 4 {
+		for yP := range 4 {
+			for xP := range 4 {
+				var sig uint8
+
+				switch csbf {
+				case 0:
+					switch {
+					case xP+yP == 0:
+						sig = 2
+					case xP+yP < 3:
+						sig = 1
+					}
+				case 1:
+					switch {
+					case yP == 0:
+						sig = 2
+					case yP == 1:
+						sig = 1
+					}
+				case 2:
+					switch {
+					case xP == 0:
+						sig = 2
+					case xP == 1:
+						sig = 1
+					}
+				default:
+					sig = 2
+				}
+
+				t[csbf][yP<<2|xP] = sig
+			}
+		}
+	}
+
+	return t
+}()

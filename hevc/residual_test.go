@@ -299,3 +299,35 @@ func TestLastSigCoeffCtx(t *testing.T) {
 		}
 	}
 }
+
+// TestSigCtxSetMatchesDerivation holds the per-sub-block form the decoder runs
+// to 9.3.4.2.5 as written, over every combination there is.
+func TestSigCtxSetMatchesDerivation(t *testing.T) {
+	for _, log2Size := range []int{2, 3, 4, 5} {
+		n := 1 << log2Size
+
+		for cIdx := range 3 {
+			for _, scanIdx := range []int{scanDiag, scanHor, scanVer} {
+				for prevCsbf := range 4 {
+					for yS := 0; yS < n/4; yS++ {
+						for xS := 0; xS < n/4; xS++ {
+							set := newSigCtxSet(xS, yS, log2Size, cIdx, scanIdx, prevCsbf)
+
+							for y := range 4 {
+								for x := range 4 {
+									xC, yC := xS<<2+x, yS<<2+y
+
+									want := sigCoeffCtx(xC, yC, log2Size, cIdx, scanIdx, prevCsbf)
+									if got := set.at(x, y); got != want {
+										t.Fatalf("log2=%d cIdx=%d scan=%d csbf=%d sb=(%d,%d) at=(%d,%d): %d, want %d",
+											log2Size, cIdx, scanIdx, prevCsbf, xS, yS, x, y, got, want)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
