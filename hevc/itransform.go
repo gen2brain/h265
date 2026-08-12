@@ -396,6 +396,115 @@ func inverseTransform(coef []int32, n int, dst bool, bitDepth int, extended bool
 	}
 }
 
+// coeffRange is the transform range of a component, or zero when extended
+// precision is off.
+func (s *sps) coeffRange(cIdx int) int {
+	if !s.extendedPrecision {
+		return 0
+	}
+
+	bitDepth := int(s.bitDepthLuma)
+	if cIdx > 0 {
+		bitDepth = int(s.bitDepthChroma)
+	}
+
+	return transformRange(bitDepth, true)
+}
+
+// wideTransform reports whether the basis row sums of 8.6.4.2 can leave
+// thirty-two bits.
+func wideTransform(bitDepth int, extended bool) bool {
+	return transformRange(bitDepth, extended) > 15
+}
+
+func transform1DWide(out, in []int64, n int, dst bool) {
+	if dst {
+		for i := range 4 {
+			var v int64
+
+			for j := range 4 {
+				v += int64(dstMatrix[j][i]) * in[j]
+			}
+
+			out[i] = v
+		}
+
+		return
+	}
+
+	step := 32 / n
+
+	for i := range n {
+		var v int64
+
+		for j := range n {
+			v += int64(transMatrix[j*step][i]) * in[j]
+		}
+
+		out[i] = v
+	}
+}
+
+// inverseTransformWide is 8.6.4.1 in sixty-four bits, with bdShift folded into
+// the row stage.
+func inverseTransformWide(coef []int32, n int, dst bool, bitDepth int, shift int, s *transformScratch) {
+	rng := transformRange(bitDepth, true)
+	lo, hi := int64(-1<<rng), int64(1<<rng-1)
+
+	var col, out [32]int64
+
+	for x := range n {
+		for y := range n {
+			col[y] = int64(coef[y*n+x])
+		}
+
+		transform1DWide(out[:n], col[:n], n, dst)
+
+		for y := range n {
+			v := (out[y] + 64) >> 7
+
+			s.block[y*n+x] = int32(min(max(v, lo), hi))
+		}
+	}
+
+	rnd := int64(1) << (shift - 1)
+
+	for y := range n {
+		for x, v := range s.block[y*n : y*n+n] {
+			col[x] = int64(v)
+		}
+
+		transform1DWide(out[:n], col[:n], n, dst)
+
+		for x := range n {
+			coef[y*n+x] = int32((out[x] + rnd) >> shift)
+		}
+	}
+}
+
+// transformSkipWide is 8.6.2 with bdShift folded into tsShift. Extended
+// precision keeps bdShift the larger, so the net shift is to the right.
+func transformSkipWide(coef []int32, n int, rotate bool, shift int) {
+	sh := shift - (5 + log2(n))
+	rnd := int32(1) << (sh - 1)
+
+	if rotate {
+		for i, j := 0, len(coef)-1; i < j; i, j = i+1, j-1 {
+			coef[i], coef[j] = (coef[j]+rnd)>>sh, (coef[i]+rnd)>>sh
+		}
+
+		if len(coef)%2 == 1 {
+			coef[len(coef)/2] = (coef[len(coef)/2] + rnd) >> sh
+		}
+
+		return
+	}
+
+	for i, v := range coef {
+		coef[i] = (v + rnd) >> sh
+	}
+}
+
 // residualShiftBits is bdShift of 8.6.2.
 func residualShiftBits(bitDepth int, extended bool) int {
 	shift := 20 - bitDepth

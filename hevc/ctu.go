@@ -971,14 +971,23 @@ func reconstructPlane[P pixel](d *ctuDecoder, plane []P, stride, x, y, log2Size,
 		k.dequant(coef, d.scalingFactor(log2Size, cIdx, skip), n, int(qp), bitDepth,
 			d.s.extendedPrecision)
 
-		if skip {
-			k.transformSkip(coef, n, rotate)
-		} else {
-			k.inverseTransform(coef, n, d.curIntra && cIdx == 0 && log2Size == 2, bitDepth,
-				d.s.extendedPrecision, &d.scratch)
-		}
-
 		shift = residualShiftBits(bitDepth, d.s.extendedPrecision)
+		dst := d.curIntra && cIdx == 0 && log2Size == 2
+
+		switch {
+		case wideTransform(bitDepth, d.s.extendedPrecision):
+			if skip {
+				transformSkipWide(coef, n, rotate, shift)
+			} else {
+				inverseTransformWide(coef, n, dst, bitDepth, shift, &d.scratch)
+			}
+
+			shift = 0
+		case skip:
+			k.transformSkip(coef, n, rotate)
+		default:
+			k.inverseTransform(coef, n, dst, bitDepth, d.s.extendedPrecision, &d.scratch)
+		}
 	}
 
 	addResidual(plane, stride, x, y, n, shift, coef, bitDepth)

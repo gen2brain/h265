@@ -58,11 +58,16 @@ func (c *cabac) lastSigCoeffSuffix(prefix int) int {
 	return (1<<n)*(2+prefix&1) + suffix
 }
 
-// coeffAbsLevelRemaining is the binarization of 9.3.3.11: a bypass-coded unary
-// prefix, then either a Rice suffix or an exp-Golomb one.
-func (c *cabac) coeffAbsLevelRemaining(rice int) int32 {
+// coeffAbsLevelRemaining is the binarization of 9.3.3.11. rng selects the
+// limited form of 9.3.3.4 and is zero otherwise.
+func (c *cabac) coeffAbsLevelRemaining(rice, rng int) int32 {
+	limit := 32
+	if rng > 0 {
+		limit = 32 - rng
+	}
+
 	prefix := 0
-	for prefix < 32 && c.decodeBypass() != 0 {
+	for prefix < limit && c.decodeBypass() != 0 {
 		prefix++
 	}
 
@@ -71,6 +76,10 @@ func (c *cabac) coeffAbsLevelRemaining(rice int) int32 {
 	}
 
 	k := prefix - 3
+
+	if rng > 0 && prefix == limit {
+		return int32((1<<k+2)<<rice) + int32(c.decodeBypassBits(rng))
+	}
 
 	return int32((1<<k+2)<<rice) + int32(c.decodeBypassBits(k+rice))
 }
@@ -475,6 +484,8 @@ func decodeSubBlockLevels(c *cabac, s *sps, p *pps, coef []int32,
 		rice = int(statCoeff[riceStatIndex(b)] / 4)
 	}
 
+	rng := s.coeffRange(b.cIdx)
+
 	numSig := 0
 
 	var sumAbs int32
@@ -505,7 +516,7 @@ func decodeSubBlockLevels(c *cabac, s *sps, p *pps, coef []int32,
 		level := base
 
 		if base == want {
-			rem := c.coeffAbsLevelRemaining(rice)
+			rem := c.coeffAbsLevelRemaining(rice, rng)
 			level = base + rem
 
 			if s.persistentRiceAdaptation && firstRemaining {

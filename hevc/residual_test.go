@@ -7,13 +7,15 @@ import (
 
 // encodeCoeffAbsLevelRemaining is the inverse of 9.3.3.11, written from the
 // binarization rather than from the decoder.
-func (e *cabacEncoder) encodeCoeffAbsLevelRemaining(v int32, rice int) {
-	unary := func(n int) {
+func (e *cabacEncoder) encodeCoeffAbsLevelRemaining(v int32, rice, rng int) {
+	unary := func(n int, terminate bool) {
 		for range n {
 			e.encodeBypass(1)
 		}
 
-		e.encodeBypass(0)
+		if terminate {
+			e.encodeBypass(0)
+		}
 	}
 
 	bits := func(val int32, n int) {
@@ -23,7 +25,7 @@ func (e *cabacEncoder) encodeCoeffAbsLevelRemaining(v int32, rice int) {
 	}
 
 	if v < 3<<rice {
-		unary(int(v >> rice))
+		unary(int(v>>rice), true)
 		bits(v&(1<<rice-1), rice)
 
 		return
@@ -34,34 +36,56 @@ func (e *cabacEncoder) encodeCoeffAbsLevelRemaining(v int32, rice int) {
 		k++
 	}
 
-	unary(k + 3)
-	bits(v-((int32(1)<<k)+2)<<rice, k+rice)
+	limit := 32
+	if rng > 0 {
+		limit = 32 - rng
+		k = min(k, limit-3)
+	}
+
+	unary(k+3, k+3 < limit)
+
+	suffix := k + rice
+	if rng > 0 && k+3 == limit {
+		suffix = rng
+	}
+
+	bits(v-((int32(1)<<k)+2)<<rice, suffix)
 }
 
 func TestCoeffAbsLevelRemaining(t *testing.T) {
 	r := rand.New(rand.NewPCG(1, 2))
 
-	for rice := range 5 {
-		vals := []int32{0, 1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 100, 1000, 32767}
-		for range 200 {
-			vals = append(vals, int32(r.IntN(1<<16)))
-		}
+	for _, rng := range []int{0, 16, 18, 22} {
+		for rice := range 5 {
+			vals := []int32{0, 1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 100, 1000, 32767}
+			for range 200 {
+				vals = append(vals, int32(r.IntN(1<<16)))
+			}
 
-		e := newCabacEncoder(26, sliceI, false)
-		for _, v := range vals {
-			e.encodeCoeffAbsLevelRemaining(v, rice)
-		}
+			if rng > 0 {
+				base := (1<<(29-rng) + 2) << rice
+				for range 200 {
+					vals = append(vals, int32(base+r.IntN(1<<rng)))
+				}
+			}
 
-		e.encodeTerminate(1)
+			e := newCabacEncoder(26, sliceI, false)
+			for _, v := range vals {
+				e.encodeCoeffAbsLevelRemaining(v, rice, rng)
+			}
 
-		var d cabac
-		if err := d.init(e.finish(), 0); err != nil {
-			t.Fatal(err)
-		}
+			e.encodeTerminate(1)
 
-		for i, want := range vals {
-			if got := d.coeffAbsLevelRemaining(rice); got != want {
-				t.Fatalf("rice=%d value %d: got %d, want %d", rice, i, got, want)
+			var d cabac
+			if err := d.init(e.finish(), 0); err != nil {
+				t.Fatal(err)
+			}
+
+			for i, want := range vals {
+				if got := d.coeffAbsLevelRemaining(rice, rng); got != want {
+					t.Fatalf("rng=%d rice=%d value %d: got %d, want %d",
+						rng, rice, i, got, want)
+				}
 			}
 		}
 	}
