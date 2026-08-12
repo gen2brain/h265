@@ -388,19 +388,46 @@ func TestRGBMatchesScalar(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			var got, ref []uint8
+
 			switch m := img.(type) {
 			case *image.NRGBA:
-				if !bytes.Equal(m.Pix, want.(*image.NRGBA).Pix) {
-					t.Error("kernel output differs from the scalar path")
-				}
-
+				got, ref = m.Pix, want.(*image.NRGBA).Pix
 			case *image.NRGBA64:
-				if !bytes.Equal(m.Pix, want.(*image.NRGBA64).Pix) {
-					t.Error("kernel output differs from the scalar path")
-				}
-
+				got, ref = m.Pix, want.(*image.NRGBA64).Pix
 			default:
 				t.Fatalf("got %T", img)
+			}
+
+			if len(got) != len(ref) {
+				t.Fatalf("%d bytes, want %d", len(got), len(ref))
+			}
+
+			worst, count := 0, 0
+
+			for i := range got {
+				if d := int(got[i]) - int(ref[i]); d != 0 {
+					count++
+
+					if d < 0 {
+						d = -d
+					}
+
+					if d > worst {
+						worst = d
+					}
+				}
+			}
+
+			// The kernels and rgbRow evaluate the same arithmetic in a
+			// different order, so a target that contracts a multiply and an
+			// add into one rounding step can land a unit away.
+			if worst > 1 {
+				t.Errorf("%d of %d bytes differ, worst by %d", count, len(got), worst)
+			}
+
+			if count != 0 {
+				t.Logf("%d of %d bytes differ by one", count, len(got))
 			}
 		})
 	}

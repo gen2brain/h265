@@ -1,6 +1,7 @@
 package hevc
 
 import (
+	"bytes"
 	"math/rand/v2"
 	"testing"
 )
@@ -372,6 +373,51 @@ func TestAddResidual(t *testing.T) {
 
 					if got[i] != src[i] {
 						t.Fatalf("wrote outside the block at %d", i)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestAddResidualAsm checks any compiled-in kernel against the Go path, over
+// every block size and both shifts, with the block placed at an offset so a
+// stride error shows up.
+func TestAddResidualAsm(t *testing.T) {
+	k := dsp().addResidual8
+	if k == nil {
+		t.Skip("no assembly for this target")
+	}
+
+	r := rand.New(rand.NewPCG(15, 16))
+
+	for _, n := range []int{8, 16, 32} {
+		for _, shift := range []int{0, 8, 12} {
+			stride := n + 5
+
+			coef := make([]int32, n*n)
+			for i := range coef {
+				coef[i] = int32(r.IntN(1<<20) - 1<<19)
+			}
+
+			src := make([]uint8, stride*(n+3))
+			for i := range src {
+				src[i] = uint8(r.IntN(256))
+			}
+
+			got := make([]uint8, len(src))
+			copy(got, src)
+			k(got[2*stride+3:], stride, coef, n, shift)
+
+			want := make([]uint8, len(src))
+			copy(want, src)
+			addResidualGo(want, stride, 3, 2, n, shift, coef, 8)
+
+			if !bytes.Equal(got, want) {
+				for i := range got {
+					if got[i] != want[i] {
+						t.Fatalf("n=%d shift=%d: [%d] = %d, want %d",
+							n, shift, i, got[i], want[i])
 					}
 				}
 			}

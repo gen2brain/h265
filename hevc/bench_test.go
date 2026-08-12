@@ -1,6 +1,7 @@
 package hevc
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -53,3 +54,32 @@ func BenchmarkDecode720p(b *testing.B)  { benchStream(b, "realworld_720p.h265") 
 func BenchmarkDecode1080p(b *testing.B) { benchStream(b, "1080p.h265") }
 func BenchmarkDecodeTiles(b *testing.B) { benchStream(b, "tiles.h265") }
 func BenchmarkDecode10Bit(b *testing.B) { benchStream(b, "10bit_128x128.h265") }
+
+func BenchmarkAddResidual(b *testing.B) {
+	for _, n := range []int{8, 16, 32} {
+		coef := make([]int32, n*n)
+		for i := range coef {
+			coef[i] = int32(i*7919%65536 - 32768)
+		}
+
+		plane := make([]uint8, n*n)
+
+		b.Run(fmt.Sprintf("go/%dx%d", n, n), func(b *testing.B) {
+			for b.Loop() {
+				addResidualGo(plane, n, 0, 0, n, 12, coef, 8)
+			}
+
+			b.ReportMetric(float64(n*n)*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
+		})
+
+		if k := dsp().addResidual8; k != nil {
+			b.Run(fmt.Sprintf("asm/%dx%d", n, n), func(b *testing.B) {
+				for b.Loop() {
+					k(plane, n, coef, n, 12)
+				}
+
+				b.ReportMetric(float64(n*n)*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
+			})
+		}
+	}
+}
