@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"image"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 func testdataFiles(t *testing.T) []string {
@@ -446,4 +448,83 @@ func decodeScalarRGB(data []byte) (image.Image, error) {
 	img, _, err := f.decodeStill(Options{})
 
 	return img, err
+}
+
+// countReader reports how much of a stream something actually consumed.
+type countReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+
+	return n, err
+}
+
+// TestDecodeConfigReadsHeaderOnly holds DecodeConfig to the boxes it needs.
+// Everything it reports comes from ftyp, meta and moov, which sit ahead of the
+// media data, so reaching the media data at all is the bug this catches.
+func TestDecodeConfigReadsHeaderOnly(t *testing.T) {
+	for _, f := range testdataFiles(t) {
+		name := filepath.Base(f)
+
+		t.Run(name, func(t *testing.T) {
+			data := mustRead(t, f)
+
+			c := &countReader{r: bytes.NewReader(data)}
+
+			cfg, err := DecodeConfig(c)
+			if err != nil {
+				t.Fatalf("DecodeConfig: %v", err)
+			}
+
+			want, err := DecodeConfig(bytes.NewReader(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if cfg != want {
+				t.Fatalf("config %+v, want %+v", cfg, want)
+			}
+
+			if c.n > int64(len(data))/2 {
+				t.Errorf("read %d of %d bytes", c.n, len(data))
+			}
+
+			t.Logf("read %d of %d bytes (%.1f%%)", c.n, len(data),
+				100*float64(c.n)/float64(len(data)))
+		})
+	}
+}
+
+// TestDecodeConfigStream checks a reader that is neither seekable nor readable
+// at an offset, which is what image.DecodeConfig hands the decoder.
+func TestDecodeConfigStream(t *testing.T) {
+	for _, f := range testdataFiles(t) {
+		name := filepath.Base(f)
+
+		t.Run(name, func(t *testing.T) {
+			data := mustRead(t, f)
+
+			want, err := DecodeConfig(bytes.NewReader(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got, format, err := image.DecodeConfig(iotest.OneByteReader(bytes.NewReader(data)))
+			if err != nil {
+				t.Fatalf("image.DecodeConfig: %v", err)
+			}
+
+			if format != "heic" {
+				t.Errorf("format %q, want heic", format)
+			}
+
+			if got != want {
+				t.Errorf("config %+v, want %+v", got, want)
+			}
+		})
+	}
 }

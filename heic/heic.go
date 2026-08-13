@@ -170,6 +170,101 @@ func parse(data []byte) (*file, error) {
 	return f, nil
 }
 
+// parseHeader reads only the boxes a configuration needs and stops as soon as
+// one can be derived, so the media data is never read. The offsets in iloc are
+// absolute, so anything that reaches item data needs parse and the whole file.
+func parseHeader(r io.Reader) (*file, error) {
+	f := &file{}
+
+	seen := false
+
+	err := eachBoxReader(r, func(typ string, n int64, body io.Reader) error {
+		switch typ {
+		case "ftyp":
+			seen = true
+
+		case "meta":
+			if f.meta != nil {
+				return nil
+			}
+
+			b, err := boxBytes(body, n)
+			if err != nil {
+				return err
+			}
+
+			m, err := parseMeta(b)
+			if err != nil {
+				return err
+			}
+
+			f.meta = m
+
+		case "moov":
+			if f.movie != nil {
+				return nil
+			}
+
+			b, err := boxBytes(body, n)
+			if err != nil {
+				return err
+			}
+
+			mv, err := parseMoov(b)
+			if err != nil {
+				return err
+			}
+
+			f.movie = mv
+
+			return nil
+
+		default:
+			return nil
+		}
+
+		// Only a configuration from the primary item ends the walk. A picture
+		// track is the fallback for a file that has no usable image item, and
+		// a meta box after moov would still outrank it.
+		if seen {
+			if _, err := f.config(); err == nil {
+				return errStop
+			}
+		}
+
+		return nil
+	})
+	if err != nil && !errors.Is(err, errStop) {
+		return nil, err
+	}
+
+	if !seen || (f.meta == nil && f.movie == nil) {
+		return nil, ErrInvalid
+	}
+
+	return f, nil
+}
+
+// config is the image configuration of the primary item, or of the picture
+// track when a file carries no image item.
+func (f *file) config() (image.Config, error) {
+	it, err := f.primary()
+	if err != nil {
+		if f.movie == nil {
+			return image.Config{}, err
+		}
+
+		return f.sequenceConfig()
+	}
+
+	w, h, err := f.size(it)
+	if err != nil {
+		return image.Config{}, err
+	}
+
+	return image.Config{Width: w, Height: h, ColorModel: colorModelFor(f, it)}, nil
+}
+
 func (f *file) limit() int {
 	switch {
 	case f.frameSizeLimit < 0:
@@ -440,33 +535,12 @@ func DecodeAll(r io.Reader, opts ...Options) (*HEIC, error) {
 // DecodeConfig returns the dimensions and color model without decoding the
 // image data.
 func DecodeConfig(r io.Reader) (image.Config, error) {
-	data, err := io.ReadAll(r)
+	f, err := parseHeader(r)
 	if err != nil {
 		return image.Config{}, err
 	}
 
-	f, err := parse(data)
-	if err != nil {
-		return image.Config{}, err
-	}
-
-	it, err := f.primary()
-	if err != nil {
-		if f.movie == nil {
-			return image.Config{}, err
-		}
-
-		return f.sequenceConfig()
-	}
-
-	w, h, err := f.size(it)
-	if err != nil {
-		return image.Config{}, err
-	}
-
-	cfg := image.Config{Width: w, Height: h, ColorModel: colorModelFor(f, it)}
-
-	return cfg, nil
+	return f.config()
 }
 
 // sequenceConfig reads the dimensions from the sample entry of the picture
