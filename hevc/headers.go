@@ -558,6 +558,14 @@ func parseSPS(rbsp []byte) (*sps, error) {
 		return nil, ErrInvalid
 	}
 
+	// 7.4.3.2: both dimensions are an integer multiple of MinCbSizeY. Without
+	// it a coding unit at the edge extends past the picture, and the block
+	// bookkeeping is sized for what the picture holds.
+	if mask := uint32(1)<<s.minCbLog2SizeY - 1; s.picWidthInLumaSamples&mask != 0 ||
+		s.picHeightInLumaSamples&mask != 0 {
+		return nil, ErrInvalid
+	}
+
 	s.ctbSizeY = 1 << s.ctbLog2SizeY
 	s.picWidthInCtbs = ceilDiv(s.picWidthInLumaSamples, s.ctbSizeY)
 	s.picHeightInCtbs = ceilDiv(s.picHeightInLumaSamples, s.ctbSizeY)
