@@ -33,6 +33,7 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"math"
 	"runtime"
 
 	"github.com/gen2brain/h265/hevc"
@@ -45,7 +46,7 @@ import (
 var ErrUnsupported = errors.New("heic: unsupported image")
 
 // DefaultFrameSizeLimit bounds the pixel area a header may ask to allocate.
-const DefaultFrameSizeLimit = 16384 * 16384
+const DefaultFrameSizeLimit = min(16384*16384, math.MaxInt>>6)
 
 // ColorInfo describes the color space an image was decoded from.
 type ColorInfo struct {
