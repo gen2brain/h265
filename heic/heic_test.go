@@ -336,7 +336,9 @@ func FuzzDecode(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		img, err := Decode(bytes.NewReader(data))
+		// One goroutine, so a failure reproduces, and a small picture limit so
+		// a mutated ispe cannot ask for one that takes seconds to fill.
+		img, err := Decode(bytes.NewReader(data), Options{FrameSizeLimit: 1 << 16, Threads: 1})
 		if err != nil {
 			if !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrUnsupported) {
 				t.Fatalf("unexpected error type: %v", err)
