@@ -65,11 +65,12 @@ type Decoder struct {
 	ctuPrev  *ctuDecoder
 	prevSlic *sliceHeader
 
-	dpb     []dpbPicture
-	pool    picPool
-	threads int
-	poc     pocState
-	curRPS  refPicSet
+	dpb            []dpbPicture
+	pool           picPool
+	threads        int
+	frameSizeLimit int
+	poc            pocState
+	curRPS         refPicSet
 
 	// 8.1.3: leading pictures associated with an intra random access point
 	// that starts decoding reference pictures that were never decoded, and
@@ -85,6 +86,10 @@ type Decoder struct {
 // DecodeNAL consumes one NAL unit and returns whatever pictures that completes,
 // in output order. Reordering means a picture may surface several NAL units
 // after the one that finished it.
+// FrameSizeLimit refuses a sequence whose pictures are larger than n samples,
+// with ErrUnsupported. Zero, the default, accepts anything the level allows.
+func (d *Decoder) FrameSizeLimit(n int) { d.frameSizeLimit = n }
+
 func (d *Decoder) DecodeNAL(nal NALUnit) ([]*Picture, error) {
 	if d.sps == nil {
 		d.vps = make(map[uint8]*vps)
@@ -207,6 +212,11 @@ func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
 	s, ok := d.sps[p.spsID]
 	if !ok {
 		return nil, ErrInvalid
+	}
+
+	if n := d.frameSizeLimit; n > 0 &&
+		int(s.picWidthInLumaSamples)*int(s.picHeightInLumaSamples) > n {
+		return nil, ErrUnsupported
 	}
 
 	sh, err := parseSliceHeader(nal.RBSP, nal.Type, s, p)
