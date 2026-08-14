@@ -1,4 +1,8 @@
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '0 3 * * *'
 name: Test
 jobs:
   test:
@@ -21,3 +25,36 @@ jobs:
       run: go vet ./...
     - name: Test
       run: go test ./...
+    - name: Test noasm
+      if: matrix.os == 'ubuntu-latest'
+      run: go test -tags noasm ./...
+    - name: Vet arm64 and riscv64
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        GOARCH=arm64 go vet ./...
+        GOARCH=riscv64 GORISCV64=rva23u64 go vet ./...
+
+  fuzz:
+    if: github.event_name == 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - pkg: ./hevc/
+          target: FuzzDecodeNAL
+        - pkg: ./heic/
+          target: FuzzDecode
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-go@v5
+      with:
+        go-version: 1.26.x
+    - name: Fuzz
+      run: go test ${{ matrix.pkg }} -run XXX -fuzz ${{ matrix.target }} -fuzztime 10m
+    - name: Upload failing input
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: fuzz-${{ matrix.target }}
+        path: ${{ matrix.pkg }}testdata/fuzz/
