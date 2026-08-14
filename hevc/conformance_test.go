@@ -8,21 +8,37 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
-// The JCT-VC corpora are large and live outside the repository. Set
-// CONFORMANCE_DIR to a fluster checkout with its resources downloaded beside
-// it to run against them.
-func conformanceRoot(t *testing.T) string {
+// The JCT-VC corpora are large and live outside the repository.
+// CONFORMANCE_DIR is a colon separated list of corpora; the one holding a
+// fluster checkout with its resources downloaded beside it is the one these
+// suites read.
+func conformanceDirs(t *testing.T) []string {
 	t.Helper()
 
-	dir := os.Getenv("CONFORMANCE_DIR")
-	if dir == "" {
+	env := os.Getenv("CONFORMANCE_DIR")
+	if env == "" {
 		t.Skip("set CONFORMANCE_DIR")
 	}
 
-	return dir
+	return strings.Split(env, ":")
+}
+
+func conformanceRoot(t *testing.T) string {
+	t.Helper()
+
+	for _, dir := range conformanceDirs(t) {
+		if _, err := os.Stat(filepath.Join(dir, "fluster")); err == nil {
+			return dir
+		}
+	}
+
+	t.Skip("no JCT-VC corpus in CONFORMANCE_DIR")
+
+	return ""
 }
 
 // conformanceSuite is one downloaded corpus and the tally it currently reaches.

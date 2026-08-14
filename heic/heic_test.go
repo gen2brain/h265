@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -640,4 +641,114 @@ func TestSourceConcurrent(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+// heicCorpusBaseline is how many files of each set decode today. Raise one
+// whenever the tally improves, so a regression fails rather than passing
+// quietly.
+var heicCorpusBaseline = map[string]int{
+	"valid/nokia-conformance": 55,
+	"valid/dsoprea-exif":      4,
+	"valid/libheif-testdata":  1,
+}
+
+// TestConformanceCorpus decodes a corpus of HEIF files that lives outside the
+// repository. CONFORMANCE_DIR is a colon separated list of corpora; every one
+// of them is searched, and the ones holding no HEIF contribute nothing.
+//
+// It holds two rules beyond the tally. Nothing may panic, whatever the file,
+// and nothing under valid/ may be reported as malformed: a file this package
+// cannot render is ErrUnsupported, which is what tells a caller to reach for
+// another decoder rather than to distrust the file.
+func TestConformanceCorpus(t *testing.T) {
+	env := os.Getenv("CONFORMANCE_DIR")
+	if env == "" {
+		t.Skip("set CONFORMANCE_DIR")
+	}
+
+	type entry struct{ root, path string }
+
+	var files []entry
+
+	for _, root := range strings.Split(env, ":") {
+		filepath.Walk(root, func(p string, fi os.FileInfo, err error) error {
+			if err != nil || fi.IsDir() {
+				return nil
+			}
+
+			switch strings.ToLower(filepath.Ext(p)) {
+			case ".heic", ".heif", ".hif", ".avif":
+				files = append(files, entry{root, p})
+			}
+
+			return nil
+		})
+	}
+
+	if len(files) == 0 {
+		t.Skip("no HEIF corpus in CONFORMANCE_DIR")
+	}
+
+	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
+
+	ok := map[string]int{}
+	unsupported := map[string]int{}
+	sets := map[string]bool{}
+
+	for _, f := range files {
+		p := f.path
+
+		rel, err := filepath.Rel(f.root, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		set := filepath.ToSlash(filepath.Dir(rel))
+		sets[set] = true
+
+		t.Run(filepath.ToSlash(rel), func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("panic: %v", r)
+				}
+			}()
+
+			fh, err := os.Open(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			defer fh.Close()
+
+			_, err = Decode(fh)
+
+			switch {
+			case err == nil:
+				ok[set]++
+			case errors.Is(err, ErrUnsupported):
+				unsupported[set]++
+			case strings.HasPrefix(set, "valid/"):
+				t.Errorf("a valid file failed as %v", err)
+			}
+		})
+	}
+
+	// A baseline holds only for a corpus that is actually present, so pointing
+	// CONFORMANCE_DIR at some other collection reports rather than fails.
+	for set, want := range heicCorpusBaseline {
+		if sets[set] && ok[set] < want {
+			t.Errorf("%s: %d decoded, baseline is %d", set, ok[set], want)
+		}
+	}
+
+	names := make([]string, 0, len(sets))
+	for set := range sets {
+		names = append(names, set)
+	}
+
+	sort.Strings(names)
+
+	for _, set := range names {
+		t.Logf("%-28s decoded=%-4d unsupported=%d", set, ok[set], unsupported[set])
+	}
 }
