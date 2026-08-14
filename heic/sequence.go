@@ -449,7 +449,7 @@ func (f *file) decodeTrack(t *track) ([]*hevc.Picture, error) {
 
 	// A sample needs at least one byte, so a table claiming more samples than
 	// the file has bytes is describing data that cannot exist.
-	if len(t.samples) > len(f.data) {
+	if uint64(len(t.samples)) > f.src.size {
 		return nil, ErrInvalid
 	}
 
@@ -469,11 +469,16 @@ func (f *file) decodeTrack(t *track) ([]*hevc.Picture, error) {
 	var out []*hevc.Picture
 
 	for _, s := range t.samples {
-		if s.len == 0 || s.off > uint64(len(f.data)) || s.len > uint64(len(f.data))-s.off {
+		if s.len == 0 {
 			return nil, ErrInvalid
 		}
 
-		for _, u := range hevc.SplitHVCC(f.data[s.off:s.off+s.len], t.hvcC.lengthSize) {
+		b, err := f.src.at(s.off, s.len)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, u := range hevc.SplitHVCC(b, t.hvcC.lengthSize) {
 			pics, err := d.DecodeNAL(u)
 			if err != nil {
 				return nil, wrap(err)

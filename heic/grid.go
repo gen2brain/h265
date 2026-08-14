@@ -37,7 +37,7 @@ func parseGrid(b []byte) (gridInfo, error) {
 }
 
 func (f *file) gridOf(it *item) (gridInfo, []uint32, error) {
-	data, err := f.meta.data(it, f.data)
+	data, err := f.meta.data(it, f.src)
 	if err != nil {
 		return gridInfo{}, nil, err
 	}

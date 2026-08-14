@@ -88,7 +88,7 @@ func options(opts []Options) Options {
 }
 
 type file struct {
-	data           []byte
+	src            *source
 	meta           *metaBox
 	movie          *movie
 	frameSizeLimit int
@@ -123,12 +123,25 @@ type HEIC struct {
 	Color ColorInfo
 }
 
-func parse(data []byte) (*file, error) {
-	f := &file{data: data}
+func parse(src *source) (*file, error) {
+	f := &file{src: src}
 
 	seen := false
 
-	err := eachBox(data, func(typ string, b []byte) error {
+	err := src.eachBox(func(typ string, off, n uint64) error {
+		// Only these carry anything parse needs, so the media data is never
+		// read here: the items that reference it are read on demand.
+		switch typ {
+		case "ftyp", "meta", "moov":
+		default:
+			return nil
+		}
+
+		b, err := src.at(off, n)
+		if err != nil {
+			return err
+		}
+
 		switch typ {
 		case "ftyp":
 			seen = true
@@ -170,9 +183,35 @@ func parse(data []byte) (*file, error) {
 	return f, nil
 }
 
+// srcFor addresses the file by range when the reader allows it, so only the
+// items a decode reaches are read. Anything else is buffered whole, which is
+// what image.Decode leaves us with: it hands the decoder a bufio.Reader.
+func srcFor(r io.Reader) (*source, error) {
+	ra, raOK := r.(io.ReaderAt)
+	sk, skOK := r.(io.Seeker)
+
+	if raOK && skOK {
+		cur, err1 := sk.Seek(0, io.SeekCurrent)
+		end, err2 := sk.Seek(0, io.SeekEnd)
+
+		if err1 == nil && err2 == nil && end > cur {
+			n := end - cur
+
+			return &source{r: io.NewSectionReader(ra, cur, n), size: uint64(n)}, nil
+		}
+	}
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+
+	return memSource(data), nil
+}
+
 // parseHeader reads only the boxes a configuration needs and stops as soon as
-// one can be derived, so the media data is never read. The offsets in iloc are
-// absolute, so anything that reaches item data needs parse and the whole file.
+// one can be derived, so a stream that cannot be addressed by range still
+// costs no more than its header.
 func parseHeader(r io.Reader) (*file, error) {
 	f := &file{}
 
@@ -348,7 +387,7 @@ func (f *file) decodeItem(dec *itemDecoder, it *item) (*hevc.Picture, error) {
 		return nil, ErrInvalid
 	}
 
-	data, err := f.meta.data(it, f.data)
+	data, err := f.meta.data(it, f.src)
 	if err != nil {
 		return nil, err
 	}
@@ -479,12 +518,12 @@ func DecodeColor(r io.Reader, opts ...Options) (image.Image, ColorInfo, error) {
 }
 
 func decode(r io.Reader, opts ...Options) (image.Image, ColorInfo, error) {
-	data, err := io.ReadAll(r)
+	src, err := srcFor(r)
 	if err != nil {
 		return nil, ColorInfo{}, err
 	}
 
-	f, err := parse(data)
+	f, err := parse(src)
 	if err != nil {
 		return nil, ColorInfo{}, err
 	}
@@ -499,12 +538,12 @@ func decode(r io.Reader, opts ...Options) (image.Image, ColorInfo, error) {
 // DecodeAll returns every frame of an image sequence with its duration, and
 // how many times the animation repeats. A still image gives one frame.
 func DecodeAll(r io.Reader, opts ...Options) (*HEIC, error) {
-	data, err := io.ReadAll(r)
+	src, err := srcFor(r)
 	if err != nil {
 		return nil, err
 	}
 
-	f, err := parse(data)
+	f, err := parse(src)
 	if err != nil {
 		return nil, err
 	}

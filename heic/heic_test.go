@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
 )
@@ -437,7 +438,7 @@ func TestRGBMatchesScalar(t *testing.T) {
 
 // decodeScalarRGB converts with rgbRow rather than the row kernels.
 func decodeScalarRGB(data []byte) (image.Image, error) {
-	f, err := parse(data)
+	f, err := parse(memSource(data))
 	if err != nil {
 		return nil, err
 	}
@@ -527,4 +528,116 @@ func TestDecodeConfigStream(t *testing.T) {
 			}
 		})
 	}
+}
+
+func pixOf(t *testing.T, img image.Image) []byte {
+	t.Helper()
+
+	switch m := img.(type) {
+	case *image.NRGBA:
+		return m.Pix
+	case *image.NRGBA64:
+		return m.Pix
+	}
+
+	t.Fatalf("decoded %T, want NRGBA or NRGBA64", img)
+
+	return nil
+}
+
+// TestSourcePaths decodes through both forms of source, since srcFor picks
+// between reading ranges and buffering on what the reader implements.
+func TestSourcePaths(t *testing.T) {
+	for _, f := range testdataFiles(t) {
+		name := filepath.Base(f)
+
+		t.Run(name, func(t *testing.T) {
+			data := mustRead(t, f)
+
+			// A bytes.Reader is a ReaderAt and a Seeker, so this reads ranges.
+			ranged, err := Decode(bytes.NewReader(data))
+			if err != nil {
+				t.Fatalf("ranged: %v", err)
+			}
+
+			// A OneByteReader is neither, so this buffers the whole file.
+			buffered, err := Decode(iotest.OneByteReader(bytes.NewReader(data)))
+			if err != nil {
+				t.Fatalf("buffered: %v", err)
+			}
+
+			if !bytes.Equal(pixOf(t, ranged), pixOf(t, buffered)) {
+				t.Error("ranged and buffered decodes differ")
+			}
+		})
+	}
+}
+
+// TestDecodeFile decodes from an os.File, which is the reader the ranged path
+// exists for.
+func TestDecodeFile(t *testing.T) {
+	for _, name := range testdataFiles(t) {
+		t.Run(filepath.Base(name), func(t *testing.T) {
+			want, err := Decode(bytes.NewReader(mustRead(t, name)))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			fh, err := os.Open(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			defer fh.Close()
+
+			got, err := Decode(fh)
+			if err != nil {
+				t.Fatalf("from file: %v", err)
+			}
+
+			if !bytes.Equal(pixOf(t, got), pixOf(t, want)) {
+				t.Error("decode from a file differs")
+			}
+		})
+	}
+}
+
+// TestSourceConcurrent reads overlapping ranges at once, which is what a grid
+// does with one goroutine per tile.
+func TestSourceConcurrent(t *testing.T) {
+	data := make([]byte, 64<<10)
+	for i := range data {
+		data[i] = byte(i * 7)
+	}
+
+	src := &source{r: bytes.NewReader(data), size: uint64(len(data))}
+
+	var wg sync.WaitGroup
+
+	for i := range 16 {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			off := uint64(i * 512)
+
+			for range 32 {
+				b, err := src.at(off, 4096)
+				if err != nil {
+					t.Error(err)
+
+					return
+				}
+
+				if !bytes.Equal(b, data[off:off+4096]) {
+					t.Errorf("range at %d differs", off)
+
+					return
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
 }

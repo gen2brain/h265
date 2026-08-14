@@ -230,6 +230,92 @@ type metaBox struct {
 	idat    []byte
 }
 
+// source is the file, addressed by range. b carries it when it is buffered,
+// and r reads it a range at a time when it is not.
+type source struct {
+	b    []byte
+	r    io.ReaderAt
+	size uint64
+}
+
+func memSource(b []byte) *source {
+	return &source{b: b, size: uint64(len(b))}
+}
+
+// at returns n bytes at off. It aliases a buffered file, so the result must
+// not be written to.
+func (s *source) at(off, n uint64) ([]byte, error) {
+	if off > s.size || n > s.size-off {
+		return nil, ErrInvalid
+	}
+
+	if s.r == nil {
+		return s.b[off : off+n], nil
+	}
+
+	buf := make([]byte, n)
+
+	_, err := io.ReadFull(io.NewSectionReader(s.r, int64(off), int64(n)), buf)
+
+	switch {
+	case err == nil:
+		return buf, nil
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return nil, ErrInvalid
+	}
+
+	return nil, err
+}
+
+// eachBox reports where each top level payload lives without reading it.
+func (s *source) eachBox(fn func(typ string, off, n uint64) error) error {
+	for off := uint64(0); off+8 <= s.size; {
+		b, err := s.at(off, 8)
+		if err != nil {
+			return err
+		}
+
+		r := &reader{b: b}
+		size := uint64(r.u32())
+		typ := r.str4()
+		head := uint64(8)
+
+		switch size {
+		case 1:
+			if off+16 > s.size {
+				return ErrInvalid
+			}
+
+			b, err = s.at(off+8, 8)
+			if err != nil {
+				return err
+			}
+
+			rr := &reader{b: b}
+			size = rr.u64()
+			head = 16
+			r.err = r.err || rr.err
+
+		case 0:
+			size = s.size - off
+		}
+
+		if r.err || size < head || size > s.size-off {
+			return ErrInvalid
+		}
+
+		if typ != "uuid" {
+			if err := fn(typ, off+head, size-head); err != nil {
+				return err
+			}
+		}
+
+		off += size
+	}
+
+	return nil
+}
+
 // maxHeaderBox bounds a box eachBoxReader buffers, since its size comes from
 // the file being read.
 const maxHeaderBox = 64 << 20
@@ -659,38 +745,55 @@ func (m *metaBox) parseIpma(b []byte) error {
 }
 
 // data gathers an item's extents out of the file or, for construction method 1, out of idat.
-func (m *metaBox) data(it *item, file []byte) ([]byte, error) {
-	src := file
+func (m *metaBox) data(it *item, src *source) ([]byte, error) {
 	if it.method == 1 {
-		src = m.idat
+		src = memSource(m.idat)
 	} else if it.method != 0 {
 		return nil, ErrInvalid
 	}
 
-	if len(it.extents) == 1 {
-		e := it.extents[0]
+	span := func(e extent) (uint64, uint64, error) {
 		off, n := it.baseOffset+e.off, e.len
 		if n == 0 {
-			n = uint64(len(src)) - off
-		}
-		if off > uint64(len(src)) || n > uint64(len(src))-off {
-			return nil, ErrInvalid
+			if off > src.size {
+				return 0, 0, ErrInvalid
+			}
+
+			n = src.size - off
 		}
 
-		return src[off : off+n], nil
+		if off > src.size || n > src.size-off {
+			return 0, 0, ErrInvalid
+		}
+
+		return off, n, nil
+	}
+
+	if len(it.extents) == 1 {
+		off, n, err := span(it.extents[0])
+		if err != nil {
+			return nil, err
+		}
+
+		return src.at(off, n)
 	}
 
 	var out []byte
+
 	for _, e := range it.extents {
-		off, n := it.baseOffset+e.off, e.len
-		if n == 0 {
-			n = uint64(len(src)) - off
+		off, n, err := span(e)
+		if err != nil {
+			return nil, err
 		}
-		if off > uint64(len(src)) || n > uint64(len(src))-off {
-			return nil, ErrInvalid
+
+		b, err := src.at(off, n)
+		if err != nil {
+			return nil, err
 		}
-		out = append(out, src[off:off+n]...)
+
+		out = append(out, b...)
 	}
+
 	if out == nil {
 		return nil, ErrInvalid
 	}

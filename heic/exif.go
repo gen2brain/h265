@@ -68,8 +68,8 @@ func DecodeExif(r io.Reader) (*Exif, error) {
 }
 
 // RawExif returns the TIFF payload of the Exif item, without the
-// exif_tiff_header_offset the HEIC container puts in front of it. It aliases
-// the input, so it is not a copy.
+// exif_tiff_header_offset the HEIC container puts in front of it. It aliases a
+// buffered input rather than copying it, so it must not be written to.
 func RawExif(r io.Reader) ([]byte, error) {
 	f, err := readFile(r)
 	if err != nil {
@@ -80,7 +80,7 @@ func RawExif(r io.Reader) ([]byte, error) {
 	if it == nil {
 		return nil, ErrNoExif
 	}
-	b, err := f.meta.data(it, f.data)
+	b, err := f.meta.data(it, f.src)
 	if err != nil {
 		return nil, err
 	}
@@ -92,8 +92,8 @@ func RawExif(r io.Reader) ([]byte, error) {
 	return tiff, nil
 }
 
-// RawXMP returns the XMP packet of the file. It aliases the input, so it is
-// not a copy.
+// RawXMP returns the XMP packet of the file. It aliases a buffered input
+// rather than copying it, so it must not be written to.
 func RawXMP(r io.Reader) ([]byte, error) {
 	f, err := readFile(r)
 	if err != nil {
@@ -105,16 +105,16 @@ func RawXMP(r io.Reader) ([]byte, error) {
 		return nil, ErrNoXMP
 	}
 
-	return f.meta.data(it, f.data)
+	return f.meta.data(it, f.src)
 }
 
 func readFile(r io.Reader) (*file, error) {
-	data, err := io.ReadAll(r)
+	src, err := srcFor(r)
 	if err != nil {
 		return nil, err
 	}
 
-	return parse(data)
+	return parse(src)
 }
 
 // descItem finds the metadata item describing the primary image. A file with
