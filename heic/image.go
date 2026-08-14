@@ -141,10 +141,8 @@ func toImage(pic, alpha *hevc.Picture, ci ColorInfo, ycbcr bool) (image.Image, e
 	)
 
 	if alpha != nil {
-		if alpha.ChromaFormat != 0 {
-			return nil, ErrUnsupported
-		}
-
+		// An auxiliary alpha image carries its values in the luma channel, so
+		// chroma planes are padding whatever the file codes them as.
 		av, _, _ = views(alpha)
 		if av.w != w || av.h != h {
 			return nil, ErrUnsupported

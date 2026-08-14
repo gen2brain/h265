@@ -133,6 +133,11 @@ func parse(src *source) (*file, error) {
 		// read here: the items that reference it are read on demand.
 		switch typ {
 		case "ftyp", "meta", "moov":
+		case "mini":
+			// The MinimizedImageBox of the low overhead profile carries the
+			// whole description in place of meta, so a file built on it is one
+			// we can read nothing from rather than a malformed one.
+			return ErrUnsupported
 		default:
 			return nil
 		}
