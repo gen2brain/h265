@@ -1,10 +1,5 @@
 MIT License
 
-Copyright (c) 2026 Milan Nikolic
-
-The decoder is a port of the pure-Rust decoders rust_h265 and oxideav-h265,
-whose notices are reproduced below and apply to the ported portions.
-
 Copyright (c) 2025 roticv
 Copyright (c) 2026 Karpeles Lab Inc.
 
