@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"testing/iotest"
+
+	"github.com/gen2brain/h265/hevc"
 )
 
 func testdataFiles(t *testing.T) []string {
@@ -753,4 +755,50 @@ func TestConformanceCorpus(t *testing.T) {
 	for _, set := range names {
 		t.Logf("%-28s decoded=%-4d unsupported=%d", set, ok[set], unsupported[set])
 	}
+}
+
+// TestColorInfoPrecedence holds the rule of ISO/IEC 23008-12: the sequence
+// declares a color description in its video usability information, and a colr
+// box replaces it whole. An animated HEIC often carries no colr at all, which
+// is what made the bitstream's own description worth reading.
+func TestColorInfoPrecedence(t *testing.T) {
+	pic := &hevc.Picture{ColorPrimaries: 1, ColorTransfer: 13, ColorMatrix: 6, FullRange: true}
+
+	same := func(t *testing.T, got, want ColorInfo) {
+		t.Helper()
+
+		if got.Primaries != want.Primaries || got.Transfer != want.Transfer ||
+			got.Matrix != want.Matrix || got.FullRange != want.FullRange {
+			t.Errorf("got %+v, want %+v", got, want)
+		}
+	}
+
+	t.Run("no meta", func(t *testing.T) {
+		f := &file{}
+
+		same(t, f.colorInfo(nil, pic),
+			ColorInfo{Primaries: 1, Transfer: 13, Matrix: 6, FullRange: true})
+	})
+
+	t.Run("no picture", func(t *testing.T) {
+		f := &file{meta: &metaBox{}}
+
+		same(t, f.colorInfo(nil, nil), ColorInfo{Primaries: 2, Transfer: 2, Matrix: mcUnspec})
+	})
+
+	t.Run("colr replaces it", func(t *testing.T) {
+		it := &item{id: 1, props: []itemProp{{idx: 0}}}
+
+		f := &file{meta: &metaBox{
+			primary: 1,
+			items:   map[uint32]*item{1: it},
+			order:   []uint32{1},
+			props: []property{{
+				typ:  "colr",
+				colr: &colorInfo{hasNCLX: true, primaries: 9, transfer: 16, matrix: 9},
+			}},
+		}}
+
+		same(t, f.colorInfo(it, pic), ColorInfo{Primaries: 9, Transfer: 16, Matrix: 9})
+	})
 }

@@ -76,7 +76,14 @@ type sps struct {
 	confWinTop, confWinBottom uint32
 
 	bitDepthLuma, bitDepthChroma uint8
-	log2MaxPocLsb                uint8
+
+	// E.3.1: the colour description of the sequence, unspecified unless the
+	// video usability information says otherwise.
+	colourPrimaries uint16
+	transferChar    uint16
+	matrixCoeffs    uint16
+	fullRange       bool
+	log2MaxPocLsb   uint8
 
 	maxDecPicBuffering uint32
 	maxNumReorderPics  uint32
@@ -303,7 +310,7 @@ func parseHRD(c *getBits, commonInfPresent bool, maxSubLayersMinus1 uint8) error
 	return nil
 }
 
-func parseVUI(c *getBits, maxSubLayersMinus1 uint8) error {
+func parseVUI(c *getBits, s *sps, maxSubLayersMinus1 uint8) error {
 	if c.bit() != 0 {
 		if c.bits(8) == 255 {
 			c.bits(16)
@@ -315,14 +322,18 @@ func parseVUI(c *getBits, maxSubLayersMinus1 uint8) error {
 		c.bit()
 	}
 
+	// E.2.1 video_signal_type. The colour description defaults to unspecified,
+	// which newPicture carries so a container with no description of its own
+	// can fall back to what the sequence declares.
 	if c.bit() != 0 {
 		c.bits(3)
-		c.bit()
+
+		s.fullRange = c.bit() != 0
 
 		if c.bit() != 0 {
-			c.bits(8)
-			c.bits(8)
-			c.bits(8)
+			s.colourPrimaries = uint16(c.bits(8))
+			s.transferChar = uint16(c.bits(8))
+			s.matrixCoeffs = uint16(c.bits(8))
 		}
 	}
 
@@ -467,7 +478,8 @@ func parseSPS(rbsp []byte) (*sps, error) {
 	var c getBits
 	c.init(rbsp)
 
-	s := &sps{}
+	// E.3.1 infers all three as unspecified when the sequence does not say.
+	s := &sps{colourPrimaries: 2, transferChar: 2, matrixCoeffs: 2}
 	s.vpsID = uint8(c.bits(4))
 	s.maxSubLayersMinus1 = uint8(c.bits(3))
 
@@ -659,7 +671,7 @@ func parseSPS(rbsp []byte) (*sps, error) {
 	s.strongIntraSmoothing = c.bit() != 0
 
 	if c.bit() != 0 {
-		if err := parseVUI(&c, s.maxSubLayersMinus1); err != nil {
+		if err := parseVUI(&c, s, s.maxSubLayersMinus1); err != nil {
 			return nil, err
 		}
 	}

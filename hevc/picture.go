@@ -18,6 +18,14 @@ type Picture struct {
 	BitDepth  int
 	BitDepthC int
 
+	// ColorPrimaries, ColorTransfer, ColorMatrix and FullRange are what the
+	// sequence declares in its video usability information, as the code points
+	// of ISO/IEC 23091-2. All three are 2, unspecified, when it declares none.
+	ColorPrimaries uint16
+	ColorTransfer  uint16
+	ColorMatrix    uint16
+	FullRange      bool
+
 	POC int
 
 	Y, Cb, Cr       []uint8
@@ -150,6 +158,11 @@ func newPicture(pool *picPool, s *sps) *Picture {
 		ChromaFormat: int(s.chromaFormatIDC),
 		BitDepth:     int(s.bitDepthLuma),
 		BitDepthC:    int(s.bitDepthChroma),
+
+		ColorPrimaries: s.colourPrimaries,
+		ColorTransfer:  s.transferChar,
+		ColorMatrix:    s.matrixCoeffs,
+		FullRange:      s.fullRange,
 	}
 
 	p.CropX = int(s.confWinLeft) * s.subWidthC

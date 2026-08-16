@@ -320,3 +320,100 @@ func TestPredWeightTableOffsetRange(t *testing.T) {
 		})
 	}
 }
+
+// colorDesc is what the video usability information says about the samples.
+type colorDesc struct {
+	primaries, transfer, matrix uint16
+	fullRange                   bool
+}
+
+// TestParseVUIColorDescription covers E.2.1's video_signal_type, which is where
+// a sequence declares the range and matrix its samples are in. A container with
+// no description of its own falls back to it.
+func TestParseVUIColorDescription(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		signal, desc      bool
+		full              bool
+		prim, trc, matrix uint32
+		want              colorDesc
+	}{
+		{
+			name: "absent", want: colorDesc{2, 2, 2, false},
+		},
+		{
+			name: "range only", signal: true, full: true,
+			want: colorDesc{2, 2, 2, true},
+		},
+		{
+			name: "full description", signal: true, desc: true, full: true,
+			prim: 1, trc: 13, matrix: 6,
+			want: colorDesc{1, 13, 6, true},
+		},
+		{
+			name: "limited range", signal: true, desc: true,
+			prim: 9, trc: 16, matrix: 9,
+			want: colorDesc{9, 16, 9, false},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var p bitPut
+
+			p.bit(0) // aspect_ratio_info_present_flag
+			p.bit(0) // overscan_info_present_flag
+
+			if !tt.signal {
+				p.bit(0)
+			} else {
+				p.bit(1)
+				p.bit(0)
+				p.bit(0)
+				p.bit(0) // video_format
+
+				p.bit(b2u(tt.full))
+
+				if !tt.desc {
+					p.bit(0)
+				} else {
+					p.bit(1)
+
+					for _, v := range []uint32{tt.prim, tt.trc, tt.matrix} {
+						for i := 7; i >= 0; i-- {
+							p.bit(v >> uint(i))
+						}
+					}
+				}
+			}
+
+			// chroma_loc, neutral_chroma, field_seq, frame_field, display
+			// window, timing and bitstream restriction, all absent.
+			for range 7 {
+				p.bit(0)
+			}
+
+			var c getBits
+
+			c.init(p.bytes())
+
+			s := &sps{colourPrimaries: 2, transferChar: 2, matrixCoeffs: 2}
+
+			if err := parseVUI(&c, s, 0); err != nil {
+				t.Fatal(err)
+			}
+
+			got := colorDesc{s.colourPrimaries, s.transferChar, s.matrixCoeffs, s.fullRange}
+
+			if got != tt.want {
+				t.Errorf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func b2u(v bool) uint32 {
+	if v {
+		return 1
+	}
+
+	return 0
+}

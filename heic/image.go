@@ -15,8 +15,24 @@ func colorModelFor(f *file, it *item) color.Model {
 	return color.NRGBAModel
 }
 
+// colorInfo is the color description of an item. The sequence declares one in
+// its video usability information and a colr box replaces it whole, which is
+// how ISO/IEC 23008-12 resolves the two.
 func (f *file) colorInfo(it *item, pic *hevc.Picture) ColorInfo {
 	ci := ColorInfo{Matrix: mcUnspec, Primaries: 2, Transfer: 2}
+
+	if pic != nil {
+		ci = ColorInfo{
+			Primaries: pic.ColorPrimaries,
+			Transfer:  pic.ColorTransfer,
+			Matrix:    pic.ColorMatrix,
+			FullRange: pic.FullRange,
+		}
+	}
+
+	if f.meta == nil {
+		return ci
+	}
 
 	p := f.meta.prop(it, "colr")
 	if p == nil || p.colr == nil {

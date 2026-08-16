@@ -387,7 +387,12 @@ func (f *file) decodeSequence(o Options) (*HEIC, error) {
 		}
 	}
 
-	out := &HEIC{LoopCount: t.loopCount(), Color: f.sequenceColor()}
+	var first *hevc.Picture
+	if len(colors) > 0 {
+		first = colors[0]
+	}
+
+	out := &HEIC{LoopCount: t.loopCount(), Color: f.sequenceColor(first)}
 
 	for i, pic := range colors {
 		var alpha *hevc.Picture
@@ -426,20 +431,15 @@ func (f *file) decodeSequence(o Options) (*HEIC, error) {
 }
 
 // sequenceColor takes the color description from the primary item when the
-// file also carries one, and otherwise leaves it unspecified.
-func (f *file) sequenceColor() ColorInfo {
-	ci := ColorInfo{Matrix: mcUnspec, Primaries: 2, Transfer: 2}
+// file carries one, and otherwise from what the sequence itself declares.
+func (f *file) sequenceColor(pic *hevc.Picture) ColorInfo {
+	var it *item
 
-	if f.meta == nil {
-		return ci
+	if f.meta != nil {
+		it, _ = f.primary()
 	}
 
-	it, err := f.primary()
-	if err != nil {
-		return ci
-	}
-
-	return f.colorInfo(it, nil)
+	return f.colorInfo(it, pic)
 }
 
 func (f *file) decodeTrack(t *track) ([]*hevc.Picture, error) {
