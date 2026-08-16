@@ -128,6 +128,13 @@ func newColorState(pic *hevc.Picture, ci ColorInfo, outDepth int) *colorState {
 		depth:     pic.BitDepth,
 	}
 
+	// ISO/IEC 23091-2: the identity matrix describes GBR, which subsampled
+	// chroma cannot carry. A sequence that declares it anyway is describing
+	// nothing usable, so it is read as unspecified rather than refused.
+	if s.matrix == mcIdentity && pic.ChromaFormat != 3 && pic.ChromaFormat != 0 {
+		s.matrix = mcUnspec
+	}
+
 	if s.matrix == mcUnspec {
 		s.matrix = mcBT601
 	}
@@ -146,10 +153,6 @@ func newColorState(pic *hevc.Picture, ci ColorInfo, outDepth int) *colorState {
 	s.kr, s.kg, s.kb = yuvCoefficients(s.matrix)
 
 	switch s.matrix {
-	case mcIdentity:
-		if pic.ChromaFormat != 3 && pic.ChromaFormat != 0 {
-			s.unsupported = true
-		}
 	case mcYCgCo:
 		if !s.fullRange {
 			s.unsupported = true
