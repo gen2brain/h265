@@ -87,8 +87,8 @@ func lossySliceReconQP(y, cb, cr []uint8, width, height, qp int) ([]byte, []uint
 	}
 
 	encodeLeaf := func(x0, y0, d int) error {
-		mode := lossyLumaModeCodedWithScratch(reconY, y, width, x0, y0, depth, qp, &modeScratch)
 		cand := lossyMPM(modes, blocksWide, x0/16, y0/16, 4)
+		mode := lossyLumaModeRDOWithScratch(reconY, y, width, x0, y0, depth, cand, &cabac, qp, &modeScratch)
 		var qY [4][4][4 * 4]int32
 		var qCb, qCr [4][4 * 4]int32
 		var cbfCb, cbfCr [4]bool
@@ -163,8 +163,8 @@ func lossySliceReconQP(y, cb, cr []uint8, width, height, qp int) ([]byte, []uint
 	}
 
 	encodeCU32 := func(x0, y0, d int) error {
-		mode := lossyLumaModeCodedWithScratch(reconY, y, width, x0, y0, depth, qp, &modeScratch)
 		cand := lossyMPM(modes, blocksWide, x0/16, y0/16, 4)
+		mode := lossyLumaModeRDOWithScratch(reconY, y, width, x0, y0, depth, cand, &cabac, qp, &modeScratch)
 		var qY [4][16 * 16]int32
 		var qCb, qCr [4][8 * 8]int32
 
@@ -317,6 +317,69 @@ func lossyLumaModeCodedWithScratch(recon, src []uint8, stride, x, y int, coded [
 	return bestMode
 }
 
+func lossyLumaModeRDOWithScratch(recon, src []uint8, stride, x, y int, coded []uint8, cand [3]int,
+	cabac *cabacWriter, qp int, scratch *lossyBlockScratch,
+) int {
+	bestModes := [4]int{intraPlanar, intraPlanar, intraPlanar, intraPlanar}
+	bestDist := [4]int64{1<<63 - 1, 1<<63 - 1, 1<<63 - 1, 1<<63 - 1}
+	for mode := intraPlanar; mode <= 34; mode++ {
+		_, trial := lossyBlockDataWithScratch(recon, src, stride, x, y, 16, mode, 0, coded, qp, false, scratch)
+		var dist int64
+		for j := range 16 {
+			for i := range 16 {
+				d := int64(src[(y+j)*stride+x+i]) - int64(trial[j*16+i])
+				dist += d * d
+			}
+		}
+		for i := range bestModes {
+			if dist >= bestDist[i] {
+				continue
+			}
+			copy(bestModes[i+1:], bestModes[i:len(bestModes)-1])
+			copy(bestDist[i+1:], bestDist[i:len(bestDist)-1])
+			bestModes[i], bestDist[i] = mode, dist
+			break
+		}
+	}
+	bestMode, bestCost := bestModes[0], int64(-1)
+	lambda := lossyLambda(qp)
+	for i, mode := range bestModes {
+		coef, _ := lossyBlockDataWithScratch(recon, src, stride, x, y, 16, mode, 0, coded, qp, false, scratch)
+		cost := bestDist[i] + lambda*lossyModeRate(cabac, cand, mode, coef, scratch)
+		if bestCost < 0 || cost < bestCost {
+			bestMode, bestCost = mode, cost
+		}
+	}
+
+	return bestMode
+}
+
+func lossyModeRate(cabac *cabacWriter, cand [3]int, mode int, coef []int32, scratch *lossyBlockScratch) int64 {
+	bits := putBits{data: scratch.rate[:0]}
+	w := *cabac
+	w.bits = &bits
+	lossyIntraLumaMode(&w, mode, cand)
+	cbf := hasCoefficients(coef)
+	w.encodeBin(ctxCBFLuma, boolToBit(cbf))
+	if cbf {
+		_ = encodeResidual(&w, &sps{chromaFormatIDC: 1}, &pps{}, nil, coef,
+			residualBlock{log2Size: 4, predModeIntra: mode, intra: true}, &[4]uint8{})
+	}
+	w.encodeTerminate(1)
+	scratch.rate = bits.data
+	if bits.nbits == 0 {
+		return int64(len(bits.data) * 8)
+	}
+
+	return int64((len(bits.data)-1)*8 + int(bits.nbits))
+}
+
+func lossyLambda(qp int) int64 {
+	shift := max(qp-12, 0) / 3
+
+	return max(int64(1), int64(9<<shift)/16)
+}
+
 func lossyBlock(recon, src []uint8, stride, x, y, n, mode, cIdx int) []int32 {
 	var scratch lossyBlockScratch
 
@@ -352,6 +415,7 @@ type lossyBlockScratch struct {
 	pred                      []uint8
 	avail                     []bool
 	residual, coef, reconCoef []int32
+	rate                      []byte
 	ref                       refSamples
 	transform                 transformScratch
 }
