@@ -84,6 +84,32 @@ func forwardTransformWide(dst, src []int32, n, bitDepth int) {
 	}
 }
 
+func forwardTransformDST4(dst, src []int32, bitDepth int) {
+	shift1 := bitDepth - 7
+	shift2 := 8
+	var mid [16]int32
+
+	for y := range 4 {
+		for k := range 4 {
+			var sum int32
+			for x := range 4 {
+				sum += int32(dstMatrix[k][x]) * src[y*4+x]
+			}
+			mid[y*4+k] = (sum + 1<<uint(shift1-1)) >> uint(shift1)
+		}
+	}
+
+	for k := range 4 {
+		for v := range 4 {
+			var sum int32
+			for y := range 4 {
+				sum += int32(dstMatrix[v][y]) * mid[y*4+k]
+			}
+			dst[v*4+k] = (sum + 1<<uint(shift2-1)) >> uint(shift2)
+		}
+	}
+}
+
 func quantize(dst, src []int32, n, qp, bitDepth int) {
 	qbits := 14 + qp/6 + 15 - bitDepth - log2(n)
 	scale := (int64(1)<<20 + int64(levelScale[qp%6])/2) / int64(levelScale[qp%6])

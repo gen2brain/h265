@@ -238,6 +238,29 @@ func TestEncodeLossyIntraModes(t *testing.T) {
 	}
 }
 
+func TestEncodeLossyIntraTransformSplit(t *testing.T) {
+	const width, height = 16, 16
+
+	y, cb, cr := lossyTestFrame(width, height)
+	nals, err := encodeIntraLossy(y, cb, cr, width, height)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var d Decoder
+	for _, nal := range nals {
+		if _, err := d.DecodeNAL(nal); err != nil {
+			t.Fatalf("DecodeNAL %d: %v", nal.Type, err)
+		}
+	}
+	if pics := d.Flush(); len(pics) != 1 {
+		t.Fatalf("pictures = %d", len(pics))
+	}
+	if !d.ctuPrev.blk[d.ctuPrev.blkIndex(8, 0)].tuV {
+		t.Fatal("missing 8x8 transform boundary")
+	}
+}
+
 func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 	const width, height = 128, 128
 
@@ -289,6 +312,9 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 	pics = append(pics, d.Flush()...)
 	if len(pics) != 1 {
 		t.Fatalf("pictures = %d", len(pics))
+	}
+	if got := d.ctuPrev.cuDepth[d.ctuPrev.tbIndex(0, 0)]; got != 1 {
+		t.Fatalf("CU depth = %d, want 1", got)
 	}
 	want := append(append(append([]byte{}, wantY...), wantCb...), wantCr...)
 	if got := planarYUV(pics[0]); !bytes.Equal(got, want) {

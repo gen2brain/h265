@@ -191,6 +191,46 @@ func TestForwardTransform8WideInput(t *testing.T) {
 	}
 }
 
+func TestForwardTransformDST4(t *testing.T) {
+	r := rand.New(rand.NewPCG(53, 54))
+	for _, bitDepth := range []int{8, 10, 12} {
+		for range 100 {
+			src := make([]int32, 16)
+			for i := range src {
+				src[i] = int32(r.IntN(1<<bitDepth) - 1<<(bitDepth-1))
+			}
+			got := make([]int32, 16)
+			want := make([]int32, 16)
+			var mid [16]int32
+
+			for y := range 4 {
+				for k := range 4 {
+					var sum int32
+					for x := range 4 {
+						sum += int32(dstMatrix[k][x]) * src[y*4+x]
+					}
+					mid[y*4+k] = (sum + 1<<uint(bitDepth-8)) >> uint(bitDepth-8+1)
+				}
+			}
+
+			for k := range 4 {
+				for v := range 4 {
+					var sum int32
+					for y := range 4 {
+						sum += int32(dstMatrix[v][y]) * mid[y*4+k]
+					}
+					want[v*4+k] = (sum + 128) >> 8
+				}
+			}
+
+			forwardTransformDST4(got, src, bitDepth)
+			if !slices.Equal(got, want) {
+				t.Fatalf("bd=%d src=%v: got %v, want %v", bitDepth, src, got, want)
+			}
+		}
+	}
+}
+
 func TestQuantizeDC(t *testing.T) {
 	for _, n := range []int{4, 8, 16, 32} {
 		for _, qp := range []int{0, 18, 26, 42, 51} {

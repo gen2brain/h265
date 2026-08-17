@@ -6,6 +6,7 @@ type encoderHeaders struct {
 	pcm                bool
 	deblockingDisabled bool
 	ctbLog2            uint8
+	maxTrHierIntra     uint32
 }
 
 func writeProfileTierLevel(w *putBits, levelIDC uint8) {
@@ -71,7 +72,7 @@ func (h encoderHeaders) sps() []byte {
 	w.ue(0)
 	w.ue(2)
 	w.ue(0)
-	w.ue(0)
+	w.ue(h.maxTrHierIntra)
 	w.bit(0)
 	w.bit(0)
 	w.bit(0)

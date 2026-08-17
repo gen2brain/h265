@@ -8,7 +8,7 @@ func encodeIntraLossy(y, cb, cr []uint8, width, height int) ([]NALUnit, error) {
 
 	h := encoderHeaders{
 		width: width, height: height, levelIDC: pcmLevelIDC(width * height), deblockingDisabled: true,
-		ctbLog2: 6,
+		ctbLog2: 6, maxTrHierIntra: 1,
 	}
 	rbsp, err := lossySlice(y, cb, cr, width, height)
 	if err != nil {
@@ -49,58 +49,162 @@ func lossySliceRecon(y, cb, cr []uint8, width, height int) ([]byte, []uint8, []u
 	var stat [4]uint8
 	modes := make([]int, width/16*height/16)
 	depth := make([]uint8, len(modes))
+	coded8 := make([]uint8, width/8*height/8)
 	var modeScratch, yScratch, cbScratch, crScratch lossyBlockScratch
 	blocksWide := width / 16
+	blocksWide8 := width / 8
 
-	encodeLeaf := func(x0, y0 int) error {
+	markCoded8 := func(x, y int) {
+		for j := range 2 {
+			for i := range 2 {
+				coded8[(y/8+j)*blocksWide8+x/8+i] = 1
+			}
+		}
+	}
+
+	encodeLeaf := func(x0, y0, d int) error {
 		mode := lossyLumaModeCodedWithScratch(reconY, y, width, x0, y0, depth, &modeScratch)
-		qY := lossyBlockCodedWithScratch(reconY, y, width, x0, y0, 16, mode, 0, depth, &yScratch)
-		qCb := lossyBlockCodedWithScratch(reconCb, cb, width/2, x0/2, y0/2, 8, mode, 1, depth, &cbScratch)
-		qCr := lossyBlockCodedWithScratch(reconCr, cr, width/2, x0/2, y0/2, 8, mode, 2, depth, &crScratch)
-
 		cand := lossyMPM(modes, blocksWide, x0/16, y0/16, 4)
+		var qY [4][8 * 8]int32
+		var qCb, qCr [4][4 * 4]int32
+
+		for i := range 4 {
+			x, yy := x0+i&1*8, y0+i>>1*8
+			copy(qY[i][:], lossyBlockCodedWithScratch(reconY, y, width, x, yy, 8, mode, 0, coded8, &yScratch))
+			copy(qCb[i][:], lossyBlockCodedWithScratch(reconCb, cb, width/2, x/2, yy/2, 4, mode, 1, coded8, &cbScratch))
+			copy(qCr[i][:], lossyBlockCodedWithScratch(reconCr, cr, width/2, x/2, yy/2, 4, mode, 2, coded8, &crScratch))
+		}
+
+		cbfCb, cbfCr := false, false
+		for i := range 4 {
+			cbfCb = cbfCb || hasCoefficients(qCb[i][:])
+			cbfCr = cbfCr || hasCoefficients(qCr[i][:])
+		}
 
 		cabac.encodeBin(ctxPartMode, 1)
 		lossyIntraLumaMode(&cabac, mode, cand)
 		modes[y0/16*width/16+x0/16] = mode
 		cabac.encodeBin(ctxIntraChromaPredMode, 0)
-		cabac.encodeBin(ctxCBFCBCR, boolToBit(hasCoefficients(qCb)))
-		cabac.encodeBin(ctxCBFCBCR, boolToBit(hasCoefficients(qCr)))
-		cabac.encodeBin(ctxCBFLuma+1, boolToBit(hasCoefficients(qY)))
+		cabac.encodeBin(ctxSplitTransformFlag+1, 1)
+		cabac.encodeBin(ctxCBFCBCR, boolToBit(cbfCb))
+		cabac.encodeBin(ctxCBFCBCR, boolToBit(cbfCr))
 
-		if hasCoefficients(qY) {
-			if err := encodeResidual(&cabac, s, p, nil, qY,
-				residualBlock{log2Size: 4, predModeIntra: mode, intra: true}, &stat); err != nil {
-				return err
+		for i := range 4 {
+			cbfCbLeaf := hasCoefficients(qCb[i][:])
+			cbfCrLeaf := hasCoefficients(qCr[i][:])
+			cabac.encodeBin(ctxCBFCBCR+1, boolToBit(cbfCbLeaf))
+			cabac.encodeBin(ctxCBFCBCR+1, boolToBit(cbfCrLeaf))
+			cabac.encodeBin(ctxCBFLuma, boolToBit(hasCoefficients(qY[i][:])))
+
+			if hasCoefficients(qY[i][:]) {
+				if err := encodeResidual(&cabac, s, p, nil, qY[i][:],
+					residualBlock{log2Size: 3, predModeIntra: mode, intra: true}, &stat); err != nil {
+					return err
+				}
 			}
-		}
-		if hasCoefficients(qCb) {
-			if err := encodeResidual(&cabac, s, p, nil, qCb,
-				residualBlock{log2Size: 3, cIdx: 1, predModeIntra: mode, intra: true}, &stat); err != nil {
-				return err
+			if cbfCbLeaf {
+				if err := encodeResidual(&cabac, s, p, nil, qCb[i][:],
+					residualBlock{log2Size: 2, cIdx: 1, predModeIntra: mode, intra: true}, &stat); err != nil {
+					return err
+				}
 			}
-		}
-		if hasCoefficients(qCr) {
-			if err := encodeResidual(&cabac, s, p, nil, qCr,
-				residualBlock{log2Size: 3, cIdx: 2, predModeIntra: mode, intra: true}, &stat); err != nil {
-				return err
+			if cbfCrLeaf {
+				if err := encodeResidual(&cabac, s, p, nil, qCr[i][:],
+					residualBlock{log2Size: 2, cIdx: 2, predModeIntra: mode, intra: true}, &stat); err != nil {
+					return err
+				}
 			}
 		}
 
 		modes[y0*blocksWide/16+x0/16] = mode
-		depth[y0*blocksWide/16+x0/16] = 2
+		depth[y0*blocksWide/16+x0/16] = uint8(d)
+
+		return nil
+	}
+
+	encodeCU32 := func(x0, y0, d int) error {
+		mode := lossyLumaModeCodedWithScratch(reconY, y, width, x0, y0, depth, &modeScratch)
+		cand := lossyMPM(modes, blocksWide, x0/16, y0/16, 4)
+		var qY [4][16 * 16]int32
+		var qCb, qCr [4][8 * 8]int32
+
+		for i := range 4 {
+			x, yy := x0+i&1*16, y0+i>>1*16
+			copy(qY[i][:], lossyBlockCodedWithScratch(reconY, y, width, x, yy, 16, mode, 0, depth, &yScratch))
+			markCoded8(x, yy)
+			copy(qCb[i][:], lossyBlockCodedWithScratch(reconCb, cb, width/2, x/2, yy/2, 8, mode, 1, depth, &cbScratch))
+			copy(qCr[i][:], lossyBlockCodedWithScratch(reconCr, cr, width/2, x/2, yy/2, 8, mode, 2, depth, &crScratch))
+		}
+
+		cbfCb, cbfCr := false, false
+		for i := range 4 {
+			cbfCb = cbfCb || hasCoefficients(qCb[i][:])
+			cbfCr = cbfCr || hasCoefficients(qCr[i][:])
+		}
+
+		lossyIntraLumaMode(&cabac, mode, cand)
+		cabac.encodeBin(ctxIntraChromaPredMode, 0)
+		cabac.encodeBin(ctxCBFCBCR, boolToBit(cbfCb))
+		cabac.encodeBin(ctxCBFCBCR, boolToBit(cbfCr))
+
+		for i := range 4 {
+			cbfCbLeaf := hasCoefficients(qCb[i][:])
+			cbfCrLeaf := hasCoefficients(qCr[i][:])
+			cabac.encodeBin(ctxCBFCBCR+1, boolToBit(cbfCbLeaf))
+			cabac.encodeBin(ctxCBFCBCR+1, boolToBit(cbfCrLeaf))
+			cabac.encodeBin(ctxCBFLuma, boolToBit(hasCoefficients(qY[i][:])))
+
+			if hasCoefficients(qY[i][:]) {
+				if err := encodeResidual(&cabac, s, p, nil, qY[i][:],
+					residualBlock{log2Size: 4, predModeIntra: mode, intra: true}, &stat); err != nil {
+					return err
+				}
+			}
+			if cbfCbLeaf {
+				if err := encodeResidual(&cabac, s, p, nil, qCb[i][:],
+					residualBlock{log2Size: 3, cIdx: 1, predModeIntra: mode, intra: true}, &stat); err != nil {
+					return err
+				}
+			}
+			if cbfCrLeaf {
+				if err := encodeResidual(&cabac, s, p, nil, qCr[i][:],
+					residualBlock{log2Size: 3, cIdx: 2, predModeIntra: mode, intra: true}, &stat); err != nil {
+					return err
+				}
+			}
+		}
+
+		for j := range 2 {
+			for i := range 2 {
+				idx := (y0/16+j)*blocksWide + x0/16 + i
+				modes[idx] = mode
+				depth[idx] = uint8(d)
+			}
+		}
 
 		return nil
 	}
 
 	var encodeTree func(int, int, int, int) error
 	encodeTree = func(x0, y0, log2Size, d int) error {
-		if log2Size == 4 {
-			return encodeLeaf(x0, y0)
-		}
-
 		size := 1 << log2Size
-		if x0+size <= width && y0+size <= height {
+		full := x0+size <= width && y0+size <= height
+		if log2Size == 5 && full {
+			ctx := 0
+			if x0 > 0 && int(depth[y0/16*blocksWide+(x0-1)/16]) > d {
+				ctx++
+			}
+			if y0 > 0 && int(depth[(y0-1)/16*blocksWide+x0/16]) > d {
+				ctx++
+			}
+			cabac.encodeBin(ctxSplitCodingUnitFlag+ctx, 0)
+
+			return encodeCU32(x0, y0, d)
+		}
+		if log2Size == 4 {
+			return encodeLeaf(x0, y0, d)
+		}
+		if full {
 			ctx := 0
 			if x0 > 0 && int(depth[y0/16*blocksWide+(x0-1)/16]) > d {
 				ctx++
