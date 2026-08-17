@@ -93,7 +93,7 @@ func lossySliceReconQP(y, cb, cr []uint8, width, height, qp int) ([]byte, []uint
 
 		for i := range 4 {
 			x, yy := x0+i&1*8, y0+i>>1*8
-			var base, splitRecon, unsplitRecon [8 * 8]uint8
+			var base [8 * 8]uint8
 			for j := range 8 {
 				copy(base[j*8:], reconY[(yy+j)*width+x:][:8])
 			}
@@ -134,34 +134,33 @@ func lossySliceReconQP(y, cb, cr []uint8, width, height, qp int) ([]byte, []uint
 			split.split = true
 			for j := range 4 {
 				px, py := x+j&1*4, yy+j>>1*4
-				copy(split.y[j][:], lossyBlockTransformCodedWithScratch(reconY, y, width, px, py, 4, mode, 0, coded4, qp, true, &yScratch))
+				copy(split.y[j][:], lossyBlockTransformCodedWithScratch(reconY, y, width, px, py, 4, mode, 0, coded4, qp, true, false, &yScratch))
 			}
 			coded8[idx8] = 1
 			splitDist := distortion()
-			for j := range 8 {
-				copy(splitRecon[j*8:], reconY[(yy+j)*width+x:][:8])
-			}
 			restore()
 
 			var unsplit lossyTU8Plan
-			copy(unsplit.y8[:], lossyBlockTransformCodedWithScratch(reconY, y, width, x, yy, 8, mode, 0, coded8, qp, false, &yScratch))
+			copy(unsplit.y8[:], lossyBlockTransformCodedWithScratch(reconY, y, width, x, yy, 8, mode, 0, coded8, qp, false, false, &yScratch))
 			for _, idx := range idx4 {
 				coded4[idx] = 1
 			}
 			unsplitDist := distortion()
-			for j := range 8 {
-				copy(unsplitRecon[j*8:], reconY[(yy+j)*width+x:][:8])
-			}
-
-			chosen, chosenRecon := split, splitRecon
+			chosen := split
 			lambda := lossyLambda(qp)
 			splitCost := splitDist + lambda*lossyTU8Rate(&cabac, &split, mode, &yScratch)
 			unsplitCost := unsplitDist + lambda*lossyTU8Rate(&cabac, &unsplit, mode, &yScratch)
 			if unsplitCost <= splitCost {
-				chosen, chosenRecon = unsplit, unsplitRecon
+				chosen = unsplit
 			}
-			for j := range 8 {
-				copy(reconY[(yy+j)*width+x:][:8], chosenRecon[j*8:])
+			restore()
+			if chosen.split {
+				for j := range 4 {
+					px, py := x+j&1*4, yy+j>>1*4
+					copy(chosen.y[j][:], lossyBlockTransformCodedWithScratch(reconY, y, width, px, py, 4, mode, 0, coded4, qp, true, true, &yScratch))
+				}
+			} else {
+				copy(chosen.y8[:], lossyBlockTransformCodedWithScratch(reconY, y, width, x, yy, 8, mode, 0, coded8, qp, false, true, &yScratch))
 			}
 			coded8[idx8] = 1
 			for _, idx := range idx4 {
@@ -378,7 +377,7 @@ func lossyLumaModeCodedWithScratch(recon, src []uint8, stride, x, y int, coded [
 ) int {
 	bestMode, bestDist := intraPlanar, int64(-1)
 	for mode := intraPlanar; mode <= 34; mode++ {
-		_, trial := lossyBlockDataWithScratch(recon, src, stride, x, y, 16, mode, 0, coded, qp, false, scratch)
+		_, trial := lossyBlockDataWithScratch(recon, src, stride, x, y, 16, mode, 0, coded, qp, false, false, scratch)
 		var dist int64
 		for j := range 16 {
 			for i := range 16 {
@@ -399,7 +398,7 @@ func lossyLumaModeRDOWithScratch(recon, src []uint8, stride, x, y int, coded []u
 	bestModes := [4]int{intraPlanar, intraPlanar, intraPlanar, intraPlanar}
 	bestDist := [4]int64{1<<63 - 1, 1<<63 - 1, 1<<63 - 1, 1<<63 - 1}
 	for mode := intraPlanar; mode <= 34; mode++ {
-		_, trial := lossyBlockDataWithScratch(recon, src, stride, x, y, 16, mode, 0, coded, qp, false, scratch)
+		_, trial := lossyBlockDataWithScratch(recon, src, stride, x, y, 16, mode, 0, coded, qp, false, false, scratch)
 		var dist int64
 		for j := range 16 {
 			for i := range 16 {
@@ -420,7 +419,7 @@ func lossyLumaModeRDOWithScratch(recon, src []uint8, stride, x, y int, coded []u
 	bestMode, bestCost := bestModes[0], int64(-1)
 	lambda := lossyLambda(qp)
 	for i, mode := range bestModes {
-		coef, _ := lossyBlockDataWithScratch(recon, src, stride, x, y, 16, mode, 0, coded, qp, false, scratch)
+		coef, _ := lossyBlockDataWithScratch(recon, src, stride, x, y, 16, mode, 0, coded, qp, false, false, scratch)
 		cost := bestDist[i] + lambda*lossyModeRate(cabac, cand, mode, coef, scratch)
 		if bestCost < 0 || cost < bestCost {
 			bestMode, bestCost = mode, cost
@@ -485,6 +484,44 @@ func lossyLambda(qp int) int64 {
 	return max(int64(1), int64(9<<shift)/16)
 }
 
+func terminalRDOQ(raw, level []int32, n, mode, cIdx, qp int) {
+	scanIdx := scanIndex(log2(n), cIdx, mode, true, 1)
+	sbScan := scanOrder[log2(n)-2][scanIdx]
+	coeffScan := scanOrder[2][scanIdx]
+	lastSB, lastPos, prevSB := -1, -1, -1
+
+	for i, sb := range sbScan {
+		for k, pos := range coeffScan {
+			index := ((int(sb.y)<<2)+int(pos.y))*n + (int(sb.x) << 2) + int(pos.x)
+			if level[index] == 0 {
+				continue
+			}
+			prevSB = lastSB
+			lastSB, lastPos = i, k
+		}
+	}
+
+	if lastSB < 0 || prevSB < 0 || lastSB != prevSB {
+		return
+	}
+
+	last := coeffScan[lastPos]
+	if last.x == 0 && last.y == 0 {
+		return
+	}
+	lastSBPos := sbScan[lastSB]
+	index := ((int(lastSBPos.y)<<2)+int(last.y))*n + (int(lastSBPos.x) << 2) + int(last.x)
+	if absLevel(level[index]) != 1 {
+		return
+	}
+
+	v := int64(raw[index])
+	distortion := (v*v + 511) >> 9
+	if distortion <= lossyLambda(qp)*2 {
+		level[index] = 0
+	}
+}
+
 func lossyBlock(recon, src []uint8, stride, x, y, n, mode, cIdx int) []int32 {
 	var scratch lossyBlockScratch
 
@@ -500,13 +537,13 @@ func lossyBlockWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx int,
 func lossyBlockCodedWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx int, coded []uint8,
 	qp int, scratch *lossyBlockScratch,
 ) []int32 {
-	return lossyBlockTransformCodedWithScratch(recon, src, stride, x, y, n, mode, cIdx, coded, qp, false, scratch)
+	return lossyBlockTransformCodedWithScratch(recon, src, stride, x, y, n, mode, cIdx, coded, qp, false, true, scratch)
 }
 
 func lossyBlockTransformCodedWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx int, coded []uint8,
-	qp int, dst bool, scratch *lossyBlockScratch,
+	qp int, dst, rdoq bool, scratch *lossyBlockScratch,
 ) []int32 {
-	coef, block := lossyBlockDataWithScratch(recon, src, stride, x, y, n, mode, cIdx, coded, qp, dst, scratch)
+	coef, block := lossyBlockDataWithScratch(recon, src, stride, x, y, n, mode, cIdx, coded, qp, dst, rdoq, scratch)
 	for j := range n {
 		copy(recon[(y+j)*stride+x:], block[j*n:(j+1)*n])
 	}
@@ -534,7 +571,7 @@ type lossyTU8Plan struct {
 }
 
 func lossyBlockDataWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx int,
-	coded []uint8, qp int, dst bool,
+	coded []uint8, qp int, dst, rdoq bool,
 	scratch *lossyBlockScratch,
 ) ([]int32, []uint8) {
 	count := n * n
@@ -567,12 +604,16 @@ func lossyBlockDataWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx i
 		}
 	}
 
+	rawCoef := reconCoef
 	if dst {
-		forwardTransformDST4(coef, residual, 8)
+		forwardTransformDST4(rawCoef, residual, 8)
 	} else {
-		forwardTransform(coef, residual, n, 8)
+		forwardTransform(rawCoef, residual, n, 8)
 	}
-	quantize(coef, coef, n, qp, 8)
+	quantize(coef, rawCoef, n, qp, 8)
+	if rdoq {
+		terminalRDOQ(rawCoef, coef, n, mode, cIdx, qp)
+	}
 
 	copy(reconCoef, coef)
 	dequant(reconCoef, nil, n, qp, 8, false)
