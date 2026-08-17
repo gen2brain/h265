@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -413,6 +414,40 @@ func TestEncodeLossyIntraQP(t *testing.T) {
 	}
 	if _, err := encodeIntraLossyQP(y, cb, cr, width, height, 52); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("high QP: %v", err)
+	}
+}
+
+func TestEncodeLossyIntraQualityBaseline(t *testing.T) {
+	const width, height = 176, 144
+
+	y, cb, cr := lossyTestFrame(width, height)
+	lastBytes := math.MaxInt
+	lastMSE := -1.0
+	for _, qp := range []int{18, 26, 34, 42} {
+		nals, err := encodeIntraLossyQP(y, cb, cr, width, height, qp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, reconY, _, _, err := lossySliceReconQP(y, cb, cr, width, height, qp)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var sse uint64
+		for i := range y {
+			d := int64(y[i]) - int64(reconY[i])
+			sse += uint64(d * d)
+		}
+		mse := float64(sse) / float64(len(y))
+		bytes := len(MarshalAnnexB(nals))
+		if bytes >= lastBytes {
+			t.Fatalf("QP %d bytes = %d, previous = %d", qp, bytes, lastBytes)
+		}
+		if mse <= lastMSE {
+			t.Fatalf("QP %d MSE = %f, previous = %f", qp, mse, lastMSE)
+		}
+		t.Logf("QP %d: %d bytes, %.2f dB", qp, bytes, 10*math.Log10(255*255/mse))
+		lastBytes, lastMSE = bytes, mse
 	}
 }
 
