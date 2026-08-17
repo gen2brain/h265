@@ -284,7 +284,7 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 
 	h := encoderHeaders{
 		width: width, height: height, levelIDC: pcmLevelIDC(width * height), deblockingDisabled: true,
-		ctbLog2: 6, maxTrHierIntra: 2,
+		signDataHidingEnabled: true, ctbLog2: 6, maxTrHierIntra: 2,
 	}
 	s, err := parseSPS(h.sps())
 	if err != nil {
