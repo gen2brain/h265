@@ -240,10 +240,19 @@ func TestEncodeLossyIntraModes(t *testing.T) {
 	}
 }
 
-func TestEncodeLossyIntraTransformSplit(t *testing.T) {
+func TestEncodeLossyIntraTransformChoice(t *testing.T) {
 	const width, height = 16, 16
 
-	y, cb, cr := lossyTestFrame(width, height)
+	y := make([]byte, width*height)
+	cb := make([]byte, width*height/4)
+	cr := make([]byte, width*height/4)
+	for i := range y {
+		y[i] = 96
+	}
+	for i := range cb {
+		cb[i] = 112
+		cr[i] = 144
+	}
 	nals, err := encodeIntraLossy(y, cb, cr, width, height)
 	if err != nil {
 		t.Fatal(err)
@@ -258,8 +267,8 @@ func TestEncodeLossyIntraTransformSplit(t *testing.T) {
 	if pics := d.Flush(); len(pics) != 1 {
 		t.Fatalf("pictures = %d", len(pics))
 	}
-	if !d.ctuPrev.blk[d.ctuPrev.blkIndex(4, 0)].tuV {
-		t.Fatal("missing 4x4 transform boundary")
+	if d.ctuPrev.blk[d.ctuPrev.blkIndex(4, 0)].tuV {
+		t.Fatal("unexpected 4x4 transform boundary")
 	}
 }
 

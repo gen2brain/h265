@@ -93,12 +93,78 @@ func lossySliceReconQP(y, cb, cr []uint8, width, height, qp int) ([]byte, []uint
 
 		for i := range 4 {
 			x, yy := x0+i&1*8, y0+i>>1*8
-			tus[i].split = true
+			var base, splitRecon, unsplitRecon [8 * 8]uint8
+			for j := range 8 {
+				copy(base[j*8:], reconY[(yy+j)*width+x:][:8])
+			}
+			idx8 := yy/8*blocksWide8 + x/8
+			var idx4 [4]int
+			for j := range 2 {
+				for k := range 2 {
+					idx4[j*2+k] = (yy/4+j)*blocksWide4 + x/4 + k
+				}
+			}
+			base8 := coded8[idx8]
+			var base4 [4]uint8
+			for j, idx := range idx4 {
+				base4[j] = coded4[idx]
+			}
+
+			restore := func() {
+				for j := range 8 {
+					copy(reconY[(yy+j)*width+x:][:8], base[j*8:])
+				}
+				coded8[idx8] = base8
+				for j, idx := range idx4 {
+					coded4[idx] = base4[j]
+				}
+			}
+			distortion := func() int64 {
+				var dist int64
+				for j := range 8 {
+					for k := range 8 {
+						delta := int64(y[(yy+j)*width+x+k]) - int64(reconY[(yy+j)*width+x+k])
+						dist += delta * delta
+					}
+				}
+				return dist
+			}
+
+			var split lossyTU8Plan
+			split.split = true
 			for j := range 4 {
 				px, py := x+j&1*4, yy+j>>1*4
-				copy(tus[i].y[j][:], lossyBlockTransformCodedWithScratch(reconY, y, width, px, py, 4, mode, 0, coded4, qp, true, &yScratch))
+				copy(split.y[j][:], lossyBlockTransformCodedWithScratch(reconY, y, width, px, py, 4, mode, 0, coded4, qp, true, &yScratch))
 			}
-			coded8[yy/8*blocksWide8+x/8] = 1
+			coded8[idx8] = 1
+			splitDist := distortion()
+			for j := range 8 {
+				copy(splitRecon[j*8:], reconY[(yy+j)*width+x:][:8])
+			}
+			restore()
+
+			var unsplit lossyTU8Plan
+			copy(unsplit.y8[:], lossyBlockTransformCodedWithScratch(reconY, y, width, x, yy, 8, mode, 0, coded8, qp, false, &yScratch))
+			for _, idx := range idx4 {
+				coded4[idx] = 1
+			}
+			unsplitDist := distortion()
+			for j := range 8 {
+				copy(unsplitRecon[j*8:], reconY[(yy+j)*width+x:][:8])
+			}
+
+			chosen, chosenRecon := split, splitRecon
+			if unsplitDist <= splitDist {
+				chosen, chosenRecon = unsplit, unsplitRecon
+			}
+			for j := range 8 {
+				copy(reconY[(yy+j)*width+x:][:8], chosenRecon[j*8:])
+			}
+			coded8[idx8] = 1
+			for _, idx := range idx4 {
+				coded4[idx] = 1
+			}
+			tus[i] = chosen
 			copy(tus[i].cb[:], lossyBlockCodedWithScratch(reconCb, cb, width/2, x/2, yy/2, 4, mode, 1, coded8, qpCb, &cbScratch))
 			copy(tus[i].cr[:], lossyBlockCodedWithScratch(reconCr, cr, width/2, x/2, yy/2, 4, mode, 2, coded8, qpCr, &crScratch))
 			tus[i].cbfCb = hasCoefficients(tus[i].cb[:])
@@ -128,29 +194,37 @@ func lossySliceReconQP(y, cb, cr []uint8, width, height, qp int) ([]byte, []uint
 				cabac.encodeBin(ctxCBFCBCR+1, boolToBit(tus[i].cbfCr))
 			}
 
-			for j := range 4 {
-				cbfY := hasCoefficients(tus[i].y[j][:])
+			if tus[i].split {
+				for j := range 4 {
+					cbfY := hasCoefficients(tus[i].y[j][:])
+					cabac.encodeBin(ctxCBFLuma, boolToBit(cbfY))
+					if cbfY {
+						if err := encodeResidual(&cabac, s, p, nil, tus[i].y[j][:],
+							residualBlock{log2Size: 2, predModeIntra: mode, intra: true}, &stat); err != nil {
+							return err
+						}
+					}
+				}
+			} else {
+				cbfY := hasCoefficients(tus[i].y8[:])
 				cabac.encodeBin(ctxCBFLuma, boolToBit(cbfY))
 				if cbfY {
-					if err := encodeResidual(&cabac, s, p, nil, tus[i].y[j][:],
-						residualBlock{log2Size: 2, predModeIntra: mode, intra: true}, &stat); err != nil {
+					if err := encodeResidual(&cabac, s, p, nil, tus[i].y8[:],
+						residualBlock{log2Size: 3, predModeIntra: mode, intra: true}, &stat); err != nil {
 						return err
 					}
 				}
-				if j != 3 {
-					continue
+			}
+			if tus[i].cbfCb {
+				if err := encodeResidual(&cabac, s, p, nil, tus[i].cb[:],
+					residualBlock{log2Size: 2, cIdx: 1, predModeIntra: mode, intra: true}, &stat); err != nil {
+					return err
 				}
-				if tus[i].cbfCb {
-					if err := encodeResidual(&cabac, s, p, nil, tus[i].cb[:],
-						residualBlock{log2Size: 2, cIdx: 1, predModeIntra: mode, intra: true}, &stat); err != nil {
-						return err
-					}
-				}
-				if tus[i].cbfCr {
-					if err := encodeResidual(&cabac, s, p, nil, tus[i].cr[:],
-						residualBlock{log2Size: 2, cIdx: 2, predModeIntra: mode, intra: true}, &stat); err != nil {
-						return err
-					}
+			}
+			if tus[i].cbfCr {
+				if err := encodeResidual(&cabac, s, p, nil, tus[i].cr[:],
+					residualBlock{log2Size: 2, cIdx: 2, predModeIntra: mode, intra: true}, &stat); err != nil {
+					return err
 				}
 			}
 		}
@@ -421,6 +495,7 @@ type lossyBlockScratch struct {
 type lossyTU8Plan struct {
 	split        bool
 	y            [4][4 * 4]int32
+	y8           [8 * 8]int32
 	cb, cr       [4 * 4]int32
 	cbfCb, cbfCr bool
 }
