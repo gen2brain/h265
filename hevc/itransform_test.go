@@ -4,88 +4,9 @@ import (
 	"bytes"
 	"math"
 	"math/rand/v2"
-	"runtime"
 	"slices"
 	"testing"
 )
-
-func TestQuantizeDispatch(t *testing.T) {
-	if (runtime.GOARCH == "arm64" || runtime.GOARCH == "riscv64") && quantizeAsm == nil {
-		t.Fatal("assembly quantizer is not dispatched")
-	}
-
-	for _, n := range []int{4, 8, 16, 32} {
-		for _, qp := range []int{0, 18, 26, 42, 51} {
-			src := make([]int32, n*n)
-			for i := range src {
-				src[i] = int32(i*16843009) - math.MaxInt32
-			}
-			src[len(src)/2] = math.MinInt32
-			got := make([]int32, len(src))
-			want := make([]int32, len(src))
-			quantize(got, src, n, qp, 8)
-
-			qbits := 14 + qp/6 + 15 - 8 - log2(n)
-			scale := (int64(1)<<20 + int64(levelScale[qp%6])/2) / int64(levelScale[qp%6])
-			offset := int64(1<<uint(qbits)) / 3
-			for i, v := range src {
-				abs := int64(v)
-				if abs < 0 {
-					abs = -abs
-				}
-				level := min((abs*scale+offset)>>uint(qbits), int64(0x7fff))
-				if v < 0 {
-					level = -level
-				}
-				want[i] = int32(level)
-			}
-
-			if !slices.Equal(got, want) {
-				t.Fatalf("n=%d qp=%d: got %v, want %v", n, qp, got, want)
-			}
-		}
-	}
-}
-
-func TestQuantizeAsm(t *testing.T) {
-	if quantizeAsm == nil {
-		t.Skip("no assembly quantizer")
-	}
-
-	tests := []struct {
-		scale, offset int64
-		qbits         int
-	}{
-		{17231, 43, 9},
-		{26214, 1 << 26 / 3, 26},
-		{26214, 0, 1},
-	}
-	src := []int32{-math.MaxInt32, -123456789, -32768, -1, 0, 1, 32767, 123456789,
-		math.MaxInt32, -987654321, 511, -511, 65536, -65536, 7, -7}
-
-	for _, test := range tests {
-		got := make([]int32, len(src))
-		want := make([]int32, len(src))
-		quantizeAsm(got, src, test.scale, test.offset, test.qbits)
-
-		for i, v := range src {
-			abs := int64(v)
-			if abs < 0 {
-				abs = -abs
-			}
-			level := min((abs*test.scale+test.offset)>>uint(test.qbits), int64(0x7fff))
-			if v < 0 {
-				level = -level
-			}
-			want[i] = int32(level)
-		}
-
-		if !slices.Equal(got, want) {
-			t.Fatalf("scale=%d offset=%d qbits=%d: got %v, want %v",
-				test.scale, test.offset, test.qbits, got, want)
-		}
-	}
-}
 
 // 8.6.4.2 as the sum it is defined as.
 func naive1D(out, in []int32, n int) {

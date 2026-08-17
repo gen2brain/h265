@@ -2,44 +2,6 @@
 
 #include "textflag.h"
 
-#define VWMULVX(Vd, Vn, Rs) WORD $(0xee006057 | ((Vn) << 20) | ((Rs) << 15) | ((Vd) << 7))
-#define VNSRAVI(Vd, Vn, Imm) WORD $(0xb6003057 | ((Vn) << 20) | ((Imm) << 15) | ((Vd) << 7))
-
-TEXT ·quantizeRVV(SB), NOSPLIT, $0-48
-	MOV  dst+0(FP), X10
-	MOV  src+8(FP), X11
-	MOV  n+16(FP), X12
-	MOV  scale+24(FP), X13
-	MOV  offset+32(FP), X14
-	MOVW qbits+40(FP), X15
-	MOV  $32767, X16
-
-quantloop:
-	VSETVLI X12, E32, M1, TA, MA, X18
-	VLE32V   (X11), V1
-	VMSLTVX  X0, V1, V0
-	VRSUBVI  $0, V1, V2
-	VMERGEVVM V2, V1, V0, V2
-	VWMULVX(4, 2, 13)
-
-	VSETVLI X18, E64, M2, TA, MA, X19
-	VADDVX   X14, V4, V4
-	VSRLVX   X15, V4, V4
-	VMINVX   X16, V4, V4
-
-	VSETVLI X18, E32, M1, TA, MA, X19
-	VNSRAVI(6, 4, 0)
-	VRSUBVI  $0, V6, V7
-	VMERGEVVM V7, V6, V0, V6
-	VSE32V   V6, (X10)
-
-	SLLI $2, X18, X19
-	ADD  X19, X10
-	ADD  X19, X11
-	SUB  X18, X12
-	BNEZ X12, quantloop
-	RET
-
 // func forwardTransform8RVV(dst, src, m *int32, n, shift1, shift2 int)
 TEXT ·forwardTransform8RVV(SB), $4096-48
 	MOV dst+0(FP), X10
