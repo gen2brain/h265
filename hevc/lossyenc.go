@@ -154,7 +154,10 @@ func lossySliceReconQP(y, cb, cr []uint8, width, height, qp int) ([]byte, []uint
 			}
 
 			chosen, chosenRecon := split, splitRecon
-			if unsplitDist <= splitDist {
+			lambda := lossyLambda(qp)
+			splitCost := splitDist + lambda*lossyTU8Rate(&cabac, &split, mode, &yScratch)
+			unsplitCost := unsplitDist + lambda*lossyTU8Rate(&cabac, &unsplit, mode, &yScratch)
+			if unsplitCost <= splitCost {
 				chosen, chosenRecon = unsplit, unsplitRecon
 			}
 			for j := range 8 {
@@ -437,6 +440,36 @@ func lossyModeRate(cabac *cabacWriter, cand [3]int, mode int, coef []int32, scra
 	if cbf {
 		_ = encodeResidual(&w, &sps{chromaFormatIDC: 1}, &pps{}, nil, coef,
 			residualBlock{log2Size: 4, predModeIntra: mode, intra: true}, &[4]uint8{})
+	}
+	w.encodeTerminate(1)
+	if bits.nbits == 0 {
+		return int64(len(bits.data) * 8)
+	}
+
+	return int64((len(bits.data)-1)*8 + int(bits.nbits))
+}
+
+func lossyTU8Rate(cabac *cabacWriter, plan *lossyTU8Plan, mode int, scratch *lossyBlockScratch) int64 {
+	bits := putBits{data: scratch.rate[:0]}
+	w := *cabac
+	w.bits = &bits
+	w.encodeBin(ctxSplitTransformFlag+2, boolToBit(plan.split))
+	if plan.split {
+		for i := range plan.y {
+			cbf := hasCoefficients(plan.y[i][:])
+			w.encodeBin(ctxCBFLuma, boolToBit(cbf))
+			if cbf {
+				_ = encodeResidual(&w, &sps{chromaFormatIDC: 1}, &pps{}, nil, plan.y[i][:],
+					residualBlock{log2Size: 2, predModeIntra: mode, intra: true}, &[4]uint8{})
+			}
+		}
+	} else {
+		cbf := hasCoefficients(plan.y8[:])
+		w.encodeBin(ctxCBFLuma, boolToBit(cbf))
+		if cbf {
+			_ = encodeResidual(&w, &sps{chromaFormatIDC: 1}, &pps{}, nil, plan.y8[:],
+				residualBlock{log2Size: 3, predModeIntra: mode, intra: true}, &[4]uint8{})
+		}
 	}
 	w.encodeTerminate(1)
 	if bits.nbits == 0 {

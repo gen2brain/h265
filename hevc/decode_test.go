@@ -337,6 +337,28 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 	}
 }
 
+func TestLossyTU8Rate(t *testing.T) {
+	var bits putBits
+	var w cabacWriter
+	w.init(&bits, 26, sliceI, false)
+	before := w
+	plan := lossyTU8Plan{split: true}
+	plan.y[0][0] = 1
+	var scratch lossyBlockScratch
+
+	if rate := lossyTU8Rate(&w, &plan, intraPlanar, &scratch); rate <= 0 {
+		t.Fatalf("rate = %d", rate)
+	}
+	if w != before {
+		t.Fatal("CABAC state changed")
+	}
+	if allocs := testing.AllocsPerRun(100, func() {
+		lossyTU8Rate(&w, &plan, intraPlanar, &scratch)
+	}); allocs != 0 {
+		t.Fatalf("allocations = %f", allocs)
+	}
+}
+
 func TestEncodeLossyIntraExternal(t *testing.T) {
 	const width, height = 48, 48
 
