@@ -1,8 +1,12 @@
 package hevc
 
 func encodeIntraLossy(y, cb, cr []uint8, width, height int) ([]NALUnit, error) {
+	return encodeIntraLossyQP(y, cb, cr, width, height, 26)
+}
+
+func encodeIntraLossyQP(y, cb, cr []uint8, width, height, qp int) ([]NALUnit, error) {
 	if width <= 0 || height <= 0 || width&15 != 0 || height&15 != 0 ||
-		len(y) != width*height || len(cb) != width*height/4 || len(cr) != width*height/4 {
+		len(y) != width*height || len(cb) != width*height/4 || len(cr) != width*height/4 || qp < 0 || qp > 51 {
 		return nil, ErrInvalid
 	}
 
@@ -10,7 +14,7 @@ func encodeIntraLossy(y, cb, cr []uint8, width, height int) ([]NALUnit, error) {
 		width: width, height: height, levelIDC: pcmLevelIDC(width * height), deblockingDisabled: true,
 		ctbLog2: 6, maxTrHierIntra: 2,
 	}
-	rbsp, err := lossySlice(y, cb, cr, width, height)
+	rbsp, err := lossySliceQP(y, cb, cr, width, height, qp)
 	if err != nil {
 		return nil, err
 	}
@@ -24,24 +28,34 @@ func encodeIntraLossy(y, cb, cr []uint8, width, height int) ([]NALUnit, error) {
 }
 
 func lossySlice(y, cb, cr []uint8, width, height int) ([]byte, error) {
-	rbsp, _, _, _, err := lossySliceRecon(y, cb, cr, width, height)
+	return lossySliceQP(y, cb, cr, width, height, 26)
+}
+
+func lossySliceQP(y, cb, cr []uint8, width, height, qp int) ([]byte, error) {
+	rbsp, _, _, _, err := lossySliceReconQP(y, cb, cr, width, height, qp)
 
 	return rbsp, err
 }
 
 func lossySliceRecon(y, cb, cr []uint8, width, height int) ([]byte, []uint8, []uint8, []uint8, error) {
+	return lossySliceReconQP(y, cb, cr, width, height, 26)
+}
+
+func lossySliceReconQP(y, cb, cr []uint8, width, height, qp int) ([]byte, []uint8, []uint8, []uint8, error) {
 	var bits putBits
 	bits.bit(1)
 	bits.bit(0)
 	bits.ue(0)
 	bits.ue(uint32(sliceI))
-	bits.se(0)
+	bits.se(int32(qp - 26))
 	bits.rbspTrailingBits()
 
 	s := &sps{chromaFormatIDC: 1}
 	p := &pps{}
 	var cabac cabacWriter
-	cabac.init(&bits, 26, sliceI, false)
+	cabac.init(&bits, int32(qp), sliceI, false)
+	qpCb := int(chromaQP(int32(qp), 1))
+	qpCr := qpCb
 
 	reconY := make([]uint8, len(y))
 	reconCb := make([]uint8, len(cb))
@@ -73,7 +87,7 @@ func lossySliceRecon(y, cb, cr []uint8, width, height int) ([]byte, []uint8, []u
 	}
 
 	encodeLeaf := func(x0, y0, d int) error {
-		mode := lossyLumaModeCodedWithScratch(reconY, y, width, x0, y0, depth, &modeScratch)
+		mode := lossyLumaModeCodedWithScratch(reconY, y, width, x0, y0, depth, qp, &modeScratch)
 		cand := lossyMPM(modes, blocksWide, x0/16, y0/16, 4)
 		var qY [4][4][4 * 4]int32
 		var qCb, qCr [4][4 * 4]int32
@@ -83,11 +97,11 @@ func lossySliceRecon(y, cb, cr []uint8, width, height int) ([]byte, []uint8, []u
 			x, yy := x0+i&1*8, y0+i>>1*8
 			for j := range 4 {
 				px, py := x+j&1*4, yy+j>>1*4
-				copy(qY[i][j][:], lossyBlockTransformCodedWithScratch(reconY, y, width, px, py, 4, mode, 0, coded4, true, &yScratch))
+				copy(qY[i][j][:], lossyBlockTransformCodedWithScratch(reconY, y, width, px, py, 4, mode, 0, coded4, qp, true, &yScratch))
 			}
 			coded8[yy/8*blocksWide8+x/8] = 1
-			copy(qCb[i][:], lossyBlockCodedWithScratch(reconCb, cb, width/2, x/2, yy/2, 4, mode, 1, coded8, &cbScratch))
-			copy(qCr[i][:], lossyBlockCodedWithScratch(reconCr, cr, width/2, x/2, yy/2, 4, mode, 2, coded8, &crScratch))
+			copy(qCb[i][:], lossyBlockCodedWithScratch(reconCb, cb, width/2, x/2, yy/2, 4, mode, 1, coded8, qpCb, &cbScratch))
+			copy(qCr[i][:], lossyBlockCodedWithScratch(reconCr, cr, width/2, x/2, yy/2, 4, mode, 2, coded8, qpCr, &crScratch))
 			cbfCb[i] = hasCoefficients(qCb[i][:])
 			cbfCr[i] = hasCoefficients(qCr[i][:])
 		}
@@ -149,18 +163,18 @@ func lossySliceRecon(y, cb, cr []uint8, width, height int) ([]byte, []uint8, []u
 	}
 
 	encodeCU32 := func(x0, y0, d int) error {
-		mode := lossyLumaModeCodedWithScratch(reconY, y, width, x0, y0, depth, &modeScratch)
+		mode := lossyLumaModeCodedWithScratch(reconY, y, width, x0, y0, depth, qp, &modeScratch)
 		cand := lossyMPM(modes, blocksWide, x0/16, y0/16, 4)
 		var qY [4][16 * 16]int32
 		var qCb, qCr [4][8 * 8]int32
 
 		for i := range 4 {
 			x, yy := x0+i&1*16, y0+i>>1*16
-			copy(qY[i][:], lossyBlockCodedWithScratch(reconY, y, width, x, yy, 16, mode, 0, depth, &yScratch))
+			copy(qY[i][:], lossyBlockCodedWithScratch(reconY, y, width, x, yy, 16, mode, 0, depth, qp, &yScratch))
 			markCoded8(x, yy)
 			markCoded4(x, yy, 16)
-			copy(qCb[i][:], lossyBlockCodedWithScratch(reconCb, cb, width/2, x/2, yy/2, 8, mode, 1, depth, &cbScratch))
-			copy(qCr[i][:], lossyBlockCodedWithScratch(reconCr, cr, width/2, x/2, yy/2, 8, mode, 2, depth, &crScratch))
+			copy(qCb[i][:], lossyBlockCodedWithScratch(reconCb, cb, width/2, x/2, yy/2, 8, mode, 1, depth, qpCb, &cbScratch))
+			copy(qCr[i][:], lossyBlockCodedWithScratch(reconCr, cr, width/2, x/2, yy/2, 8, mode, 2, depth, qpCr, &crScratch))
 		}
 
 		cbfCb, cbfCr := false, false
@@ -280,15 +294,15 @@ func lossyLumaMode(recon, src []uint8, stride, x, y int) int {
 }
 
 func lossyLumaModeWithScratch(recon, src []uint8, stride, x, y int, scratch *lossyBlockScratch) int {
-	return lossyLumaModeCodedWithScratch(recon, src, stride, x, y, nil, scratch)
+	return lossyLumaModeCodedWithScratch(recon, src, stride, x, y, nil, 26, scratch)
 }
 
 func lossyLumaModeCodedWithScratch(recon, src []uint8, stride, x, y int, coded []uint8,
-	scratch *lossyBlockScratch,
+	qp int, scratch *lossyBlockScratch,
 ) int {
 	bestMode, bestDist := intraPlanar, int64(-1)
 	for mode := intraPlanar; mode <= 34; mode++ {
-		_, trial := lossyBlockDataWithScratch(recon, src, stride, x, y, 16, mode, 0, coded, false, scratch)
+		_, trial := lossyBlockDataWithScratch(recon, src, stride, x, y, 16, mode, 0, coded, qp, false, scratch)
 		var dist int64
 		for j := range 16 {
 			for i := range 16 {
@@ -312,19 +326,19 @@ func lossyBlock(recon, src []uint8, stride, x, y, n, mode, cIdx int) []int32 {
 func lossyBlockWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx int,
 	scratch *lossyBlockScratch,
 ) []int32 {
-	return lossyBlockCodedWithScratch(recon, src, stride, x, y, n, mode, cIdx, nil, scratch)
+	return lossyBlockCodedWithScratch(recon, src, stride, x, y, n, mode, cIdx, nil, 26, scratch)
 }
 
 func lossyBlockCodedWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx int, coded []uint8,
-	scratch *lossyBlockScratch,
+	qp int, scratch *lossyBlockScratch,
 ) []int32 {
-	return lossyBlockTransformCodedWithScratch(recon, src, stride, x, y, n, mode, cIdx, coded, false, scratch)
+	return lossyBlockTransformCodedWithScratch(recon, src, stride, x, y, n, mode, cIdx, coded, qp, false, scratch)
 }
 
 func lossyBlockTransformCodedWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx int, coded []uint8,
-	dst bool, scratch *lossyBlockScratch,
+	qp int, dst bool, scratch *lossyBlockScratch,
 ) []int32 {
-	coef, block := lossyBlockDataWithScratch(recon, src, stride, x, y, n, mode, cIdx, coded, dst, scratch)
+	coef, block := lossyBlockDataWithScratch(recon, src, stride, x, y, n, mode, cIdx, coded, qp, dst, scratch)
 	for j := range n {
 		copy(recon[(y+j)*stride+x:], block[j*n:(j+1)*n])
 	}
@@ -343,7 +357,7 @@ type lossyBlockScratch struct {
 }
 
 func lossyBlockDataWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx int,
-	coded []uint8, dst bool,
+	coded []uint8, qp int, dst bool,
 	scratch *lossyBlockScratch,
 ) ([]int32, []uint8) {
 	count := n * n
@@ -381,10 +395,10 @@ func lossyBlockDataWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx i
 	} else {
 		forwardTransform(coef, residual, n, 8)
 	}
-	quantize(coef, coef, n, 26, 8)
+	quantize(coef, coef, n, qp, 8)
 
 	copy(reconCoef, coef)
-	dequant(reconCoef, nil, n, 26, 8, false)
+	dequant(reconCoef, nil, n, qp, 8, false)
 	inverseTransform(reconCoef, n, dst, 8, false, &scratch.transform)
 	addResidual(pred, n, 0, 0, n, residualShiftBits(8, false), reconCoef, 8)
 

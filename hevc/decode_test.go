@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -372,6 +373,46 @@ func TestEncodeLossyIntraExternal(t *testing.T) {
 				t.Fatalf("decoded %d bytes, want %d", len(got), len(want))
 			}
 		})
+	}
+}
+
+func TestEncodeLossyIntraQP(t *testing.T) {
+	const width, height = 48, 48
+
+	y, cb, cr := lossyTestFrame(width, height)
+	for _, qp := range []int{18, 26, 34, 42} {
+		t.Run(fmt.Sprintf("qp=%d", qp), func(t *testing.T) {
+			nals, err := encodeIntraLossyQP(y, cb, cr, width, height, qp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, wantY, wantCb, wantCr, err := lossySliceReconQP(y, cb, cr, width, height, qp)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var d Decoder
+			for _, nal := range nals {
+				if _, err := d.DecodeNAL(nal); err != nil {
+					t.Fatalf("DecodeNAL %d: %v", nal.Type, err)
+				}
+			}
+			pics := d.Flush()
+			if len(pics) != 1 {
+				t.Fatalf("pictures = %d", len(pics))
+			}
+			want := append(append(append([]byte{}, wantY...), wantCb...), wantCr...)
+			if got := planarYUV(pics[0]); !bytes.Equal(got, want) {
+				t.Fatal("decoded reconstruction differs")
+			}
+		})
+	}
+
+	if _, err := encodeIntraLossyQP(y, cb, cr, width, height, -1); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("negative QP: %v", err)
+	}
+	if _, err := encodeIntraLossyQP(y, cb, cr, width, height, 52); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("high QP: %v", err)
 	}
 }
 
