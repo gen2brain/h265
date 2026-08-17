@@ -8,7 +8,7 @@ func encodeResidual(w *cabacWriter, s *sps, p *pps, _ *sliceHeader, coef []int32
 		return ErrInvalid
 	}
 
-	if p.transformSkipEnabled || p.signDataHidingEnabled || s.persistentRiceAdaptation ||
+	if p.transformSkipEnabled || s.persistentRiceAdaptation ||
 		b.transquantBypass || p.transquantBypass || s.transformSkipContext || s.extendedPrecision {
 		return ErrUnsupported
 	}
@@ -112,7 +112,7 @@ func encodeResidual(w *cabacWriter, s *sps, p *pps, _ *sliceHeader, coef []int32
 			w.encodeBin(ctxSignificantCoeffFlag+sigSet.at(int(pos.x), int(pos.y)), boolToBit(sig[k]))
 		}
 
-		encodeSubBlockLevels(w, s, coef, b, sb, coeffScan, &sig, i, n, &st)
+		encodeSubBlockLevels(w, s, p, coef, b, sb, coeffScan, &sig, i, n, &st)
 	}
 
 	return nil
@@ -193,7 +193,7 @@ func (w *cabacWriter) encodeCoeffAbsLevelRemaining(v int32, rice, rng int) {
 	w.encodeBypassBits(uint32(v-((1<<k)+2)<<rice), n)
 }
 
-func encodeSubBlockLevels(w *cabacWriter, s *sps, coef []int32, b residualBlock,
+func encodeSubBlockLevels(w *cabacWriter, s *sps, p *pps, coef []int32, b residualBlock,
 	sb scanPos, coeffScan []scanPos, sig *[numSbCoeff]bool, subBlock, n int,
 	st *residualState,
 ) {
@@ -227,6 +227,8 @@ func encodeSubBlockLevels(w *cabacWriter, s *sps, coef []int32, b residualBlock,
 			npos++
 		}
 	}
+	firstSig, lastSig := pos[npos-1], pos[0]
+	signHidden := lastSig-firstSig > 3 && !b.transquantBypass
 
 	var greater1 [numSbCoeff]bool
 	numGreater1, lastGreater1, greater1Ctx := 0, -1, 1
@@ -264,6 +266,9 @@ func encodeSubBlockLevels(w *cabacWriter, s *sps, coef []int32, b residualBlock,
 	}
 
 	for _, k := range pos[:npos] {
+		if p.signDataHidingEnabled && signHidden && k == firstSig {
+			continue
+		}
 		w.encodeBypass(boolToBit(coefAt(coef, coeffScan[k], xS, yS, n) < 0))
 	}
 

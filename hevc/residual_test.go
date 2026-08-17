@@ -524,3 +524,50 @@ func TestEncodeResidualIntraModesRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestEncodeResidualSignDataHidingRoundTrip(t *testing.T) {
+	for _, b := range []residualBlock{
+		{log2Size: 2},
+		{log2Size: 3, cIdx: 1, predModeIntra: 22, intra: true},
+		{log2Size: 4, predModeIntra: 6, intra: true},
+	} {
+		n := 1 << b.log2Size
+		want := make([]int32, n*n)
+		for i := range want {
+			if i%3 == 0 {
+				want[i] = int32(i%5 + 1)
+				if i&1 != 0 {
+					want[i] = -want[i]
+				}
+			}
+		}
+		normalizeSignDataHiding(want, n, b.predModeIntra, b.cIdx)
+
+		s := sps{chromaFormatIDC: 1}
+		p := pps{signDataHidingEnabled: true}
+		sh := sliceHeader{sliceType: sliceI}
+		var bits putBits
+		var w cabacWriter
+		var stat [4]uint8
+		w.init(&bits, 26, sh.sliceType, false)
+		if err := encodeResidual(&w, &s, &p, &sh, want, b, &stat); err != nil {
+			t.Fatalf("size %d: encode: %v", n, err)
+		}
+		w.encodeTerminate(1)
+
+		var c cabac
+		if err := c.init(w.bytes(), 0); err != nil {
+			t.Fatal(err)
+		}
+		c.initContexts(26, sh.sliceType, false)
+		got := make([]int32, len(want))
+		if _, err := decodeResidual(&c, &s, &p, &sh, got, b, &stat); err != nil {
+			t.Fatalf("size %d: decode: %v", n, err)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("size %d level %d: got %d, want %d", n, i, got[i], want[i])
+			}
+		}
+	}
+}

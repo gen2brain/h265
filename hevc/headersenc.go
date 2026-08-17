@@ -1,17 +1,18 @@
 package hevc
 
 type encoderHeaders struct {
-	width, height      int
-	levelIDC           uint8
-	pcm                bool
-	deblockingDisabled bool
-	ctbLog2            uint8
-	maxTrHierIntra     uint32
+	width, height         int
+	levelIDC              uint8
+	pcm                   bool
+	deblockingDisabled    bool
+	signDataHidingEnabled bool
+	ctbLog2               uint8
+	maxTrHierIntra        uint32
 }
 
 func writeProfileTierLevel(w *putBits, levelIDC uint8) {
 	w.bits(0, 2)
-	w.bit(0)
+	w.bit(1)
 	w.bits(1, 5)
 	w.bits(3<<29, 32)
 	w.bit(1)
@@ -102,7 +103,7 @@ func (h encoderHeaders) pps() []byte {
 	w.bit(0)
 	w.bit(0)
 	w.bits(0, 3)
-	w.bit(0)
+	w.bit(boolToBit(h.signDataHidingEnabled))
 	w.bit(0)
 	w.ue(0)
 	w.ue(0)

@@ -419,7 +419,7 @@ func b2u(v bool) uint32 {
 }
 
 func TestWriteParameterSets(t *testing.T) {
-	h := encoderHeaders{width: 320, height: 240, levelIDC: 60, pcm: true}
+	h := encoderHeaders{width: 320, height: 240, levelIDC: 60, pcm: true, signDataHidingEnabled: true}
 
 	v, err := parseVPS(h.vps())
 	if err != nil {
@@ -448,7 +448,7 @@ func TestWriteParameterSets(t *testing.T) {
 		t.Fatalf("PPS: %v", err)
 	}
 
-	if p.id != 0 || p.spsID != 0 || !p.deblockingControlPresen ||
+	if p.id != 0 || p.spsID != 0 || !p.signDataHidingEnabled || !p.deblockingControlPresen ||
 		p.deblockingDisabled || p.tilesEnabled || p.entropyCodingSync {
 		t.Fatalf("PPS = %+v", p)
 	}

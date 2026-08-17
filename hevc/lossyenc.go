@@ -12,7 +12,7 @@ func encodeIntraLossyQP(y, cb, cr []uint8, width, height, qp int) ([]NALUnit, er
 
 	h := encoderHeaders{
 		width: width, height: height, levelIDC: pcmLevelIDC(width * height), deblockingDisabled: true,
-		ctbLog2: 6, maxTrHierIntra: 2,
+		signDataHidingEnabled: true, ctbLog2: 6, maxTrHierIntra: 2,
 	}
 	rbsp, err := lossySliceQP(y, cb, cr, width, height, qp)
 	if err != nil {
@@ -51,7 +51,7 @@ func lossySliceReconQP(y, cb, cr []uint8, width, height, qp int) ([]byte, []uint
 	bits.rbspTrailingBits()
 
 	s := &sps{chromaFormatIDC: 1}
-	p := &pps{}
+	p := &pps{signDataHidingEnabled: true}
 	var cabac cabacWriter
 	cabac.init(&bits, int32(qp), sliceI, false)
 	qpCb := int(chromaQP(int32(qp), 1))
@@ -437,7 +437,7 @@ func lossyModeRate(cabac *cabacWriter, cand [3]int, mode int, coef []int32, scra
 	cbf := hasCoefficients(coef)
 	w.encodeBin(ctxCBFLuma, boolToBit(cbf))
 	if cbf {
-		_ = encodeResidual(&w, &sps{chromaFormatIDC: 1}, &pps{}, nil, coef,
+		_ = encodeResidual(&w, &sps{chromaFormatIDC: 1}, &pps{signDataHidingEnabled: true}, nil, coef,
 			residualBlock{log2Size: 4, predModeIntra: mode, intra: true}, &[4]uint8{})
 	}
 	w.encodeTerminate(1)
@@ -458,7 +458,7 @@ func lossyTU8Rate(cabac *cabacWriter, plan *lossyTU8Plan, mode int, scratch *los
 			cbf := hasCoefficients(plan.y[i][:])
 			w.encodeBin(ctxCBFLuma, boolToBit(cbf))
 			if cbf {
-				_ = encodeResidual(&w, &sps{chromaFormatIDC: 1}, &pps{}, nil, plan.y[i][:],
+				_ = encodeResidual(&w, &sps{chromaFormatIDC: 1}, &pps{signDataHidingEnabled: true}, nil, plan.y[i][:],
 					residualBlock{log2Size: 2, predModeIntra: mode, intra: true}, &[4]uint8{})
 			}
 		}
@@ -466,7 +466,7 @@ func lossyTU8Rate(cabac *cabacWriter, plan *lossyTU8Plan, mode int, scratch *los
 		cbf := hasCoefficients(plan.y8[:])
 		w.encodeBin(ctxCBFLuma, boolToBit(cbf))
 		if cbf {
-			_ = encodeResidual(&w, &sps{chromaFormatIDC: 1}, &pps{}, nil, plan.y8[:],
+			_ = encodeResidual(&w, &sps{chromaFormatIDC: 1}, &pps{signDataHidingEnabled: true}, nil, plan.y8[:],
 				residualBlock{log2Size: 3, predModeIntra: mode, intra: true}, &[4]uint8{})
 		}
 	}
@@ -614,6 +614,7 @@ func lossyBlockDataWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx i
 	if rdoq {
 		terminalRDOQ(rawCoef, coef, n, mode, cIdx, qp)
 	}
+	normalizeSignDataHiding(coef, n, mode, cIdx)
 
 	copy(reconCoef, coef)
 	dequant(reconCoef, nil, n, qp, 8, false)
@@ -621,6 +622,50 @@ func lossyBlockDataWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx i
 	addResidual(pred, n, 0, 0, n, residualShiftBits(8, false), reconCoef, 8)
 
 	return coef, pred
+}
+
+func normalizeSignDataHiding(coef []int32, n, mode, cIdx int) {
+	scanIdx := scanIndex(log2(n), cIdx, mode, true, 1)
+	sbScan := scanOrder[log2(n)-2][scanIdx]
+	coeffScan := scanOrder[2][scanIdx]
+
+	for _, sb := range sbScan {
+		firstSig, lastSig := -1, -1
+		var sumAbs int32
+		for k, pos := range coeffScan {
+			index := ((int(sb.y)<<2)+int(pos.y))*n + (int(sb.x) << 2) + int(pos.x)
+			level := coef[index]
+			if level == 0 {
+				continue
+			}
+			if firstSig < 0 {
+				firstSig = k
+			}
+			lastSig = k
+			sumAbs += absLevel(level)
+		}
+		if lastSig-firstSig <= 3 {
+			continue
+		}
+
+		pos := coeffScan[firstSig]
+		index := ((int(sb.y)<<2)+int(pos.y))*n + (int(sb.x) << 2) + int(pos.x)
+		negative := coef[index] < 0
+		if (sumAbs&1 != 0) == negative {
+			continue
+		}
+		if absLevel(coef[index]) > 1 {
+			if negative {
+				coef[index]++
+			} else {
+				coef[index]--
+			}
+		} else if negative {
+			coef[index]--
+		} else {
+			coef[index]++
+		}
+	}
 }
 
 func lossyPrediction(recon []uint8, stride, x, y, n, mode, cIdx int, coded []uint8, out []uint8, avail []bool,
