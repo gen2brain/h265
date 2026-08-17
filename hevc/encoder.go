@@ -11,18 +11,25 @@ type Frame struct {
 
 type EncoderOptions struct {
 	Width, Height int
+	QP            int
+	Lossless      bool
 }
 
 type Encoder struct {
 	width, height int
+	qp            int
+	lossless      bool
 }
 
 func NewEncoder(opts EncoderOptions) (*Encoder, error) {
-	if opts.Width <= 0 || opts.Height <= 0 || opts.Width&15 != 0 || opts.Height&15 != 0 {
+	if opts.Width <= 0 || opts.Height <= 0 || opts.Width&15 != 0 || opts.Height&15 != 0 || opts.QP < 0 || opts.QP > 51 {
 		return nil, ErrInvalidEncodeInput
 	}
+	if opts.QP == 0 {
+		opts.QP = 26
+	}
 
-	return &Encoder{width: opts.Width, height: opts.Height}, nil
+	return &Encoder{width: opts.Width, height: opts.Height, qp: opts.QP, lossless: opts.Lossless}, nil
 }
 
 func (e *Encoder) Encode(frame Frame) ([]NALUnit, error) {
@@ -45,7 +52,11 @@ func (e *Encoder) Encode(frame Frame) ([]NALUnit, error) {
 		return nil, ErrInvalidEncodeInput
 	}
 
-	return encodePCM(y, cb, cr, e.width, e.height)
+	if e.lossless {
+		return encodePCM(y, cb, cr, e.width, e.height)
+	}
+
+	return encodeIntraLossyQP(y, cb, cr, e.width, e.height, e.qp)
 }
 
 func (e *Encoder) Flush() ([]NALUnit, error) {

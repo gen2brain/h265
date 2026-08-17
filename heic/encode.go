@@ -18,7 +18,7 @@ func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
 	}
 
 	width, height := ycc.Rect.Dx(), ycc.Rect.Dy()
-	enc, err := hevc.NewEncoder(hevc.EncoderOptions{Width: width, Height: height})
+	enc, err := hevc.NewEncoder(hevc.EncoderOptions{Width: width, Height: height, Lossless: true})
 	if err != nil {
 		return ErrUnsupported
 	}

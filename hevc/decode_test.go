@@ -446,9 +446,16 @@ func TestLossyMPMIgnoresAboveCTB(t *testing.T) {
 }
 
 func TestEncoder(t *testing.T) {
-	enc, err := NewEncoder(EncoderOptions{Width: 16, Height: 16})
+	enc, err := NewEncoder(EncoderOptions{Width: 16, Height: 16, QP: 34})
 	if err != nil {
 		t.Fatal(err)
+	}
+	defaultEnc, err := NewEncoder(EncoderOptions{Width: 16, Height: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultEnc.qp != 26 {
+		t.Fatalf("default QP = %d", defaultEnc.qp)
 	}
 
 	frame := Frame{
@@ -471,6 +478,16 @@ func TestEncoder(t *testing.T) {
 	if len(nals) != 4 || nals[3].Type != NALIdrNLP {
 		t.Fatalf("NALs = %+v", nals)
 	}
+	y, _ := packPlane(frame.Y, frame.StrideY, 16, 16)
+	cb, _ := packPlane(frame.Cb, frame.StrideC, 8, 8)
+	cr, _ := packPlane(frame.Cr, frame.StrideC, 8, 8)
+	want, err := encodeIntraLossyQP(y, cb, cr, 16, 16, 34)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(MarshalAnnexB(nals), MarshalAnnexB(want)) {
+		t.Fatal("Encoder did not use QP")
+	}
 	if got := SplitAnnexB(MarshalAnnexB(nals)); len(got) != len(nals) {
 		t.Fatalf("Annex B NAL count = %d", len(got))
 	}
@@ -481,6 +498,9 @@ func TestEncoder(t *testing.T) {
 
 	if _, err := NewEncoder(EncoderOptions{Width: 15, Height: 16}); !errors.Is(err, ErrInvalidEncodeInput) {
 		t.Fatalf("invalid dimensions: %v", err)
+	}
+	if _, err := NewEncoder(EncoderOptions{Width: 16, Height: 16, QP: 52}); !errors.Is(err, ErrInvalidEncodeInput) {
+		t.Fatalf("invalid QP: %v", err)
 	}
 	if _, err := enc.Encode(Frame{}); !errors.Is(err, ErrInvalidEncodeInput) {
 		t.Fatalf("invalid frame: %v", err)

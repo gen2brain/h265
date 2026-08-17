@@ -30,13 +30,12 @@ for _, nal := range nals {
 
 ### Encoding
 
-`hevc.Encoder` currently writes self-contained, lossless PCM IDR access units
-from 8-bit 4:2:0 planar frames. Dimensions must be non-zero multiples of 16.
-This is the syntax-complete bootstrap for the encoder; lossy intra coding and
-HEIC writing are not available yet.
+`hevc.Encoder` writes self-contained lossy intra IDR access units from 8-bit
+4:2:0 planar frames. Dimensions must be non-zero multiples of 16. `QP` ranges
+from 1 through 51; its zero value selects QP 26. `Lossless` selects PCM coding.
 
 ```go
-enc, err := hevc.NewEncoder(hevc.EncoderOptions{Width: 1920, Height: 1080})
+enc, err := hevc.NewEncoder(hevc.EncoderOptions{Width: 1920, Height: 1080, QP: 26})
 nals, err := enc.Encode(hevc.Frame{
     Y: y, Cb: cb, Cr: cr,
     StrideY: yStride, StrideC: cStride,
