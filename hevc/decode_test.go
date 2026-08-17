@@ -256,8 +256,8 @@ func TestEncodeLossyIntraTransformSplit(t *testing.T) {
 	if pics := d.Flush(); len(pics) != 1 {
 		t.Fatalf("pictures = %d", len(pics))
 	}
-	if !d.ctuPrev.blk[d.ctuPrev.blkIndex(8, 0)].tuV {
-		t.Fatal("missing 8x8 transform boundary")
+	if !d.ctuPrev.blk[d.ctuPrev.blkIndex(4, 0)].tuV {
+		t.Fatal("missing 4x4 transform boundary")
 	}
 }
 
@@ -273,7 +273,7 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 
 	h := encoderHeaders{
 		width: width, height: height, levelIDC: pcmLevelIDC(width * height), deblockingDisabled: true,
-		ctbLog2: 6,
+		ctbLog2: 6, maxTrHierIntra: 2,
 	}
 	s, err := parseSPS(h.sps())
 	if err != nil {
