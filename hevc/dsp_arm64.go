@@ -45,6 +45,9 @@ func transpose4NEON(dst, src *int32, n int)
 func forwardTransform8NEON(dst, src, m *int32, n, shift1, shift2 int)
 
 //go:noescape
+func quantizeNEON(dst, src *int32, n int, scale, offset int64, qbits int)
+
+//go:noescape
 func dequant32NEON(coef *int32, m *uint8, n int, ls, rnd, sh, lo, hi int32)
 
 var forwardTransformMatrixNEON = func() [4][32 * 32]int32 {
@@ -85,6 +88,11 @@ func dspInit(d *dspContext) {
 		forwardTransform8NEON(&dst[0], &src[0], &forwardTransformMatrixNEON[log2(n)-2][0],
 			n, log2(n)-1, log2(n)+6)
 	}
+
+	quantizeAsm = func(dst, src []int32, scale, offset int64, qbits int) {
+		quantizeNEON(&dst[0], &src[0], len(src), scale, offset, qbits)
+	}
+	quantizeAsmBlock = 4
 
 	oddAsm = func(out, in []int32, stride int) {
 		odd16NEON(&out[0], &in[0], &transMatrix[0][0], stride)

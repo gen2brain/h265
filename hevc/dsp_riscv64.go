@@ -38,6 +38,9 @@ func transposeRVV(dst, src *int32, n int)
 //go:noescape
 func forwardTransform8RVV(dst, src, m *int32, n, shift1, shift2 int)
 
+//go:noescape
+func quantizeRVV(dst, src *int32, n int, scale, offset int64, qbits int)
+
 var forwardTransformMatrixRVV = func() [4][32 * 32]int32 {
 	var m [4][32 * 32]int32
 
@@ -79,6 +82,11 @@ func dspInit(d *dspContext) {
 		forwardTransform8RVV(&dst[0], &src[0], &forwardTransformMatrixRVV[log2(n)-2][0],
 			n, log2(n)-1, log2(n)+6)
 	}
+
+	quantizeAsm = func(dst, src []int32, scale, offset int64, qbits int) {
+		quantizeRVV(&dst[0], &src[0], len(src), scale, offset, qbits)
+	}
+	quantizeAsmBlock = 1
 
 	oddAsm = func(out, in []int32, stride int) {
 		odd16RVV(&out[0], &in[0], &transMatrix[0][0], stride)

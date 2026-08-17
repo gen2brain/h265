@@ -19,6 +19,10 @@ var oddAsm func(out, in []int32, stride int)
 
 var forwardTransform8Asm func(dst, src []int32, n int)
 
+var quantizeAsm func(dst, src []int32, scale, offset int64, qbits int)
+
+var quantizeAsmBlock int
+
 // planarAsm is 8.4.4.2.4 for eight-bit output, nil unless an implementation is
 // compiled in. It handles n of at least eight.
 var planarAsm func(dst []uint8, stride int, r *refSamples, shift int)

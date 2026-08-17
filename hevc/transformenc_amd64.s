@@ -2,6 +2,51 @@
 
 #include "textflag.h"
 
+TEXT ·quantizeAVX2(SB), NOSPLIT, $0-48
+	MOVQ dst+0(FP), DI
+	MOVQ src+8(FP), SI
+	MOVQ n+16(FP), CX
+	MOVQ scale+24(FP), X0
+	VPBROADCASTD X0, Y0
+	MOVQ offset+32(FP), X1
+	VPBROADCASTQ X1, Y1
+	MOVQ qbits+40(FP), X2
+	MOVL $32767, AX
+	MOVQ AX, X3
+	VPBROADCASTQ X3, Y3
+
+quantloop:
+	VMOVDQU      (SI), Y4
+	VPSRAD       $31, Y4, Y5
+	VPXOR        Y5, Y4, Y6
+	VPSUBD       Y5, Y6, Y6
+	VPMULDQ      Y6, Y0, Y7
+	VPSHUFD      $0xf5, Y6, Y8
+	VPMULDQ      Y8, Y0, Y8
+	VPADDQ       Y1, Y7, Y7
+	VPADDQ       Y1, Y8, Y8
+	VPSRLQ       X2, Y7, Y7
+	VPSRLQ       X2, Y8, Y8
+	VPCMPGTQ     Y3, Y7, Y11
+	VPBLENDVB    Y11, Y3, Y7, Y7
+	VPCMPGTQ     Y3, Y8, Y11
+	VPBLENDVB    Y11, Y3, Y8, Y8
+	VPUNPCKLQDQ  Y8, Y7, Y9
+	VPUNPCKHQDQ  Y8, Y7, Y10
+	VPSHUFD      $0x88, Y9, Y9
+	VPSHUFD      $0x88, Y10, Y10
+	VPUNPCKLQDQ  Y10, Y9, Y9
+	VPXOR        Y5, Y9, Y9
+	VPSUBD       Y5, Y9, Y9
+	VMOVDQU      Y9, (DI)
+	ADDQ         $32, SI
+	ADDQ         $32, DI
+	SUBQ         $8, CX
+	JNZ          quantloop
+
+	VZEROUPPER
+	RET
+
 TEXT ·forwardTransform8AVX2(SB), $4096-48
 	MOVQ dst+0(FP), DI
 	MOVQ src+8(FP), SI

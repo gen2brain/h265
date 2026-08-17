@@ -114,8 +114,22 @@ func quantize(dst, src []int32, n, qp, bitDepth int) {
 	qbits := 14 + qp/6 + 15 - bitDepth - log2(n)
 	scale := (int64(1)<<20 + int64(levelScale[qp%6])/2) / int64(levelScale[qp%6])
 	offset := int64(1<<uint(qbits)) / 3
+	coef := src[:n*n]
 
-	for i, v := range src[:n*n] {
+	if quantizeAsm != nil && len(coef)%quantizeAsmBlock == 0 {
+		for _, v := range coef {
+			if v == -1<<31 {
+				goto scalar
+			}
+		}
+
+		quantizeAsm(dst[:len(coef)], coef, scale, offset, qbits)
+
+		return
+	}
+
+scalar:
+	for i, v := range coef {
 		abs := int64(v)
 		if abs < 0 {
 			abs = -abs

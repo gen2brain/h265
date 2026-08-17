@@ -65,6 +65,9 @@ func forwardTransform8AVX2(dst, src, m *int32, n, shift1, shift2 int)
 //go:noescape
 func forwardTransform8AVX512(dst, src, m *int32, n, shift1, shift2 int)
 
+//go:noescape
+func quantizeAVX2(dst, src *int32, n int, scale, offset int64, qbits int)
+
 var forwardTransformMatrix = func() [4][32 * 32]int32 {
 	var m [4][32 * 32]int32
 
@@ -120,6 +123,11 @@ func dspInit(d *dspContext) {
 		forwardTransform8AVX2(&dst[0], &src[0], &forwardTransformMatrix[log2(n)-2][0],
 			n, log2(n)-1, log2(n)+6)
 	}
+
+	quantizeAsm = func(dst, src []int32, scale, offset int64, qbits int) {
+		quantizeAVX2(&dst[0], &src[0], len(src), scale, offset, qbits)
+	}
+	quantizeAsmBlock = 8
 
 	oddAsm = func(out, in []int32, stride int) {
 		odd16AVX2(&out[0], &in[0], &transMatrix[0][0], stride)
