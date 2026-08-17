@@ -366,7 +366,6 @@ func lossyModeRate(cabac *cabacWriter, cand [3]int, mode int, coef []int32, scra
 			residualBlock{log2Size: 4, predModeIntra: mode, intra: true}, &[4]uint8{})
 	}
 	w.encodeTerminate(1)
-	scratch.rate = bits.data
 	if bits.nbits == 0 {
 		return int64(len(bits.data) * 8)
 	}
@@ -415,7 +414,7 @@ type lossyBlockScratch struct {
 	pred                      []uint8
 	avail                     []bool
 	residual, coef, reconCoef []int32
-	rate                      []byte
+	rate                      [512]byte
 	ref                       refSamples
 	transform                 transformScratch
 }
