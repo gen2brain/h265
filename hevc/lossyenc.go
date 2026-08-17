@@ -263,7 +263,7 @@ func lossyIntraLumaMode(w *cabacWriter, mode int, cand [3]int) {
 	}
 	rem := mode
 	for _, m := range cand {
-		if rem > m {
+		if mode > m {
 			rem--
 		}
 	}

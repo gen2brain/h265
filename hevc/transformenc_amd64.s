@@ -191,3 +191,100 @@ outsum4:
 
 	VZEROUPPER
 	RET
+
+TEXT ·forwardTransform8AVX512(SB), $4096-48
+	MOVQ dst+0(FP), DI
+	MOVQ src+8(FP), SI
+	MOVQ m+16(FP), R14
+	MOVQ n+24(FP), R8
+	MOVQ R8, R9
+	SHLQ $2, R9
+
+	MOVQ shift1+32(FP), CX
+	MOVQ CX, X14
+	DECQ CX
+	MOVQ $1, R10
+	SHLQ CL, R10
+	MOVQ R10, X15
+	VPBROADCASTD X15, Z15
+
+	MOVQ SI, R10
+	LEAQ 0(SP), R11
+	MOVQ R8, R12
+
+row16:
+	XORQ BX, BX
+
+coef16:
+	VPXORD Z0, Z0, Z0
+	MOVQ  R10, AX
+	LEAQ  (R14)(BX*1), DX
+	MOVQ  R8, CX
+
+sum16:
+	VPBROADCASTD (AX), Z1
+	VMOVDQU32    (DX), Z2
+	VPMULLD      Z1, Z2, Z2
+	VPADDD       Z2, Z0, Z0
+	ADDQ         $4, AX
+	ADDQ         R9, DX
+	DECQ         CX
+	JNZ          sum16
+
+	VPADDD     Z15, Z0, Z0
+	VPSRAD     X14, Z0, Z0
+	VMOVDQU32  Z0, (R11)(BX*1)
+	ADDQ       $64, BX
+	CMPQ       BX, R9
+	JLT        coef16
+
+	ADDQ R9, R10
+	ADDQ R9, R11
+	DECQ R12
+	JNZ  row16
+
+	MOVQ shift2+40(FP), CX
+	MOVQ CX, X14
+	DECQ CX
+	MOVQ $1, R10
+	SHLQ CL, R10
+	MOVQ R10, X15
+	VPBROADCASTD X15, Z15
+
+	LEAQ 0(SP), R10
+	MOVQ R14, R11
+	MOVQ R8, R12
+
+out16:
+	XORQ BX, BX
+
+outcoef16:
+	VPXORD Z0, Z0, Z0
+	MOVQ  R10, AX
+	MOVQ  R11, DX
+	MOVQ  R8, CX
+
+outsum16:
+	VMOVDQU32    (AX)(BX*1), Z1
+	VPBROADCASTD (DX), Z2
+	VPMULLD      Z1, Z2, Z2
+	VPADDD       Z2, Z0, Z0
+	ADDQ         R9, AX
+	ADDQ         R9, DX
+	DECQ         CX
+	JNZ          outsum16
+
+	VPADDD    Z15, Z0, Z0
+	VPSRAD    X14, Z0, Z0
+	VMOVDQU32 Z0, (DI)(BX*1)
+	ADDQ      $64, BX
+	CMPQ      BX, R9
+	JLT       outcoef16
+
+	ADDQ R9, DI
+	ADDQ $4, R11
+	DECQ R12
+	JNZ  out16
+
+	VZEROUPPER
+	RET

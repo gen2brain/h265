@@ -62,6 +62,9 @@ func transpose8AVX2(dst, src *int32, n int)
 //go:noescape
 func forwardTransform8AVX2(dst, src, m *int32, n, shift1, shift2 int)
 
+//go:noescape
+func forwardTransform8AVX512(dst, src, m *int32, n, shift1, shift2 int)
+
 var forwardTransformMatrix = func() [4][32 * 32]int32 {
 	var m [4][32 * 32]int32
 
@@ -107,6 +110,13 @@ func dspInit(d *dspContext) {
 	}
 
 	forwardTransform8Asm = func(dst, src []int32, n int) {
+		if hasAVX512 && n >= 16 {
+			forwardTransform8AVX512(&dst[0], &src[0], &forwardTransformMatrix[log2(n)-2][0],
+				n, log2(n)-1, log2(n)+6)
+
+			return
+		}
+
 		forwardTransform8AVX2(&dst[0], &src[0], &forwardTransformMatrix[log2(n)-2][0],
 			n, log2(n)-1, log2(n)+6)
 	}

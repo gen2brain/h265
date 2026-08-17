@@ -239,22 +239,9 @@ func TestEncodeLossyIntraModes(t *testing.T) {
 }
 
 func TestEncodeLossyIntraClosedLoop(t *testing.T) {
-	const width, height = 16, 16
+	const width, height = 48, 48
 
-	y := make([]byte, width*height)
-	cb := make([]byte, width*height/4)
-	cr := make([]byte, width*height/4)
-	for j := range height {
-		for i := range width {
-			y[j*width+i] = byte((17*i + 29*j + i*j) % 256)
-		}
-	}
-	for j := range height / 2 {
-		for i := range width / 2 {
-			cb[j*width/2+i] = byte((31*i + 7*j + i*j) % 256)
-			cr[j*width/2+i] = byte((11*i + 37*j + 3*i*j) % 256)
-		}
-	}
+	y, cb, cr := lossyTestFrame(width, height)
 
 	rbsp, wantY, wantCb, wantCr, err := lossySliceRecon(y, cb, cr, width, height)
 	if err != nil {
@@ -299,6 +286,10 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 	if len(pics) != 1 {
 		t.Fatalf("pictures = %d", len(pics))
 	}
+	if got, want := int(d.ctuPrev.intraMode[d.ctuPrev.tbIndex(0, 16)]),
+		lossyLumaMode(wantY, y, width, 0, 16); got != want {
+		t.Fatalf("mode = %d, want %d", got, want)
+	}
 
 	want := append(append(append([]byte{}, wantY...), wantCb...), wantCr...)
 	if got := planarYUV(pics[0]); !bytes.Equal(got, want) {
@@ -308,6 +299,74 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestEncodeLossyIntraExternal(t *testing.T) {
+	const width, height = 48, 48
+
+	y, cb, cr := lossyTestFrame(width, height)
+	_, wantY, wantCb, wantCr, err := lossySliceRecon(y, cb, cr, width, height)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nals, err := encodeIntraLossy(y, cb, cr, width, height)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stream := filepath.Join(t.TempDir(), "encoded.h265")
+	if err := os.WriteFile(stream, MarshalAnnexB(nals), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := append(append(append([]byte{}, wantY...), wantCb...), wantCr...)
+
+	for _, tool := range []string{"dec265", "ffmpeg"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Logf("%s not installed", tool)
+			continue
+		}
+
+		t.Run(tool, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "decoded.yuv")
+			var cmd *exec.Cmd
+			if tool == "dec265" {
+				cmd = exec.Command(tool, "-q", "-o", out, stream)
+			} else {
+				cmd = exec.Command(tool, "-hide_banner", "-loglevel", "error", "-i", stream,
+					"-f", "rawvideo", "-y", out)
+			}
+			if b, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%s: %v: %s", tool, err, b)
+			}
+
+			got, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("decoded %d bytes, want %d", len(got), len(want))
+			}
+		})
+	}
+}
+
+func lossyTestFrame(width, height int) ([]byte, []byte, []byte) {
+	y := make([]byte, width*height)
+	cb := make([]byte, width*height/4)
+	cr := make([]byte, width*height/4)
+	for j := range height {
+		for i := range width {
+			y[j*width+i] = byte((17*i + 29*j + i*j) % 256)
+		}
+	}
+	for j := range height / 2 {
+		for i := range width / 2 {
+			cb[j*width/2+i] = byte((31*i + 7*j + i*j) % 256)
+			cr[j*width/2+i] = byte((11*i + 37*j + 3*i*j) % 256)
+		}
+	}
+
+	return y, cb, cr
 }
 
 func TestLossyMPMIgnoresAboveCTB(t *testing.T) {

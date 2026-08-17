@@ -507,6 +507,50 @@ func BenchmarkForwardTransform(b *testing.B) {
 	}
 }
 
+func TestForwardTransformWideSpeedup(t *testing.T) {
+	if testing.Short() || !wideKernels() {
+		t.Skip("no wide kernels to compare")
+	}
+
+	for _, n := range []int{16, 32} {
+		src := make([]int32, n*n)
+		for i := range src {
+			src[i] = int32(i*31%511 - 255)
+		}
+		dst := make([]int32, n*n)
+
+		on, off := wideSpeedup(t, 20, 1000, func() {
+			forwardTransform8(dst, src, n)
+		})
+		t.Logf("%dx%d wide %v narrow %v  %.3fx", n, n, on, off, float64(off)/float64(on))
+	}
+}
+
+func TestEncodeIntraWideSpeedup(t *testing.T) {
+	if testing.Short() || !wideKernels() {
+		t.Skip("no wide kernels to compare")
+	}
+
+	const width, height = 176, 144
+	y := make([]byte, width*height)
+	cb := make([]byte, width*height/4)
+	cr := make([]byte, width*height/4)
+	for i := range y {
+		y[i] = byte(i*17 + i/13)
+	}
+	for i := range cb {
+		cb[i] = byte(i*29 + 7)
+		cr[i] = byte(i*43 + 11)
+	}
+
+	on, off := wideSpeedup(t, 20, 1, func() {
+		if _, err := encodeIntraLossy(y, cb, cr, width, height); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Logf("wide %v narrow %v  %.3fx", on, off, float64(off)/float64(on))
+}
+
 func BenchmarkDequant(b *testing.B) {
 	for _, n := range []int{8, 32} {
 		coef := make([]int32, n*n)
