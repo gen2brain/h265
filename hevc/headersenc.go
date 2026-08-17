@@ -5,6 +5,7 @@ type encoderHeaders struct {
 	levelIDC           uint8
 	pcm                bool
 	deblockingDisabled bool
+	ctbLog2            uint8
 }
 
 func writeProfileTierLevel(w *putBits, levelIDC uint8) {
@@ -62,7 +63,11 @@ func (h encoderHeaders) sps() []byte {
 	w.ue(0)
 	w.ue(0)
 	w.ue(1)
-	w.ue(0)
+	ctbLog2 := h.ctbLog2
+	if ctbLog2 == 0 {
+		ctbLog2 = 4
+	}
+	w.ue(uint32(ctbLog2 - 4))
 	w.ue(0)
 	w.ue(2)
 	w.ue(0)

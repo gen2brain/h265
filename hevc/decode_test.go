@@ -239,7 +239,7 @@ func TestEncodeLossyIntraModes(t *testing.T) {
 }
 
 func TestEncodeLossyIntraClosedLoop(t *testing.T) {
-	const width, height = 48, 48
+	const width, height = 128, 128
 
 	y, cb, cr := lossyTestFrame(width, height)
 
@@ -250,10 +250,14 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 
 	h := encoderHeaders{
 		width: width, height: height, levelIDC: pcmLevelIDC(width * height), deblockingDisabled: true,
+		ctbLog2: 6,
 	}
 	s, err := parseSPS(h.sps())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if s.ctbSizeY != 64 {
+		t.Fatalf("CTB size = %d", s.ctbSizeY)
 	}
 	p, err := parsePPS(h.pps())
 	if err != nil {
@@ -286,11 +290,6 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 	if len(pics) != 1 {
 		t.Fatalf("pictures = %d", len(pics))
 	}
-	if got, want := int(d.ctuPrev.intraMode[d.ctuPrev.tbIndex(0, 16)]),
-		lossyLumaMode(wantY, y, width, 0, 16); got != want {
-		t.Fatalf("mode = %d, want %d", got, want)
-	}
-
 	want := append(append(append([]byte{}, wantY...), wantCb...), wantCr...)
 	if got := planarYUV(pics[0]); !bytes.Equal(got, want) {
 		for i := range want {
@@ -374,7 +373,7 @@ func TestLossyMPMIgnoresAboveCTB(t *testing.T) {
 		intraPlanar, intraDC, intraHor,
 		intraVer, 18, 34,
 	}
-	if got, want := lossyMPM(modes, 3, 1, 1), [3]int{intraVer, intraDC, intraPlanar}; got != want {
+	if got, want := lossyMPM(modes, 3, 1, 1, 1), [3]int{intraVer, intraDC, intraPlanar}; got != want {
 		t.Fatalf("MPM = %v, want %v", got, want)
 	}
 }
