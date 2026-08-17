@@ -17,6 +17,7 @@ e813e7f81c3cac6a516abdf401669e96  deblock_grad.h265
 06f650b2660e04ff004cac2f6401d8c6  deblock_sao_320x240.h265
 f6460fe0c066429f687e62b7da6ffab8  deblock_sao_nodeblock.h265
 7ef0270f640f926697c6e84401de5cff  dep_slices.h265
+795d35d752f7ede0aff5ea847c8c0f48  encoder_lossy_32x32.h265
 9604569c8e5fcd812a940b82ef39b552  flat64.h265
 45cccf5f791f9ed034c274e473f9ff48  fuzz_bit_depth_change.h265
 e1885cf287c08c1c6004fb1416dad5be  grad64.h265

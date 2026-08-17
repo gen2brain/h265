@@ -1,0 +1,193 @@
+//go:build amd64 && !noasm
+
+#include "textflag.h"
+
+TEXT ·forwardTransform8AVX2(SB), $4096-48
+	MOVQ dst+0(FP), DI
+	MOVQ src+8(FP), SI
+	MOVQ m+16(FP), R14
+	MOVQ n+24(FP), R8
+	MOVQ R8, R9
+	SHLQ $2, R9
+
+	CMPQ R8, $4
+	JEQ  four
+
+	MOVQ shift1+32(FP), CX
+	MOVQ CX, X14
+	DECQ CX
+	MOVQ $1, R10
+	SHLQ CL, R10
+	MOVQ R10, X15
+	VPBROADCASTD X15, Y15
+
+	MOVQ SI, R10
+	LEAQ 0(SP), R11
+	MOVQ R8, R12
+
+row8:
+	XORQ BX, BX
+
+coef8:
+	VPXOR Y0, Y0, Y0
+	MOVQ  R10, AX
+	LEAQ  (R14)(BX*1), DX
+	MOVQ  R8, CX
+
+sum8:
+	VPBROADCASTD (AX), Y1
+	VMOVDQU      (DX), Y2
+	VPMULLD      Y1, Y2, Y2
+	VPADDD       Y2, Y0, Y0
+	ADDQ         $4, AX
+	ADDQ         R9, DX
+	DECQ         CX
+	JNZ          sum8
+
+	VPADDD   Y15, Y0, Y0
+	VPSRAD   X14, Y0, Y0
+	VMOVDQU  Y0, (R11)(BX*1)
+	ADDQ     $32, BX
+	CMPQ     BX, R9
+	JLT      coef8
+
+	ADDQ R9, R10
+	ADDQ R9, R11
+	DECQ R12
+	JNZ  row8
+
+	MOVQ shift2+40(FP), CX
+	MOVQ CX, X14
+	DECQ CX
+	MOVQ $1, R10
+	SHLQ CL, R10
+	MOVQ R10, X15
+	VPBROADCASTD X15, Y15
+
+	LEAQ 0(SP), R10
+	MOVQ R14, R11
+	MOVQ R8, R12
+
+out8:
+	XORQ BX, BX
+
+outcoef8:
+	VPXOR Y0, Y0, Y0
+	MOVQ  R10, AX
+	MOVQ  R11, DX
+	MOVQ  R8, CX
+
+outsum8:
+	VMOVDQU      (AX)(BX*1), Y1
+	VPBROADCASTD (DX), Y2
+	VPMULLD      Y1, Y2, Y2
+	VPADDD       Y2, Y0, Y0
+	ADDQ         R9, AX
+	ADDQ         R9, DX
+	DECQ         CX
+	JNZ          outsum8
+
+	VPADDD  Y15, Y0, Y0
+	VPSRAD  X14, Y0, Y0
+	VMOVDQU Y0, (DI)(BX*1)
+	ADDQ    $32, BX
+	CMPQ    BX, R9
+	JLT     outcoef8
+
+	ADDQ R9, DI
+	ADDQ $4, R11
+	DECQ R12
+	JNZ  out8
+
+	VZEROUPPER
+	RET
+
+four:
+	MOVQ shift1+32(FP), CX
+	MOVQ CX, X14
+	DECQ CX
+	MOVQ $1, R10
+	SHLQ CL, R10
+	MOVQ R10, X15
+	VPBROADCASTD X15, X15
+
+	MOVQ SI, R10
+	LEAQ 0(SP), R11
+	MOVQ R8, R12
+
+row4:
+	XORQ BX, BX
+
+coef4:
+	VPXOR X0, X0, X0
+	MOVQ  R10, AX
+	LEAQ  (R14)(BX*1), DX
+	MOVQ  R8, CX
+
+sum4:
+	VPBROADCASTD (AX), X1
+	VMOVDQU      (DX), X2
+	VPMULLD      X1, X2, X2
+	VPADDD       X2, X0, X0
+	ADDQ         $4, AX
+	ADDQ         R9, DX
+	DECQ         CX
+	JNZ          sum4
+
+	VPADDD   X15, X0, X0
+	VPSRAD   X14, X0, X0
+	VMOVDQU  X0, (R11)(BX*1)
+	ADDQ     $16, BX
+	CMPQ     BX, R9
+	JLT      coef4
+
+	ADDQ R9, R10
+	ADDQ R9, R11
+	DECQ R12
+	JNZ  row4
+
+	MOVQ shift2+40(FP), CX
+	MOVQ CX, X14
+	DECQ CX
+	MOVQ $1, R10
+	SHLQ CL, R10
+	MOVQ R10, X15
+	VPBROADCASTD X15, X15
+
+	LEAQ 0(SP), R10
+	MOVQ R14, R11
+	MOVQ R8, R12
+
+out4:
+	XORQ BX, BX
+
+outcoef4:
+	VPXOR X0, X0, X0
+	MOVQ  R10, AX
+	MOVQ  R11, DX
+	MOVQ  R8, CX
+
+outsum4:
+	VMOVDQU      (AX)(BX*1), X1
+	VPBROADCASTD (DX), X2
+	VPMULLD      X1, X2, X2
+	VPADDD       X2, X0, X0
+	ADDQ         R9, AX
+	ADDQ         R9, DX
+	DECQ         CX
+	JNZ          outsum4
+
+	VPADDD  X15, X0, X0
+	VPSRAD  X14, X0, X0
+	VMOVDQU X0, (DI)(BX*1)
+	ADDQ    $16, BX
+	CMPQ    BX, R9
+	JLT     outcoef4
+
+	ADDQ R9, DI
+	ADDQ $4, R11
+	DECQ R12
+	JNZ  out4
+
+	VZEROUPPER
+	RET

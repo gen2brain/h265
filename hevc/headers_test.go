@@ -417,3 +417,39 @@ func b2u(v bool) uint32 {
 
 	return 0
 }
+
+func TestWriteParameterSets(t *testing.T) {
+	h := encoderHeaders{width: 320, height: 240, levelIDC: 60, pcm: true}
+
+	v, err := parseVPS(h.vps())
+	if err != nil {
+		t.Fatalf("VPS: %v", err)
+	}
+
+	if v.id != 0 || v.ptl.profileIDC != 1 || v.ptl.levelIDC != h.levelIDC {
+		t.Fatalf("VPS = %+v", v)
+	}
+
+	s, err := parseSPS(h.sps())
+	if err != nil {
+		t.Fatalf("SPS: %v", err)
+	}
+
+	if s.vpsID != 0 || s.picWidthInLumaSamples != uint32(h.width) ||
+		s.picHeightInLumaSamples != uint32(h.height) || s.chromaFormatIDC != 1 ||
+		s.bitDepthLuma != 8 || s.bitDepthChroma != 8 || !s.pcmEnabled ||
+		s.log2MinPcmCbSize != 4 || s.log2MaxPcmCbSize != 4 ||
+		!s.pcmLoopFilterDisabled {
+		t.Fatalf("SPS = %+v", s)
+	}
+
+	p, err := parsePPS(h.pps())
+	if err != nil {
+		t.Fatalf("PPS: %v", err)
+	}
+
+	if p.id != 0 || p.spsID != 0 || !p.deblockingControlPresen ||
+		p.deblockingDisabled || p.tilesEnabled || p.entropyCodingSync {
+		t.Fatalf("PPS = %+v", p)
+	}
+}

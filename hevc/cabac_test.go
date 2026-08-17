@@ -121,6 +121,56 @@ func TestInitType(t *testing.T) {
 	}
 }
 
+func TestCabacWriterRoundTrip(t *testing.T) {
+	for _, tt := range []struct {
+		qp int32
+		st sliceType
+	}{
+		{0, sliceI},
+		{26, sliceP},
+		{51, sliceB},
+	} {
+		var b putBits
+		var w cabacWriter
+		w.init(&b, tt.qp, tt.st, false)
+
+		for i := range 512 {
+			w.encodeBin(i%nContexts, uint32((i*17+i/7)&1))
+			w.encodeBypass(uint32((i * 31) & 1))
+			if i%29 == 0 {
+				w.encodeTerminate(0)
+			}
+		}
+		w.encodeTerminate(1)
+
+		var c cabac
+		if err := c.init(w.bytes(), 0); err != nil {
+			t.Fatal(err)
+		}
+		c.initContexts(tt.qp, tt.st, false)
+
+		for i := range 512 {
+			want := uint32((i*17 + i/7) & 1)
+			if got := c.decodeBin(i % nContexts); got != want {
+				t.Fatalf("qp %d, slice %d, bin %d = %d, want %d", tt.qp, tt.st, i, got, want)
+			}
+
+			want = uint32((i * 31) & 1)
+			if got := c.decodeBypass(); got != want {
+				t.Fatalf("qp %d, slice %d, bypass %d = %d, want %d", tt.qp, tt.st, i, got, want)
+			}
+
+			if i%29 == 0 && c.decodeTerminate() != 0 {
+				t.Fatalf("qp %d, slice %d, terminate %d", tt.qp, tt.st, i)
+			}
+		}
+
+		if c.decodeTerminate() != 1 {
+			t.Fatalf("qp %d, slice %d, final terminator", tt.qp, tt.st)
+		}
+	}
+}
+
 // The arithmetic encoder of 9.3.4.4, longhand.
 type cabacEncoder struct {
 	low         uint32

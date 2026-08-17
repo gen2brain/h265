@@ -28,6 +28,25 @@ for _, nal := range nals {
 }
 ```
 
+### Encoding
+
+`hevc.Encoder` currently writes self-contained, lossless PCM IDR access units
+from 8-bit 4:2:0 planar frames. Dimensions must be non-zero multiples of 16.
+This is the syntax-complete bootstrap for the encoder; lossy intra coding and
+HEIC writing are not available yet.
+
+```go
+enc, err := hevc.NewEncoder(hevc.EncoderOptions{Width: 1920, Height: 1080})
+nals, err := enc.Encode(hevc.Frame{
+    Y: y, Cb: cb, Cr: cr,
+    StrideY: yStride, StrideC: cStride,
+})
+stream := hevc.MarshalAnnexB(nals)
+```
+
+`heic.Encode` currently accepts an 8-bit 4:2:0 `*image.YCbCr` whose dimensions
+are non-zero multiples of 16 and writes a lossless PCM HEIC still.
+
 ### Supported
 
 8-16 bit, 4:2:0/4:2:2/4:4:4/monochrome, tiles, wavefronts, dependent slice segments, PCM, lossless,

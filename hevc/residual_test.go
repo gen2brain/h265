@@ -69,7 +69,9 @@ func TestCoeffAbsLevelRemaining(t *testing.T) {
 				}
 			}
 
-			e := newCabacEncoder(26, sliceI, false)
+			var bits putBits
+			var e cabacWriter
+			e.init(&bits, 26, sliceI, false)
 			for _, v := range vals {
 				e.encodeCoeffAbsLevelRemaining(v, rice, rng)
 			}
@@ -77,7 +79,7 @@ func TestCoeffAbsLevelRemaining(t *testing.T) {
 			e.encodeTerminate(1)
 
 			var d cabac
-			if err := d.init(e.finish(), 0); err != nil {
+			if err := d.init(e.bytes(), 0); err != nil {
 				t.Fatal(err)
 			}
 
@@ -350,6 +352,113 @@ func TestSigCtxSetMatchesDerivation(t *testing.T) {
 							}
 						}
 					}
+				}
+			}
+		}
+	}
+}
+
+func TestEncodeResidualRoundTrip(t *testing.T) {
+	tests := []residualBlock{
+		{log2Size: 2, cIdx: 0},
+		{log2Size: 2, cIdx: 1, predModeIntra: 22, intra: true},
+		{log2Size: 2, cIdx: 0, predModeIntra: 6, intra: true},
+		{log2Size: 3, cIdx: 2},
+		{log2Size: 4, cIdx: 0},
+		{log2Size: 5, cIdx: 0},
+	}
+
+	for testIdx, b := range tests {
+		r := rand.New(rand.NewPCG(uint64(testIdx+11), uint64(testIdx+37)))
+		n := 1 << b.log2Size
+		for trial := range 8 {
+			want := make([]int32, n*n)
+			for i := range want {
+				if r.IntN(5) == 0 {
+					level := int32(1 + r.IntN(12))
+					if r.IntN(7) == 0 {
+						level = int32(100 + r.IntN(30000))
+					}
+					if r.IntN(2) != 0 {
+						level = -level
+					}
+					want[i] = level
+				}
+			}
+			want[r.IntN(len(want))] = int32(1 + r.IntN(3))
+
+			s := sps{chromaFormatIDC: 1}
+			sh := sliceHeader{sliceType: sliceI}
+			var bits putBits
+			var w cabacWriter
+			w.init(&bits, 26, sh.sliceType, false)
+			var stat [4]uint8
+			if err := encodeResidual(&w, &s, &pps{}, &sh, want, b, &stat); err != nil {
+				t.Fatalf("case %d trial %d: encode: %v", testIdx, trial, err)
+			}
+			w.encodeTerminate(1)
+
+			var c cabac
+			if err := c.init(w.bytes(), 0); err != nil {
+				t.Fatal(err)
+			}
+			c.initContexts(26, sh.sliceType, false)
+			got := make([]int32, len(want))
+			if _, err := decodeResidual(&c, &s, &pps{}, &sh, got, b, &stat); err != nil {
+				t.Fatalf("case %d trial %d: decode: %v", testIdx, trial, err)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("case %d trial %d level %d: got %d, want %d",
+						testIdx, trial, i, got[i], want[i])
+				}
+			}
+			if c.decodeTerminate() != 1 {
+				t.Fatalf("case %d trial %d: missing termination", testIdx, trial)
+			}
+		}
+	}
+}
+
+func TestEncodeResidualIntraModesRoundTrip(t *testing.T) {
+	for mode := intraPlanar; mode <= 34; mode++ {
+		for _, log2Size := range []int{3, 4} {
+			n := 1 << log2Size
+			want := make([]int32, n*n)
+			for i := range want {
+				if (i*17+mode*11)%5 == 0 {
+					want[i] = int32((i*31+mode*7)%29 + 1)
+					if (i+mode)&1 != 0 {
+						want[i] = -want[i]
+					}
+				}
+			}
+			want[len(want)-1] = 1
+
+			s := sps{chromaFormatIDC: 1}
+			sh := sliceHeader{sliceType: sliceI}
+			b := residualBlock{log2Size: log2Size, predModeIntra: mode, intra: true}
+			var bits putBits
+			var w cabacWriter
+			var stat [4]uint8
+			w.init(&bits, 26, sh.sliceType, false)
+			if err := encodeResidual(&w, &s, &pps{}, &sh, want, b, &stat); err != nil {
+				t.Fatalf("mode %d size %d: encode: %v", mode, n, err)
+			}
+			w.encodeTerminate(1)
+
+			var c cabac
+			if err := c.init(w.bytes(), 0); err != nil {
+				t.Fatal(err)
+			}
+			c.initContexts(26, sh.sliceType, false)
+			got := make([]int32, len(want))
+			if _, err := decodeResidual(&c, &s, &pps{}, &sh, got, b, &stat); err != nil {
+				t.Fatalf("mode %d size %d: decode: %v", mode, n, err)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("mode %d size %d level %d: got %d, want %d", mode, n, i, got[i], want[i])
 				}
 			}
 		}

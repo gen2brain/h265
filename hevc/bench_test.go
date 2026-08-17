@@ -58,6 +58,62 @@ func BenchmarkDecode1080p(b *testing.B) { benchStream(b, "1080p.h265") }
 func BenchmarkDecodeTiles(b *testing.B) { benchStream(b, "tiles.h265") }
 func BenchmarkDecode10Bit(b *testing.B) { benchStream(b, "10bit_128x128.h265") }
 
+func BenchmarkEncodeIntraLossy(b *testing.B) {
+	const width, height = 176, 144
+
+	y := make([]byte, width*height)
+	cb := make([]byte, width*height/4)
+	cr := make([]byte, width*height/4)
+	for i := range y {
+		y[i] = byte(i*17 + i/13)
+	}
+	for i := range cb {
+		cb[i] = byte(i*29 + 7)
+		cr[i] = byte(i*43 + 11)
+	}
+
+	b.ReportAllocs()
+	b.SetBytes(width * height * 3 / 2)
+	b.ResetTimer()
+
+	for b.Loop() {
+		if _, err := encodeIntraLossy(y, cb, cr, width, height); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkEncodePCM(b *testing.B) {
+	const width, height = 176, 144
+
+	y := make([]byte, width*height)
+	cb := make([]byte, width*height/4)
+	cr := make([]byte, width*height/4)
+	for i := range y {
+		y[i] = byte(i*17 + i/13)
+	}
+	for i := range cb {
+		cb[i] = byte(i*29 + 7)
+		cr[i] = byte(i*43 + 11)
+	}
+
+	enc, err := NewEncoder(EncoderOptions{Width: width, Height: height})
+	if err != nil {
+		b.Fatal(err)
+	}
+	frame := Frame{Y: y, Cb: cb, Cr: cr, StrideY: width, StrideC: width / 2}
+
+	b.ReportAllocs()
+	b.SetBytes(width * height * 3 / 2)
+	b.ResetTimer()
+
+	for b.Loop() {
+		if _, err := enc.Encode(frame); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // wideSpeedup times f with the wide kernels on and off, alternating which runs
 // first and keeping the fastest observation of each. Ordinary benchmarks cannot
 // do this: their sub-benchmarks run in sequence, which on a laptop charges the
@@ -418,6 +474,35 @@ func BenchmarkInverseTransform(b *testing.B) {
 			if idctColsAsm != nil {
 				b.Run(fmt.Sprintf("asm/%s/%d", name, n), run)
 			}
+		}
+	}
+}
+
+func BenchmarkForwardTransform(b *testing.B) {
+	for _, n := range []int{4, 8, 16, 32} {
+		src := make([]int32, n*n)
+		for i := range src {
+			src[i] = int32(i*31%511 - 255)
+		}
+
+		dst := make([]int32, n*n)
+
+		b.Run(fmt.Sprintf("go/%d", n), func(b *testing.B) {
+			for b.Loop() {
+				forwardTransform8Go(dst, src, n)
+			}
+
+			b.ReportMetric(float64(n*n)*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
+		})
+
+		if k := forwardTransform8Asm; k != nil {
+			b.Run(fmt.Sprintf("asm/%d", n), func(b *testing.B) {
+				for b.Loop() {
+					k(dst, src, n)
+				}
+
+				b.ReportMetric(float64(n*n)*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
+			})
 		}
 	}
 }

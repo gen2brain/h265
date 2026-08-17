@@ -42,7 +42,26 @@ func idctCols4NEON(dst, src, m *int32, n, mstride, shift int, rnd, lo, hi int32)
 func transpose4NEON(dst, src *int32, n int)
 
 //go:noescape
+func forwardTransform8NEON(dst, src, m *int32, n, shift1, shift2 int)
+
+//go:noescape
 func dequant32NEON(coef *int32, m *uint8, n int, ls, rnd, sh, lo, hi int32)
+
+var forwardTransformMatrixNEON = func() [4][32 * 32]int32 {
+	var m [4][32 * 32]int32
+
+	for p, n := range [4]int{4, 8, 16, 32} {
+		stride := 32 / n
+
+		for x := range n {
+			for k := range n {
+				m[p][x*n+k] = int32(transMatrix[k*stride][x])
+			}
+		}
+	}
+
+	return m
+}()
 
 func dspInit(d *dspContext) {
 	d.addResidual8 = func(dst []uint8, stride int, coef []int32, n, shift int) {
@@ -60,6 +79,11 @@ func dspInit(d *dspContext) {
 
 	transposeAsm = func(dst, src []int32, n int) {
 		transpose4NEON(&dst[0], &src[0], n)
+	}
+
+	forwardTransform8Asm = func(dst, src []int32, n int) {
+		forwardTransform8NEON(&dst[0], &src[0], &forwardTransformMatrixNEON[log2(n)-2][0],
+			n, log2(n)-1, log2(n)+6)
 	}
 
 	oddAsm = func(out, in []int32, stride int) {

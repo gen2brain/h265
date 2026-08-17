@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
@@ -44,6 +45,166 @@ func TestIDCT1D(t *testing.T) {
 				if got[i] != want[i] {
 					t.Fatalf("n=%d in=%v: out[%d] = %d, want %d", n, in, i, got[i], want[i])
 				}
+			}
+		}
+	}
+}
+
+func TestForwardTransformDC(t *testing.T) {
+	for _, n := range []int{4, 8, 16, 32} {
+		src := make([]int32, n*n)
+		for i := range src {
+			src[i] = 17
+		}
+		got := make([]int32, n*n)
+		forwardTransform(got, src, n, 8)
+		if got[0] != 17<<7 {
+			t.Fatalf("n=%d DC = %d, want %d", n, got[0], 17<<7)
+		}
+		for i, v := range got[1:] {
+			if v != 0 {
+				t.Fatalf("n=%d AC %d = %d", n, i+1, v)
+			}
+		}
+	}
+}
+
+func TestForwardTransform8(t *testing.T) {
+	r := rand.New(rand.NewPCG(5, 6))
+
+	for _, n := range []int{4, 8, 16, 32} {
+		for range 100 {
+			src := make([]int32, n*n)
+			for i := range src {
+				src[i] = int32(r.IntN(511) - 255)
+			}
+			got := make([]int32, n*n)
+			want := make([]int32, n*n)
+			forwardTransform8(got, src, n)
+			forwardTransformWide(want, src, n, 8)
+			if !slices.Equal(got, want) {
+				t.Fatalf("n=%d: got %v, want %v", n, got, want)
+			}
+		}
+	}
+}
+
+func TestForwardTransform8Fallback(t *testing.T) {
+	save := forwardTransform8Asm
+	forwardTransform8Asm = nil
+	defer func() { forwardTransform8Asm = save }()
+
+	r := rand.New(rand.NewPCG(47, 48))
+
+	for _, n := range []int{4, 8, 16, 32} {
+		for range 100 {
+			src := make([]int32, n*n)
+			for i := range src {
+				src[i] = int32(r.IntN(511) - 255)
+			}
+
+			got := make([]int32, n*n)
+			want := make([]int32, n*n)
+			forwardTransform8(got, src, n)
+			forwardTransform8Go(want, src, n)
+
+			if !slices.Equal(got, want) {
+				t.Fatalf("n=%d: got %v, want %v", n, got, want)
+			}
+		}
+	}
+}
+
+func TestForwardTransform8Asm(t *testing.T) {
+	k := forwardTransform8Asm
+	if k == nil {
+		t.Skip("no assembly for this target")
+	}
+
+	r := rand.New(rand.NewPCG(49, 50))
+
+	for _, n := range []int{4, 8, 16, 32} {
+		check := func(src []int32) {
+			t.Helper()
+
+			got := make([]int32, n*n)
+			want := make([]int32, n*n)
+			k(got, src, n)
+			forwardTransform8Go(want, src, n)
+
+			if !slices.Equal(got, want) {
+				t.Fatalf("n=%d src=%v: got %v, want %v", n, src, got, want)
+			}
+		}
+
+		for range 500 {
+			src := make([]int32, n*n)
+			for i := range src {
+				src[i] = int32(r.IntN(511) - 255)
+			}
+
+			check(src)
+		}
+
+		for _, v := range []int32{-255, 255} {
+			src := make([]int32, n*n)
+			for i := range src {
+				src[i] = v
+			}
+
+			check(src)
+		}
+
+		src := make([]int32, n*n)
+		for i := range src {
+			if (i/n+i%n)%2 == 0 {
+				src[i] = -255
+			} else {
+				src[i] = 255
+			}
+		}
+
+		check(src)
+	}
+}
+
+func TestForwardTransform8WideInput(t *testing.T) {
+	src := make([]int32, 16)
+	src[0] = 1 << 20
+	src[1] = -(1 << 20)
+	got := make([]int32, len(src))
+	want := make([]int32, len(src))
+
+	save := forwardTransform8Asm
+	called := false
+	forwardTransform8Asm = func([]int32, []int32, int) { called = true }
+	defer func() { forwardTransform8Asm = save }()
+
+	forwardTransform(got, src, 4, 8)
+	forwardTransformWide(want, src, 4, 8)
+	if called {
+		t.Fatal("dispatched unsafe input to assembly")
+	}
+
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestQuantizeDC(t *testing.T) {
+	for _, n := range []int{4, 8, 16, 32} {
+		for _, qp := range []int{0, 18, 26, 42, 51} {
+			src := make([]int32, n*n)
+			src[0] = 1 << 20
+			level := make([]int32, n*n)
+			quantize(level, src, n, qp, 8)
+			if level[0] == 0 {
+				t.Fatalf("n=%d qp=%d quantized DC to zero", n, qp)
+			}
+
+			dequant(level, nil, n, qp, 8, false)
+			if level[0] <= 0 {
+				t.Fatalf("n=%d qp=%d dequantized DC = %d", n, qp, level[0])
 			}
 		}
 	}

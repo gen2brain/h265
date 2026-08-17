@@ -44,6 +44,58 @@ func mustRead(t *testing.T, name string) []byte {
 	return b
 }
 
+func TestEncode(t *testing.T) {
+	src := image.NewYCbCr(image.Rect(0, 0, 32, 32), image.YCbCrSubsampleRatio420)
+	for i := range src.Y {
+		src.Y[i] = byte(i*17 + i/13)
+	}
+	for i := range src.Cb {
+		src.Cb[i] = byte(i*29 + 7)
+		src.Cr[i] = byte(i*43 + 11)
+	}
+
+	data, err := encodeToBytes(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	img, err := Decode(bytes.NewReader(data), Options{ToYCbCr: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := img.(*image.YCbCr)
+	if !ok {
+		t.Fatalf("image = %T", img)
+	}
+	if !bytes.Equal(got.Y, src.Y) || !bytes.Equal(got.Cb, src.Cb) || !bytes.Equal(got.Cr, src.Cr) {
+		t.Fatal("encoded planes differ")
+	}
+}
+
+func BenchmarkEncode(b *testing.B) {
+	const width, height = 176, 144
+
+	src := image.NewYCbCr(image.Rect(0, 0, width, height), image.YCbCrSubsampleRatio420)
+	for i := range src.Y {
+		src.Y[i] = byte(i*17 + i/13)
+	}
+	for i := range src.Cb {
+		src.Cb[i] = byte(i*29 + 7)
+		src.Cr[i] = byte(i*43 + 11)
+	}
+
+	b.ReportAllocs()
+	b.SetBytes(width * height * 3 / 2)
+	b.ResetTimer()
+
+	for b.Loop() {
+		if _, err := encodeToBytes(src); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // referencePlanes holds the digest of each file's decoded planes, taken from
 // libde265 decoding the same item data.
 func referencePlanes(t *testing.T) map[string]string {

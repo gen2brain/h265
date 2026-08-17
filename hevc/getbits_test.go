@@ -41,6 +41,40 @@ func TestGetBitsSE(t *testing.T) {
 	}
 }
 
+func TestPutBitsRoundTrip(t *testing.T) {
+	var w putBits
+	w.bits(0b101, 3)
+	w.ue(0)
+	w.ue(1)
+	w.ue(17)
+	w.se(-4)
+	w.se(5)
+	w.rbspTrailingBits()
+
+	var c getBits
+	c.init(w.bytes())
+
+	if got := c.bits(3); got != 0b101 {
+		t.Fatalf("bits = %#b", got)
+	}
+
+	for _, want := range []uint32{0, 1, 17} {
+		if got := c.ue(); got != want {
+			t.Fatalf("ue = %d, want %d", got, want)
+		}
+	}
+
+	for _, want := range []int32{-4, 5} {
+		if got := c.se(); got != want {
+			t.Fatalf("se = %d, want %d", got, want)
+		}
+	}
+
+	if c.bit() != 1 || c.moreRBSPData() {
+		t.Fatalf("trailing bits = %#x", w.bytes())
+	}
+}
+
 func TestGetBitsOverread(t *testing.T) {
 	var c getBits
 	c.init([]byte{0xff})

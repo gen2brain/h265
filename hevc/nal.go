@@ -227,3 +227,81 @@ func (n NALUnit) NALOffset(off int) int {
 
 	return off
 }
+
+func marshalNAL(typ NALType, layerID, temporalID uint8, rbsp []byte) []byte {
+	out := make([]byte, 0, len(rbsp)+2)
+	out = append(out,
+		byte(typ)<<1|layerID>>5,
+		layerID<<3|(temporalID+1)&7,
+	)
+
+	return append(out, escapeRBSP(rbsp)...)
+}
+
+func MarshalNAL(nal NALUnit) []byte {
+	return marshalNAL(nal.Type, nal.LayerID, nal.TemporalID, nal.RBSP)
+}
+
+func marshalAnnexB(nals [][]byte) []byte {
+	var out []byte
+
+	for _, nal := range nals {
+		out = append(out, 0, 0, 0, 1)
+		out = append(out, nal...)
+	}
+
+	return out
+}
+
+func MarshalAnnexB(nals []NALUnit) []byte {
+	data := make([][]byte, len(nals))
+	for i := range nals {
+		data[i] = MarshalNAL(nals[i])
+	}
+
+	return marshalAnnexB(data)
+}
+
+func marshalHVCC(nals [][]byte, lengthSize int) []byte {
+	if lengthSize < 1 || lengthSize > 4 {
+		return nil
+	}
+
+	var out []byte
+
+	for _, nal := range nals {
+		if len(nal) == 0 || uint64(len(nal)) >= 1<<uint(lengthSize*8) {
+			return nil
+		}
+
+		for i := lengthSize - 1; i >= 0; i-- {
+			out = append(out, byte(len(nal)>>uint(i*8)))
+		}
+
+		out = append(out, nal...)
+	}
+
+	return out
+}
+
+func escapeRBSP(rbsp []byte) []byte {
+	out := make([]byte, 0, len(rbsp))
+	zeros := 0
+
+	for _, b := range rbsp {
+		if zeros == 2 && b <= 3 {
+			out = append(out, 3)
+			zeros = 0
+		}
+
+		out = append(out, b)
+
+		if b == 0 {
+			zeros++
+		} else {
+			zeros = 0
+		}
+	}
+
+	return out
+}

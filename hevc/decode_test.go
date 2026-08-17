@@ -86,6 +86,282 @@ func planarYUV(p *Picture) []byte {
 	return out
 }
 
+func TestEncodePCM(t *testing.T) {
+	const width, height = 32, 32
+
+	y := make([]byte, width*height)
+	cb := make([]byte, width*height/4)
+	cr := make([]byte, width*height/4)
+
+	for i := range y {
+		y[i] = byte(i*17 + i/13)
+	}
+	for i := range cb {
+		cb[i] = byte(i*29 + 7)
+		cr[i] = byte(i*43 + 11)
+	}
+
+	nals, err := encodePCM(y, cb, cr, width, height)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var d Decoder
+	var pics []*Picture
+	for _, nal := range nals {
+		data := marshalNAL(nal.Type, nal.LayerID, nal.TemporalID, nal.RBSP)
+		parsed, ok := ParseNAL(data)
+		if !ok {
+			t.Fatal("ParseNAL failed")
+		}
+
+		out, err := d.DecodeNAL(parsed)
+		if err != nil {
+			t.Fatalf("DecodeNAL %d: %v", nal.Type, err)
+		}
+		pics = append(pics, out...)
+	}
+	pics = append(pics, d.Flush()...)
+
+	if len(pics) != 1 {
+		t.Fatalf("pictures = %d", len(pics))
+	}
+
+	want := append(append(append([]byte{}, y...), cb...), cr...)
+	if got := planarYUV(pics[0]); !bytes.Equal(got, want) {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("PCM sample %d = %d, want %d", i, got[i], want[i])
+			}
+		}
+	}
+}
+
+func TestEncodeLossyIntraIDR(t *testing.T) {
+	const width, height = 32, 32
+
+	src := mustRead(t, filepath.Join("testdata", "encoder_lossy_32x32_src.yuv"))
+	if len(src) != width*height*3/2 {
+		t.Fatalf("fixture size = %d", len(src))
+	}
+	y := src[:width*height]
+	cb := src[width*height : width*height*5/4]
+	cr := src[width*height*5/4:]
+
+	nals, err := encodeIntraLossy(y, cb, cr, width, height)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var d Decoder
+	var pics []*Picture
+	for _, nal := range nals {
+		out, err := d.DecodeNAL(nal)
+		if err != nil {
+			t.Fatalf("DecodeNAL %d: %v", nal.Type, err)
+		}
+		pics = append(pics, out...)
+	}
+	pics = append(pics, d.Flush()...)
+
+	if len(pics) != 1 {
+		t.Fatalf("pictures = %d", len(pics))
+	}
+
+	got := planarYUV(pics[0])
+	want := append(append(append([]byte{}, y...), cb...), cr...)
+	if bytes.Equal(got, want) {
+		t.Fatal("QP 26 output equals source")
+	}
+	for _, v := range got[1:] {
+		if v != got[0] {
+			return
+		}
+	}
+	t.Fatal("decoded frame is flat")
+}
+
+func TestEncodeLossyIntraModes(t *testing.T) {
+	const width, height = 32, 16
+
+	gradients := []struct {
+		name string
+		pix  func(int, int) byte
+	}{
+		{"vertical", func(_, y int) byte { return byte(20 + 5*y) }},
+		{"diagonal", func(x, y int) byte { return byte(20 + 3*x + 5*y) }},
+	}
+
+	modes := make(map[int]bool)
+	for _, gradient := range gradients {
+		t.Run(gradient.name, func(t *testing.T) {
+			y := make([]byte, width*height)
+			cb := make([]byte, width*height/4)
+			cr := make([]byte, width*height/4)
+			for j := range height {
+				for i := range width {
+					y[j*width+i] = gradient.pix(i, j)
+				}
+			}
+
+			recon := make([]byte, len(y))
+			first := lossyLumaMode(recon, y, width, 0, 0)
+			lossyBlock(recon, y, width, 0, 0, 16, first, 0)
+			mode := lossyLumaMode(recon, y, width, 16, 0)
+			if mode == intraDC {
+				t.Fatal("gradient selected DC")
+			}
+			modes[mode] = true
+
+			nals, err := encodeIntraLossy(y, cb, cr, width, height)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var d Decoder
+			var pics []*Picture
+			for _, nal := range nals {
+				out, err := d.DecodeNAL(nal)
+				if err != nil {
+					t.Fatalf("DecodeNAL %d: %v", nal.Type, err)
+				}
+				pics = append(pics, out...)
+			}
+			pics = append(pics, d.Flush()...)
+			if len(pics) != 1 {
+				t.Fatalf("pictures = %d", len(pics))
+			}
+		})
+	}
+	if len(modes) != len(gradients) {
+		t.Fatalf("gradient modes = %v", modes)
+	}
+}
+
+func TestEncodeLossyIntraClosedLoop(t *testing.T) {
+	const width, height = 16, 16
+
+	y := make([]byte, width*height)
+	cb := make([]byte, width*height/4)
+	cr := make([]byte, width*height/4)
+	for j := range height {
+		for i := range width {
+			y[j*width+i] = byte((17*i + 29*j + i*j) % 256)
+		}
+	}
+	for j := range height / 2 {
+		for i := range width / 2 {
+			cb[j*width/2+i] = byte((31*i + 7*j + i*j) % 256)
+			cr[j*width/2+i] = byte((11*i + 37*j + 3*i*j) % 256)
+		}
+	}
+
+	rbsp, wantY, wantCb, wantCr, err := lossySliceRecon(y, cb, cr, width, height)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := encoderHeaders{
+		width: width, height: height, levelIDC: pcmLevelIDC(width * height), deblockingDisabled: true,
+	}
+	s, err := parseSPS(h.sps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := parsePPS(h.pps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sh, err := parseSliceHeader(rbsp, NALIdrNLP, s, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sh.deblockingDisabled {
+		t.Fatal("deblocking is enabled")
+	}
+	nals := []NALUnit{
+		{Type: NALVPS, RBSP: h.vps()},
+		{Type: NALSPS, RBSP: h.sps()},
+		{Type: NALPPS, RBSP: h.pps()},
+		{Type: NALIdrNLP, RBSP: rbsp},
+	}
+
+	var d Decoder
+	var pics []*Picture
+	for _, nal := range nals {
+		out, err := d.DecodeNAL(nal)
+		if err != nil {
+			t.Fatalf("DecodeNAL %d: %v", nal.Type, err)
+		}
+		pics = append(pics, out...)
+	}
+	pics = append(pics, d.Flush()...)
+	if len(pics) != 1 {
+		t.Fatalf("pictures = %d", len(pics))
+	}
+
+	want := append(append(append([]byte{}, wantY...), wantCb...), wantCr...)
+	if got := planarYUV(pics[0]); !bytes.Equal(got, want) {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("sample %d = %d, want %d", i, got[i], want[i])
+			}
+		}
+	}
+}
+
+func TestLossyMPMIgnoresAboveCTB(t *testing.T) {
+	modes := []int{
+		intraPlanar, intraDC, intraHor,
+		intraVer, 18, 34,
+	}
+	if got, want := lossyMPM(modes, 3, 1, 1), [3]int{intraVer, intraDC, intraPlanar}; got != want {
+		t.Fatalf("MPM = %v, want %v", got, want)
+	}
+}
+
+func TestEncoder(t *testing.T) {
+	enc, err := NewEncoder(EncoderOptions{Width: 16, Height: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	frame := Frame{
+		Y:       make([]byte, 16*20),
+		Cb:      make([]byte, 8*10),
+		Cr:      make([]byte, 8*10),
+		StrideY: 20,
+		StrideC: 10,
+	}
+	for y := range 16 {
+		for x := range 16 {
+			frame.Y[y*frame.StrideY+x] = byte(x + 17*y)
+		}
+	}
+
+	nals, err := enc.Encode(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nals) != 4 || nals[3].Type != NALIdrNLP {
+		t.Fatalf("NALs = %+v", nals)
+	}
+	if got := SplitAnnexB(MarshalAnnexB(nals)); len(got) != len(nals) {
+		t.Fatalf("Annex B NAL count = %d", len(got))
+	}
+
+	if out, err := enc.Flush(); err != nil || out != nil {
+		t.Fatalf("Flush = %v, %v", out, err)
+	}
+
+	if _, err := NewEncoder(EncoderOptions{Width: 15, Height: 16}); !errors.Is(err, ErrInvalidEncodeInput) {
+		t.Fatalf("invalid dimensions: %v", err)
+	}
+	if _, err := enc.Encode(Frame{}); !errors.Is(err, ErrInvalidEncodeInput) {
+		t.Fatalf("invalid frame: %v", err)
+	}
+}
+
 var cannotDecode = map[string]string{
 	"fuzz_dequant_qp_overflow.h265": "slice QP outside the range of 7.4.7.1",
 	"fuzz_mvd_overflow.h265":        "corrupted motion vector difference desyncs the arithmetic decoder",

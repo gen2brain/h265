@@ -60,6 +60,25 @@ func idctCols8AVX2(dst, src, m *int32, n, mstride, shift int, rnd, lo, hi int32)
 func transpose8AVX2(dst, src *int32, n int)
 
 //go:noescape
+func forwardTransform8AVX2(dst, src, m *int32, n, shift1, shift2 int)
+
+var forwardTransformMatrix = func() [4][32 * 32]int32 {
+	var m [4][32 * 32]int32
+
+	for p, n := range [4]int{4, 8, 16, 32} {
+		stride := 32 / n
+
+		for x := range n {
+			for k := range n {
+				m[p][x*n+k] = int32(transMatrix[k*stride][x])
+			}
+		}
+	}
+
+	return m
+}()
+
+//go:noescape
 func dequant32AVX2(coef *int32, m *uint8, n int, ls, rnd, sh, lo, hi int32)
 
 //go:noescape
@@ -85,6 +104,11 @@ func dspInit(d *dspContext) {
 
 	transposeAsm = func(dst, src []int32, n int) {
 		transpose8AVX2(&dst[0], &src[0], n)
+	}
+
+	forwardTransform8Asm = func(dst, src []int32, n int) {
+		forwardTransform8AVX2(&dst[0], &src[0], &forwardTransformMatrix[log2(n)-2][0],
+			n, log2(n)-1, log2(n)+6)
 	}
 
 	oddAsm = func(out, in []int32, stride int) {
