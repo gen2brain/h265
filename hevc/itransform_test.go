@@ -576,6 +576,106 @@ func TestRDOQLevels(t *testing.T) {
 
 // TestHadamard8 holds the transform to its defining property: applied twice it
 // is eight times what it started as.
+// TestRDOQTruncates covers where the block is made to end. A lone level far out
+// along the scan costs a long last_sig_coeff to point at and is worth less than
+// it costs; one that carries real weight is not.
+func TestRDOQTruncates(t *testing.T) {
+	const (
+		n  = 8
+		qp = 26
+	)
+
+	scale, qbits := quantScale(n, qp, 8)
+
+	for _, c := range []struct {
+		name string
+		tail int64
+		want bool
+	}{
+		{"faint", 15, false},
+		{"strong", 25, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			raw := make([]int32, n*n)
+			raw[0] = int32(int64(12) << qbits / 10 / scale)
+			raw[n*n-1] = int32(c.tail << qbits / 10 / scale)
+
+			var e intraEncoder
+
+			e.reset(make([]uint8, 64*64), make([]uint8, 32*32), make([]uint8, 32*32), 64, 64, qp)
+
+			coef := make([]int32, n*n)
+			e.rdoq(coef, raw, n, qp, 0, intraDC)
+
+			if coef[0] == 0 {
+				t.Fatal("the coefficient carrying the block went too")
+			}
+
+			if kept := coef[n*n-1] != 0; kept != c.want {
+				t.Fatalf("tail kept = %v, want %v", kept, c.want)
+			}
+		})
+	}
+}
+
+// TestRDOQTruncatesRun covers a whole run of levels at the end of the scan.
+// Faint ones go together; ones that each carry their own bits stay, which is
+// what stops the block being cut back too far.
+func TestRDOQTruncatesRun(t *testing.T) {
+	const (
+		n  = 8
+		qp = 26
+	)
+
+	scale, qbits := quantScale(n, qp, 8)
+
+	for _, c := range []struct {
+		name string
+		tail int64
+		want int
+	}{
+		{"faint", 6, 0},
+		{"worthwhile", 10, 16},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			raw := make([]int32, n*n)
+			raw[0] = int32(int64(40) << qbits / 10 / scale)
+
+			// The bottom right 4x4 is the last sub-block of the diagonal scan.
+			for y := n / 2; y < n; y++ {
+				for x := n / 2; x < n; x++ {
+					raw[y*n+x] = int32(c.tail << qbits / 10 / scale)
+				}
+			}
+
+			var e intraEncoder
+
+			e.reset(make([]uint8, 64*64), make([]uint8, 32*32), make([]uint8, 32*32), 64, 64, qp)
+
+			coef := make([]int32, n*n)
+			e.rdoq(coef, raw, n, qp, 0, intraDC)
+
+			if coef[0] == 0 {
+				t.Fatal("the coefficient carrying the block went too")
+			}
+
+			live := 0
+
+			for y := n / 2; y < n; y++ {
+				for x := n / 2; x < n; x++ {
+					if coef[y*n+x] != 0 {
+						live++
+					}
+				}
+			}
+
+			if live != c.want {
+				t.Fatalf("%d of the tail survived, want %d", live, c.want)
+			}
+		})
+	}
+}
+
 func TestHadamard8(t *testing.T) {
 	r := rand.New(rand.NewPCG(31, 32))
 

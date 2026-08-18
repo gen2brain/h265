@@ -176,6 +176,16 @@ func (e *intraEncoder) rdoq(coef, raw []int32, n, qp, cIdx, mode int) {
 		return
 	}
 
+	// Each coefficient's cost is kept so that the last significant position can
+	// be reconsidered once every level is known.
+	cost := e.scratch.cost[:n*n]
+	costZero := e.scratch.costZero[:n*n]
+	costSig := e.scratch.costSig[:n*n]
+
+	clear(cost)
+	clear(costZero)
+	clear(costSig)
+
 	var st rdoqState
 
 	for i := lastSB; i >= 0; i-- {
@@ -224,24 +234,32 @@ func (e *intraEncoder) rdoq(coef, raw []int32, n, qp, cIdx, mode int) {
 		for k := start; k >= 0; k-- {
 			pos := coeffScan[k]
 			idx := (yS<<2+int(pos.y))*n + xS<<2 + int(pos.x)
+			scan := i*numSbCoeff + k
 			t := num[idx]
 
 			sig := ctxSignificantCoeffFlag + sigSet.at(int(pos.x), int(pos.y))
 			nearest := int32((t + int64(1)<<(qbits-1)) >> qbits)
+			zero := levelError(t, shift, dist)
 
 			best := int32(0)
-			cost := levelError(t, shift, dist) + lambda*e.binBits(sig, 0)
+			chosen := zero + lambda*e.binBits(sig, 0)
+			sigBits := lambda * e.binBits(sig, 0)
 
 			for level := nearest; level >= max(1, nearest-1); level-- {
 				c := levelError(t-int64(level)<<qbits, shift, dist) +
 					lambda*(e.binBits(sig, 1)+e.levelBits(&st, level, cIdx))
-				if c < cost {
-					best, cost = level, c
+				if c < chosen {
+					best, chosen = level, c
+					sigBits = lambda * e.binBits(sig, 1)
 				}
 			}
 
-			dropped += levelError(t, shift, dist)
-			coded += cost
+			cost[scan] = chosen
+			costZero[scan] = zero
+			costSig[scan] = sigBits
+
+			dropped += zero
+			coded += chosen
 
 			if best == 0 {
 				continue
@@ -271,8 +289,93 @@ func (e *intraEncoder) rdoq(coef, raw []int32, n, qp, cIdx, mode int) {
 
 		csbf[yS*sbWidth+xS] = false
 
-		for _, pos := range coeffScan {
+		for k, pos := range coeffScan {
 			coef[(yS<<2+int(pos.y))*n+xS<<2+int(pos.x)] = 0
+
+			scan := i*numSbCoeff + k
+			cost[scan], costSig[scan] = costZero[scan], 0
 		}
 	}
+
+	e.truncate(coef, cost, costZero, costSig, sbScan, coeffScan,
+		lastSB*numSbCoeff+lastPos, n, cIdx, scanIdx, lambda)
+}
+
+// truncate reconsiders where the block ends. Coding a nearer coefficient as the
+// last one drops everything past it, which pays for itself when what is dropped
+// costs more in bits than it is worth in error.
+func (e *intraEncoder) truncate(coef []int32, cost, costZero, costSig []int64,
+	sbScan, coeffScan []scanPos, last, n, cIdx, scanIdx int, lambda int64,
+) {
+	at := func(scan int) int {
+		sb, pos := sbScan[scan/numSbCoeff], coeffScan[scan%numSbCoeff]
+
+		return (int(sb.y)<<2+int(pos.y))*n + int(sb.x)<<2 + int(pos.x)
+	}
+
+	base := int64(0)
+	for scan := 0; scan <= last; scan++ {
+		base += cost[scan]
+	}
+
+	best, bestLast := int64(1)<<62, last
+
+	for scan := last; scan >= 0; scan-- {
+		idx := at(scan)
+
+		level := absLevel(coef[idx])
+		if level == 0 {
+			base -= costSig[scan]
+
+			continue
+		}
+
+		if total := base - costSig[scan] + lambda*e.lastBits(idx, n, cIdx, scanIdx); total < best {
+			best, bestLast = total, scan
+		}
+
+		// Past a level above one there is nothing left worth dropping.
+		if level > 1 {
+			break
+		}
+
+		base += costZero[scan] - cost[scan]
+	}
+
+	for scan := bestLast + 1; scan <= last; scan++ {
+		coef[at(scan)] = 0
+	}
+}
+
+// lastBits is what last_sig_coeff_x and last_sig_coeff_y cost for a position,
+// prefix contexts and bypass suffix together.
+func (e *intraEncoder) lastBits(idx, n, cIdx, scanIdx int) int64 {
+	x, y := idx%n, idx/n
+	if scanIdx == scanVer {
+		x, y = y, x
+	}
+
+	return e.lastCoordBits(ctxLastSignificantCoeffXPrefix, x, log2(n), cIdx) +
+		e.lastCoordBits(ctxLastSignificantCoeffYPrefix, y, log2(n), cIdx)
+}
+
+func (e *intraEncoder) lastCoordBits(base, v, log2Size, cIdx int) int64 {
+	prefix := lastSigCoeffPrefix(v)
+	cMax := log2Size<<1 - 1
+
+	var bits int64
+
+	for i := range prefix {
+		bits += e.binBits(base+lastSigCoeffCtx(log2Size, cIdx, i), 1)
+	}
+
+	if prefix < cMax {
+		bits += e.binBits(base+lastSigCoeffCtx(log2Size, cIdx, prefix), 0)
+	}
+
+	if prefix > 3 {
+		bits += int64(prefix>>1-1) << rateShift
+	}
+
+	return bits
 }

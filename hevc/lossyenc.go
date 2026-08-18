@@ -115,6 +115,9 @@ type lossyBlockScratch struct {
 	residual  [32 * 32]int32
 	coef      [32 * 32]int32
 	num       [32 * 32]int64
+	cost      [32 * 32]int64
+	costZero  [32 * 32]int64
+	costSig   [32 * 32]int64
 	reconCoef [32 * 32]int32
 	base, ref refSamples
 	transform transformScratch
