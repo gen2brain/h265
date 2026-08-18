@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"image"
 	"io"
+	"math"
 
 	"github.com/gen2brain/h265/hevc"
 )
@@ -17,6 +18,10 @@ const (
 	encMatrix    = 6
 )
 
+// maxBoxOverhead bounds the header bytes before the sample data, so a file
+// needing 64 bit box sizes is refused rather than truncated.
+const maxBoxOverhead = 1 << 16
+
 type EncodeOptions struct{}
 
 func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
@@ -26,6 +31,7 @@ func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
 	}
 
 	width, height := ycc.Rect.Dx(), ycc.Rect.Dy()
+
 	enc, err := hevc.NewEncoder(hevc.EncoderOptions{Width: width, Height: height, Lossless: true})
 	if err != nil {
 		return ErrUnsupported
@@ -42,26 +48,44 @@ func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
 		return ErrInvalid
 	}
 
-	data := make([]byte, 4)
-	binary.BigEndian.PutUint32(data, uint32(len(hevc.MarshalNAL(nals[3]))))
-	data = append(data, hevc.MarshalNAL(nals[3])...)
+	sample := hevc.MarshalNAL(nals[3])
+	if uint64(len(sample))+maxBoxOverhead > math.MaxUint32 {
+		return ErrUnsupported
+	}
 
-	file := makeHEIC(width, height, nals[:3], data)
+	data := make([]byte, 4)
+	binary.BigEndian.PutUint32(data, uint32(len(sample)))
+	data = append(data, sample...)
+
+	file, err := makeHEIC(width, height, nals[:3], data)
+	if err != nil {
+		return err
+	}
+
 	_, err = w.Write(file)
 
 	return err
 }
 
-func makeHEIC(width, height int, params []hevc.NALUnit, data []byte) []byte {
+func makeHEIC(width, height int, params []hevc.NALUnit, data []byte) ([]byte, error) {
 	ftyp := box("ftyp", []byte("heic\x00\x00\x00\x00mif1heic"))
-	meta := heicMeta(width, height, params, 0, uint64(len(data)))
-	off := uint64(len(ftyp) + len(meta) + 8)
-	meta = heicMeta(width, height, params, off, uint64(len(data)))
 
-	return append(append(ftyp, meta...), box("mdat", data)...)
+	meta, err := heicMeta(width, height, params, 0, uint64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+
+	off := uint64(len(ftyp) + len(meta) + 8)
+
+	meta, err = heicMeta(width, height, params, off, uint64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+
+	return append(append(ftyp, meta...), box("mdat", data)...), nil
 }
 
-func heicMeta(width, height int, params []hevc.NALUnit, offset, length uint64) []byte {
+func heicMeta(width, height int, params []hevc.NALUnit, offset, length uint64) ([]byte, error) {
 	hdlr := fullBox("hdlr", 0, 0, append([]byte("\x00\x00\x00\x00pict"), make([]byte, 13)...))
 	pitm := fullBox("pitm", 0, 0, u16(1))
 	infe := fullBox("infe", 2, 0, append(append(append(u16(1), 0, 0), []byte("hvc1")...), []byte("image\x00")...))
@@ -77,7 +101,12 @@ func heicMeta(width, height int, params []hevc.NALUnit, offset, length uint64) [
 
 	ispe := fullBox("ispe", 0, 0, append(u32(uint32(width)), u32(uint32(height))...))
 	pixi := fullBox("pixi", 0, 0, []byte{3, 8, 8, 8})
-	hvcc := box("hvcC", marshalHvcC(params))
+	config, err := marshalHvcC(params)
+	if err != nil {
+		return nil, err
+	}
+
+	hvcc := box("hvcC", config)
 	colr := box("colr", append(append(append([]byte("nclx"), u16(encPrimaries)...),
 		u16(encTransfer)...), append(u16(encMatrix), 0x80)...))
 	ipco := box("ipco", append(append(append(ispe, pixi...), hvcc...), colr...))
@@ -89,23 +118,46 @@ func heicMeta(width, height int, params []hevc.NALUnit, offset, length uint64) [
 	meta = append(meta, iloc...)
 	meta = append(meta, iprp...)
 
-	return fullBox("meta", 0, 0, meta)
+	return fullBox("meta", 0, 0, meta), nil
 }
 
-func marshalHvcC(params []hevc.NALUnit) []byte {
-	out := []byte{
-		1, 1, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30,
-		0xf0, 0, 0xfc, 0xfd, 0xf8, 0xf8, 0, 0, 0x0f, 3,
+// marshalHvcC writes the HEVCDecoderConfigurationRecord. ISO/IEC 14496-15
+// requires its profile, tier and level to be the sequence parameter set's own.
+func marshalHvcC(params []hevc.NALUnit) ([]byte, error) {
+	var ptl []byte
+
+	for _, nal := range params {
+		if nal.Type != hevc.NALSPS {
+			continue
+		}
+
+		b, ok := hevc.ProfileTierLevel(nal.RBSP)
+		if !ok {
+			return nil, ErrInvalid
+		}
+
+		ptl = b
 	}
+
+	if ptl == nil {
+		return nil, ErrInvalid
+	}
+
+	out := append([]byte{1}, ptl...)
+	out = append(out, 0xf0, 0, 0xfc, 0xfd, 0xf8, 0xf8, 0, 0, 0x0f, 3)
 
 	for _, nal := range params {
 		data := hevc.MarshalNAL(nal)
+		if len(data) > 0xffff {
+			return nil, ErrInvalid
+		}
+
 		out = append(out, 0x80|byte(nal.Type), 0, 1)
 		out = append(out, u16(uint16(len(data)))...)
 		out = append(out, data...)
 	}
 
-	return out
+	return out, nil
 }
 
 func box(typ string, data []byte) []byte {

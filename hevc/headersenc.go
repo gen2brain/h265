@@ -10,9 +10,11 @@ type encoderHeaders struct {
 	maxTrHierIntra        uint32
 }
 
+// writeProfileTierLevel is 7.3.3: Main profile, Main tier, progressive frames
+// only. The High tier is not defined for the levels this encoder reaches.
 func writeProfileTierLevel(w *putBits, levelIDC uint8) {
 	w.bits(0, 2)
-	w.bit(1)
+	w.bit(0)
 	w.bits(1, 5)
 	w.bits(3<<29, 32)
 	w.bit(1)

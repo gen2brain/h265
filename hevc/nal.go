@@ -305,3 +305,14 @@ func escapeRBSP(rbsp []byte) []byte {
 
 	return out
 }
+
+// ProfileTierLevel returns the twelve bytes of profile_tier_level, from
+// general_profile_space through general_level_idc, out of a sequence parameter
+// set RBSP. A container's decoder configuration record repeats them.
+func ProfileTierLevel(sps []byte) ([]byte, bool) {
+	if len(sps) < 13 {
+		return nil, false
+	}
+
+	return sps[1:13], true
+}

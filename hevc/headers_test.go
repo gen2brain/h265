@@ -426,7 +426,7 @@ func TestWriteParameterSets(t *testing.T) {
 		t.Fatalf("VPS: %v", err)
 	}
 
-	if v.id != 0 || v.ptl.profileIDC != 1 || v.ptl.levelIDC != h.levelIDC {
+	if v.id != 0 || v.ptl.profileIDC != 1 || v.ptl.levelIDC != h.levelIDC || v.ptl.tierFlag {
 		t.Fatalf("VPS = %+v", v)
 	}
 
@@ -441,6 +441,21 @@ func TestWriteParameterSets(t *testing.T) {
 		s.log2MinPcmCbSize != 4 || s.log2MaxPcmCbSize != 4 ||
 		!s.pcmLoopFilterDisabled {
 		t.Fatalf("SPS = %+v", s)
+	}
+
+	// ISO/IEC 14496-15 has a container repeat these twelve bytes, so they have
+	// to be the ones the sequence parameter set itself carries.
+	ptl, ok := ProfileTierLevel(h.sps())
+	if !ok {
+		t.Fatal("no profile_tier_level")
+	}
+
+	if len(ptl) != 12 || ptl[0]>>5 != 0 || ptl[0]&0x1f != 1 || ptl[11] != h.levelIDC {
+		t.Fatalf("profile_tier_level = %x", ptl)
+	}
+
+	if _, ok := ProfileTierLevel(h.sps()[:12]); ok {
+		t.Fatal("short SPS accepted")
 	}
 
 	p, err := parsePPS(h.pps())
