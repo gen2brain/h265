@@ -654,46 +654,125 @@ func (e *intraEncoder) tu8(x, y, mode int) lossyTU8Plan {
 	return chosen
 }
 
-// lumaMode picks the intra mode of a 16x16 block: all 35 are coded for their
-// distortion, and the four closest are costed again with their bits.
+// lumaMode picks the intra mode of a 16x16 block. Every mode is tried on the
+// prediction alone, which is cheap, and only the closest few are coded for what
+// they really cost.
 func (e *intraEncoder) lumaMode(x, y int, cand [3]int) int {
 	b := lossyBlock{x: x, y: y, n: 16}
 	e.prepareRef(b)
 
-	bestModes := [4]int{intraPlanar, intraPlanar, intraPlanar, intraPlanar}
-	bestDist := [4]int64{1<<63 - 1, 1<<63 - 1, 1<<63 - 1, 1<<63 - 1}
+	var (
+		short [modeShortlist]int
+		score [modeShortlist]int64
+	)
+
+	for i := range short {
+		short[i], score[i] = intraPlanar, 1<<62
+	}
+
+	pred := e.scratch.pred[:16*16]
 
 	for mode := intraPlanar; mode <= 34; mode++ {
-		b.mode = mode
-		_, trial := e.blockData(b, false)
-		dist := e.distortion(0, x, y, 16, trial, 16)
+		e.scratch.ref.copyFrom(&e.scratch.base)
+		filterRef(&e.scratch.ref, mode, 0, 8, &e.s)
+		intraPredict(pred, 0, 16, &e.scratch.ref, mode, 0, 8)
 
-		for i := range bestModes {
-			if dist >= bestDist[i] {
+		s := e.satd(x, y, pred, 16)
+
+		for i := range short {
+			if s >= score[i] {
 				continue
 			}
 
-			copy(bestModes[i+1:], bestModes[i:len(bestModes)-1])
-			copy(bestDist[i+1:], bestDist[i:len(bestDist)-1])
-			bestModes[i], bestDist[i] = mode, dist
+			copy(short[i+1:], short[i:len(short)-1])
+			copy(score[i+1:], score[i:len(score)-1])
+			short[i], score[i] = mode, s
 
 			break
 		}
 	}
 
-	bestMode, bestCost := bestModes[0], int64(-1)
+	bestMode, bestCost := short[0], int64(-1)
 
-	for i, mode := range bestModes {
+	for _, mode := range short {
 		b.mode = mode
-		coef, _ := e.blockData(b, false)
+		coef, trial := e.blockData(b, false)
 
-		cost := e.rdCost(bestDist[i], e.modeRate(cand, mode, coef))
+		cost := e.rdCost(e.distortion(0, x, y, 16, trial, 16), e.modeRate(cand, mode, coef))
 		if bestCost < 0 || cost < bestCost {
 			bestMode, bestCost = mode, cost
 		}
 	}
 
 	return bestMode
+}
+
+// satd is the Hadamard transformed absolute difference between the source and a
+// prediction, over 8x8 at a time. It stands in for what the residual will cost
+// far better than the plain difference does, and for a fraction of coding it.
+func (e *intraEncoder) satd(x, y int, pred []uint8, n int) int64 {
+	src := e.src[0]
+	stride := e.width
+
+	var sum int64
+
+	for by := 0; by < n; by += 8 {
+		for bx := 0; bx < n; bx += 8 {
+			var d [64]int32
+
+			for j := range 8 {
+				row := src[(y+by+j)*stride+x+bx:]
+				p := pred[(by+j)*n+bx:]
+
+				for i := range 8 {
+					d[j*8+i] = int32(row[i]) - int32(p[i])
+				}
+			}
+
+			for j := range 8 {
+				hadamard8(d[j*8 : j*8+8])
+			}
+
+			var col [8]int32
+
+			for i := range 8 {
+				for j := range 8 {
+					col[j] = d[j*8+i]
+				}
+
+				hadamard8(col[:])
+
+				for j := range 8 {
+					sum += int64(absLevel(col[j]))
+				}
+			}
+		}
+	}
+
+	return sum
+}
+
+func hadamard8(v []int32) {
+	var t [8]int32
+
+	for i := range 4 {
+		t[i] = v[i] + v[i+4]
+		t[i+4] = v[i] - v[i+4]
+	}
+
+	var u [8]int32
+
+	for _, o := range [2]int{0, 4} {
+		u[o] = t[o] + t[o+2]
+		u[o+1] = t[o+1] + t[o+3]
+		u[o+2] = t[o] - t[o+2]
+		u[o+3] = t[o+1] - t[o+3]
+	}
+
+	for _, o := range [4]int{0, 2, 4, 6} {
+		v[o] = u[o] + u[o+1]
+		v[o+1] = u[o] - u[o+1]
+	}
 }
 
 // modeRate is what one mode costs, at rateShift.
@@ -728,6 +807,10 @@ func (e *intraEncoder) tu8Rate(plan *lossyTU8Plan, mode int) int64 {
 
 	return w.rate
 }
+
+// modeShortlist is how many of the 35 intra modes are coded in full. Six and
+// eight measure the same; four is worse on a large picture.
+const modeShortlist = 6
 
 // lambdaShift is the fraction lossyLambda carries.
 const lambdaShift = 8

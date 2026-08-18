@@ -574,6 +574,51 @@ func TestRDOQLevels(t *testing.T) {
 	}
 }
 
+// TestHadamard8 holds the transform to its defining property: applied twice it
+// is eight times what it started as.
+func TestHadamard8(t *testing.T) {
+	r := rand.New(rand.NewPCG(31, 32))
+
+	for range 64 {
+		var v, want [8]int32
+
+		for i := range v {
+			v[i] = int32(r.IntN(2001) - 1000)
+			want[i] = 8 * v[i]
+		}
+
+		hadamard8(v[:])
+		hadamard8(v[:])
+
+		if v != want {
+			t.Fatalf("twice over gives %v, want %v", v, want)
+		}
+	}
+}
+
+// TestSATD holds the sum to what the transform of a flat difference is: the
+// whole of it lands in the DC of each 8x8, which is 64 times the difference.
+func TestSATD(t *testing.T) {
+	const n = 16
+
+	var e intraEncoder
+
+	e.reset(make([]uint8, n*n), make([]uint8, n*n/4), make([]uint8, n*n/4), n, n, 26)
+
+	pred := make([]uint8, n*n)
+
+	for _, c := range []int{0, 1, 7, 100} {
+		for i := range pred {
+			pred[i] = uint8(c)
+		}
+
+		want := int64(n / 8 * (n / 8) * 64 * c)
+		if got := e.satd(0, 0, pred, n); got != want {
+			t.Fatalf("flat difference of %d: %d, want %d", c, got, want)
+		}
+	}
+}
+
 func TestLog2(t *testing.T) {
 	for k := range 16 {
 		if got := log2(1 << k); got != k {
