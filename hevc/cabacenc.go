@@ -1,11 +1,14 @@
 package hevc
 
+// cabacWriter is the arithmetic encoder of 9.3.4. One with no bits to write to
+// counts what it would have written in rate instead.
 type cabacWriter struct {
 	low         uint32
 	rng         uint32
 	outstanding int
 	firstBit    bool
 	bits        *putBits
+	rate        int64
 	state       [nContexts]uint8
 }
 
@@ -17,6 +20,15 @@ func (w *cabacWriter) init(bits *putBits, qp int32, t sliceType, cabacInit bool)
 	for i := range w.state {
 		w.state[i] = initState(row[i], qp)
 	}
+}
+
+// counter is a copy of w that writes nothing.
+func (w *cabacWriter) counter() cabacWriter {
+	c := *w
+	c.bits = nil
+	c.rate = 0
+
+	return c
 }
 
 func (w *cabacWriter) reinit() {
@@ -59,24 +71,39 @@ func (w *cabacWriter) renorm() {
 
 func (w *cabacWriter) encodeBin(ctx int, bin uint32) {
 	s := w.state[ctx]
-	lps := uint32(lpsRange[w.rng>>6&3][s])
-	w.rng -= lps
-
-	if bin != uint32(s&1) {
-		w.low += w.rng
-		w.rng = lps
-	}
+	mps := bin == uint32(s&1)
 
 	signed := int32(s)
-	if bin != uint32(s&1) {
+	if !mps {
 		signed = -signed - 1
 	}
 
 	w.state[ctx] = transState[128+signed]
+
+	if w.bits == nil {
+		w.rate += int64(entropyBits[s^uint8(bin&1)])
+
+		return
+	}
+
+	lps := uint32(lpsRange[w.rng>>6&3][s])
+	w.rng -= lps
+
+	if !mps {
+		w.low += w.rng
+		w.rng = lps
+	}
+
 	w.renorm()
 }
 
 func (w *cabacWriter) encodeBypass(bin uint32) {
+	if w.bits == nil {
+		w.rate += 1 << rateShift
+
+		return
+	}
+
 	w.low <<= 1
 	if bin != 0 {
 		w.low += w.rng
@@ -94,7 +121,27 @@ func (w *cabacWriter) encodeBypass(bin uint32) {
 	}
 }
 
+func (w *cabacWriter) encodeBypassBits(v uint32, n int) {
+	if w.bits == nil {
+		w.rate += int64(n) << rateShift
+
+		return
+	}
+
+	for i := n - 1; i >= 0; i-- {
+		w.encodeBypass(v >> uint(i) & 1)
+	}
+}
+
+// encodeTerminate codes a bin against the fixed range of two, which is the
+// probability state 63 holds.
 func (w *cabacWriter) encodeTerminate(bin uint32) {
+	if w.bits == nil {
+		w.rate += int64(entropyBits[126+(bin&1)])
+
+		return
+	}
+
 	w.rng -= 2
 	if bin == 0 {
 		w.renorm()

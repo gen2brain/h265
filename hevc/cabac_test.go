@@ -1,7 +1,9 @@
 package hevc
 
 import (
+	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
@@ -117,6 +119,82 @@ func TestInitType(t *testing.T) {
 	for _, tt := range tests {
 		if got := initType(tt.t, tt.flag); got != tt.want {
 			t.Fatalf("initType(%d, %v) = %d, want %d", tt.t, tt.flag, got, tt.want)
+		}
+	}
+}
+
+// TestEntropyBits holds the derived costs to the probabilities they stand for:
+// the two ways out of a state have to add back up to one.
+func TestEntropyBits(t *testing.T) {
+	for st := range 64 {
+		mps := float64(entropyBits[2*st]) / (1 << rateShift)
+		lps := float64(entropyBits[2*st+1]) / (1 << rateShift)
+
+		if mps >= lps {
+			t.Fatalf("state %d: mps %f bits, lps %f", st, mps, lps)
+		}
+
+		if p := math.Exp2(-mps) + math.Exp2(-lps); math.Abs(p-1) > 0.01 {
+			t.Fatalf("state %d: probabilities sum to %f", st, p)
+		}
+
+		if st > 0 && entropyBits[2*st] > entropyBits[2*st-2] {
+			t.Fatalf("state %d costs more for its mps than state %d", st, st-1)
+		}
+	}
+}
+
+// TestRateMatchesCoder holds the counted rate to what the coder writes, which
+// is the whole of what the mode decisions need from it.
+func TestRateMatchesCoder(t *testing.T) {
+	r := rand.New(rand.NewPCG(9, 10))
+
+	for trial := range 8 {
+		var (
+			bits putBits
+			w    cabacWriter
+		)
+
+		w.init(&bits, 26, sliceI, false)
+
+		count := w.counter()
+
+		// Skewed bins so the contexts move away from even odds and the
+		// estimate has something to track.
+		for range 20000 {
+			switch r.IntN(4) {
+			case 0:
+				bin := uint32(r.IntN(64) / 63)
+				w.encodeBypass(bin)
+				count.encodeBypass(bin)
+			case 1:
+				v, n := uint32(r.IntN(256)), 1+r.IntN(8)
+				w.encodeBypassBits(v, n)
+				count.encodeBypassBits(v, n)
+			default:
+				ctx := r.IntN(nContexts)
+				bin := uint32(r.IntN(8) / 7)
+				if trial&1 != 0 {
+					bin = 1 - bin
+				}
+
+				w.encodeBin(ctx, bin)
+				count.encodeBin(ctx, bin)
+			}
+		}
+
+		w.encodeTerminate(1)
+		count.encodeTerminate(1)
+
+		if !slices.Equal(w.state[:], count.state[:]) {
+			t.Fatalf("trial %d: contexts diverged", trial)
+		}
+
+		want := float64(len(w.bytes()) * 8)
+		got := float64(count.rate) / (1 << rateShift)
+
+		if math.Abs(got-want)/want > 0.005 {
+			t.Fatalf("trial %d: rate %f bits, coder wrote %f", trial, got, want)
 		}
 	}
 }

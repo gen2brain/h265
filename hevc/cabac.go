@@ -1,6 +1,9 @@
 package hevc
 
-import "math/bits"
+import (
+	"math"
+	"math/bits"
+)
 
 const nContexts = 179
 
@@ -9,9 +12,17 @@ const (
 	cabacMask = 1<<cabacBits - 1
 )
 
+// rateShift is the fraction of a bit the rate estimates count in.
+const rateShift = 15
+
 var (
 	lpsRange   [4][128]uint8
 	transState [256]uint8
+
+	// entropyBits is what one bin costs, indexed by the state with its low bit
+	// set when the bin is not the most probable symbol. Derived from
+	// rangeTabLPS, mid-range in each of its four buckets.
+	entropyBits [128]uint32
 )
 
 func init() {
@@ -20,6 +31,20 @@ func init() {
 			lpsRange[g][2*st] = rangeTabLPS[st][g]
 			lpsRange[g][2*st+1] = rangeTabLPS[st][g]
 		}
+	}
+
+	for st := range 64 {
+		var mps, lps float64
+
+		for g := range 4 {
+			r := float64(256+64*g) + 31.5
+			l := float64(rangeTabLPS[st][g])
+			mps -= math.Log2((r - l) / r)
+			lps -= math.Log2(l / r)
+		}
+
+		entropyBits[2*st] = uint32(math.Round(mps / 4 * (1 << rateShift)))
+		entropyBits[2*st+1] = uint32(math.Round(lps / 4 * (1 << rateShift)))
 	}
 
 	for st := range 64 {

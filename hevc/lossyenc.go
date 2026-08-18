@@ -84,7 +84,6 @@ type lossyBlockScratch struct {
 	residual  [16 * 16]int32
 	coef      [16 * 16]int32
 	reconCoef [16 * 16]int32
-	rate      [512]byte
 	base, ref refSamples
 	transform transformScratch
 }
@@ -442,8 +441,8 @@ func (e *intraEncoder) tu8(x, y, mode int) lossyTU8Plan {
 	unsplitDist := e.distortion(0, x, y, 8, e.recon[0][y*w+x:], w)
 
 	chosen := split
-	if unsplitDist+e.lambda*e.tu8Rate(&unsplit, mode) <=
-		splitDist+e.lambda*e.tu8Rate(&split, mode) {
+	if e.rdCost(unsplitDist, e.tu8Rate(&unsplit, mode)) <=
+		e.rdCost(splitDist, e.tu8Rate(&split, mode)) {
 		chosen = unsplit
 	}
 
@@ -520,7 +519,7 @@ func (e *intraEncoder) lumaMode(x, y int, cand [3]int) int {
 		b.mode = mode
 		coef, _ := e.blockData(b, false)
 
-		cost := bestDist[i] + e.lambda*e.modeRate(cand, mode, coef)
+		cost := e.rdCost(bestDist[i], e.modeRate(cand, mode, coef))
 		if bestCost < 0 || cost < bestCost {
 			bestMode, bestCost = mode, cost
 		}
@@ -529,12 +528,9 @@ func (e *intraEncoder) lumaMode(x, y int, cand [3]int) int {
 	return bestMode
 }
 
-// modeRate is what one mode costs in bits, coded into a copy of the arithmetic
-// coder so the real one is untouched.
+// modeRate is what one mode costs, at rateShift.
 func (e *intraEncoder) modeRate(cand [3]int, mode int, coef []int32) int64 {
-	bits := putBits{data: e.scratch.rate[:0]}
-	w := e.cabac
-	w.bits = &bits
+	w := e.cabac.counter()
 
 	lossyIntraLumaMode(&w, mode, cand)
 
@@ -546,15 +542,11 @@ func (e *intraEncoder) modeRate(cand [3]int, mode int, coef []int32) int64 {
 			residualBlock{log2Size: 4, predModeIntra: mode, intra: true})
 	}
 
-	w.encodeTerminate(1)
-
-	return int64(bits.count())
+	return w.rate
 }
 
 func (e *intraEncoder) tu8Rate(plan *lossyTU8Plan, mode int) int64 {
-	bits := putBits{data: e.scratch.rate[:0]}
-	w := e.cabac
-	w.bits = &bits
+	w := e.cabac.counter()
 
 	w.encodeBin(ctxSplitTransformFlag+2, boolToBit(plan.split))
 
@@ -566,9 +558,12 @@ func (e *intraEncoder) tu8Rate(plan *lossyTU8Plan, mode int) int64 {
 		e.rateResidual(&w, plan.y8[:], 3, mode)
 	}
 
-	w.encodeTerminate(1)
+	return w.rate
+}
 
-	return int64(bits.count())
+// rdCost weighs squared error against bits, both at rateShift.
+func (e *intraEncoder) rdCost(dist, rate int64) int64 {
+	return dist<<rateShift + e.lambda*rate
 }
 
 func (e *intraEncoder) rateResidual(w *cabacWriter, coef []int32, log2Size, mode int) {

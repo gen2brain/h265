@@ -151,12 +151,6 @@ func lastSigCoeffPrefix(v int) int {
 	return 2*n + 2 + (v>>uint(n))&1
 }
 
-func (w *cabacWriter) encodeBypassBits(v uint32, n int) {
-	for i := n - 1; i >= 0; i-- {
-		w.encodeBypass(v >> uint(i) & 1)
-	}
-}
-
 func (w *cabacWriter) encodeCoeffAbsLevelRemaining(v int32, rice, rng int) {
 	if v < 3<<rice {
 		for range int(v >> rice) {
