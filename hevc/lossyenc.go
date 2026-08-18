@@ -54,12 +54,12 @@ type intraEncoder struct {
 	src   [3][]uint8
 	recon [3][]uint8
 
-	// modes and depth are per 16x16 block, for 8.4.2 and 9.3.4.2.2. depth is
-	// also the availability map, being non-zero exactly where a block is coded.
-	modes  []int
-	depth  []uint8
-	coded8 []uint8
-	coded4 []uint8
+	// modes and depth are per 16x16 block, for 8.4.2 and 9.3.4.2.2. coded is
+	// which 4x4 of each plane has been reconstructed, luma then chroma, which
+	// is what the reference samples of 8.4.4.2.2 may be read from.
+	modes []int
+	depth []uint8
+	coded [2][]uint8
 
 	bits  putBits
 	cabac cabacWriter
@@ -81,8 +81,8 @@ type cuState struct {
 	cb, cr     [16 * 16]uint8
 	modes      [4]int
 	depth      [4]uint8
-	coded8     [16]uint8
-	coded4     [64]uint8
+	codedY     [64]uint8
+	codedC     [16]uint8
 }
 
 // lossyBlock names one transform block and how it is coded.
@@ -90,7 +90,6 @@ type lossyBlock struct {
 	cIdx    int
 	x, y, n int
 	mode    int
-	coded   []uint8
 	dst     bool
 }
 
@@ -145,8 +144,8 @@ func (e *intraEncoder) reset(y, cb, cr []uint8, width, height, qp int) {
 	e.recon[2] = regrow(e.recon[2], len(cr))
 	e.modes = regrow(e.modes, width/16*height/16)
 	e.depth = regrow(e.depth, len(e.modes))
-	e.coded8 = regrow(e.coded8, width/8*height/8)
-	e.coded4 = regrow(e.coded4, width/4*height/4)
+	e.coded[0] = regrow(e.coded[0], width/4*height/4)
+	e.coded[1] = regrow(e.coded[1], width/8*height/8)
 
 	e.bits = putBits{}
 	e.bits.bit(1)
@@ -298,8 +297,8 @@ func (e *intraEncoder) save(s *cuState, x0, y0, base int) {
 	saveRect(s.cr[:], e.recon[2], cs, x0/2, y0/2, 16, 16)
 	saveRect(s.modes[:], e.modes, bw, x0/16, y0/16, 2, 2)
 	saveRect(s.depth[:], e.depth, bw, x0/16, y0/16, 2, 2)
-	saveRect(s.coded8[:], e.coded8, e.width/8, x0/8, y0/8, 4, 4)
-	saveRect(s.coded4[:], e.coded4, e.width/4, x0/4, y0/4, 8, 8)
+	saveRect(s.codedY[:], e.coded[0], e.width/4, x0/4, y0/4, 8, 8)
+	saveRect(s.codedC[:], e.coded[1], e.width/8, x0/8, y0/8, 4, 4)
 }
 
 func (e *intraEncoder) load(s *cuState, x0, y0, base int) {
@@ -313,8 +312,8 @@ func (e *intraEncoder) load(s *cuState, x0, y0, base int) {
 	loadRect(e.recon[2], s.cr[:], cs, x0/2, y0/2, 16, 16)
 	loadRect(e.modes, s.modes[:], bw, x0/16, y0/16, 2, 2)
 	loadRect(e.depth, s.depth[:], bw, x0/16, y0/16, 2, 2)
-	loadRect(e.coded8, s.coded8[:], e.width/8, x0/8, y0/8, 4, 4)
-	loadRect(e.coded4, s.coded4[:], e.width/4, x0/4, y0/4, 8, 8)
+	loadRect(e.coded[0], s.codedY[:], e.width/4, x0/4, y0/4, 8, 8)
+	loadRect(e.coded[1], s.codedC[:], e.width/8, x0/8, y0/8, 4, 4)
 }
 
 // saveRect lifts a w by h rectangle out of a picture-wide map, loadRect puts
@@ -434,12 +433,9 @@ func (e *intraEncoder) cu32(x0, y0, d, mode int) error {
 
 	for i := range 4 {
 		x, y := x0+i&1*16, y0+i>>1*16
-		copy(qY[i][:], e.codeBlock(lossyBlock{x: x, y: y, n: 16, mode: mode, coded: e.depth}, true))
-		e.markCoded(x, y, 16)
-		copy(qCb[i][:], e.codeBlock(lossyBlock{cIdx: 1, x: x / 2, y: y / 2, n: 8, mode: mode,
-			coded: e.depth}, true))
-		copy(qCr[i][:], e.codeBlock(lossyBlock{cIdx: 2, x: x / 2, y: y / 2, n: 8, mode: mode,
-			coded: e.depth}, true))
+		copy(qY[i][:], e.codeBlock(lossyBlock{x: x, y: y, n: 16, mode: mode}, true))
+		copy(qCb[i][:], e.codeBlock(lossyBlock{cIdx: 1, x: x / 2, y: y / 2, n: 8, mode: mode}, true))
+		copy(qCr[i][:], e.codeBlock(lossyBlock{cIdx: 2, x: x / 2, y: y / 2, n: 8, mode: mode}, true))
 	}
 
 	cbfCb, cbfCr := false, false
@@ -516,49 +512,32 @@ func (e *intraEncoder) residual(coef []int32, log2Size, cIdx, mode int) error {
 // transform and four 4x4 ones on their coded cost.
 func (e *intraEncoder) tu8(x, y, mode int) lossyTU8Plan {
 	w := e.width
-	idx8 := y/8*(w/8) + x/8
 
-	var idx4 [4]int
-
-	for j := range 2 {
-		for k := range 2 {
-			idx4[j*2+k] = (y/4+j)*(w/4) + x/4 + k
-		}
-	}
-
-	var base [8 * 8]uint8
+	var (
+		base  [8 * 8]uint8
+		baseY [4]uint8
+	)
 
 	for j := range 8 {
 		copy(base[j*8:], e.recon[0][(y+j)*w+x:][:8])
 	}
 
-	base8 := e.coded8[idx8]
-
-	var base4 [4]uint8
-
-	for j, idx := range idx4 {
-		base4[j] = e.coded4[idx]
-	}
+	saveRect(baseY[:], e.coded[0], w/4, x/4, y/4, 2, 2)
 
 	restore := func() {
 		for j := range 8 {
 			copy(e.recon[0][(y+j)*w+x:][:8], base[j*8:])
 		}
 
-		e.coded8[idx8] = base8
-
-		for j, idx := range idx4 {
-			e.coded4[idx] = base4[j]
-		}
+		loadRect(e.coded[0], baseY[:], w/4, x/4, y/4, 2, 2)
 	}
 
 	quarters := [4]lossyBlock{}
 	for j := range 4 {
-		quarters[j] = lossyBlock{x: x + j&1*4, y: y + j>>1*4, n: 4, mode: mode,
-			coded: e.coded4, dst: true}
+		quarters[j] = lossyBlock{x: x + j&1*4, y: y + j>>1*4, n: 4, mode: mode, dst: true}
 	}
 
-	whole := lossyBlock{x: x, y: y, n: 8, mode: mode, coded: e.coded8}
+	whole := lossyBlock{x: x, y: y, n: 8, mode: mode}
 
 	split := lossyTU8Plan{split: true}
 
@@ -592,40 +571,18 @@ func (e *intraEncoder) tu8(x, y, mode int) lossyTU8Plan {
 		copy(chosen.y8[:], e.codeBlock(whole, true))
 	}
 
-	e.coded8[idx8] = 1
-
-	for _, idx := range idx4 {
-		e.coded4[idx] = 1
-	}
-
-	copy(chosen.cb[:], e.codeBlock(lossyBlock{cIdx: 1, x: x / 2, y: y / 2, n: 4, mode: mode,
-		coded: e.coded8}, true))
-	copy(chosen.cr[:], e.codeBlock(lossyBlock{cIdx: 2, x: x / 2, y: y / 2, n: 4, mode: mode,
-		coded: e.coded8}, true))
+	copy(chosen.cb[:], e.codeBlock(lossyBlock{cIdx: 1, x: x / 2, y: y / 2, n: 4, mode: mode}, true))
+	copy(chosen.cr[:], e.codeBlock(lossyBlock{cIdx: 2, x: x / 2, y: y / 2, n: 4, mode: mode}, true))
 	chosen.cbfCb = hasCoefficients(chosen.cb[:])
 	chosen.cbfCr = hasCoefficients(chosen.cr[:])
 
 	return chosen
 }
 
-func (e *intraEncoder) markCoded(x, y, size int) {
-	for j := range size / 8 {
-		for i := range size / 8 {
-			e.coded8[(y/8+j)*(e.width/8)+x/8+i] = 1
-		}
-	}
-
-	for j := range size / 4 {
-		for i := range size / 4 {
-			e.coded4[(y/4+j)*(e.width/4)+x/4+i] = 1
-		}
-	}
-}
-
 // lumaMode picks the intra mode of a 16x16 block: all 35 are coded for their
 // distortion, and the four closest are costed again with their bits.
 func (e *intraEncoder) lumaMode(x, y int, cand [3]int) int {
-	b := lossyBlock{x: x, y: y, n: 16, coded: e.depth}
+	b := lossyBlock{x: x, y: y, n: 16}
 	e.prepareRef(b)
 
 	bestModes := [4]int{intraPlanar, intraPlanar, intraPlanar, intraPlanar}
@@ -743,9 +700,22 @@ func (e *intraEncoder) codeBlock(b lossyBlock, rdoq bool) []int32 {
 		copy(e.recon[b.cIdx][(b.y+j)*stride+b.x:], block[j*b.n:(j+1)*b.n])
 	}
 
-	b.coded[b.y/b.n*(stride/b.n)+b.x/b.n] = 1
+	e.markCoded(b.cIdx, b.x, b.y, b.n)
 
 	return coef
+}
+
+// markCoded records that a block of the plane has been reconstructed, at the
+// 4x4 granularity the reference samples are looked up in.
+func (e *intraEncoder) markCoded(cIdx, x, y, n int) {
+	coded := e.coded[min(cIdx, 1)]
+	blocksWide := e.stride(cIdx) / 4
+
+	for j := range n / 4 {
+		for i := range n / 4 {
+			coded[(y/4+j)*blocksWide+x/4+i] = 1
+		}
+	}
 }
 
 // blockData predicts, transforms, quantises and reconstructs one block against
@@ -802,7 +772,8 @@ func (e *intraEncoder) prepareRef(b lossyBlock) {
 	clear(avail)
 
 	e.scratch.base.n = n
-	blocksWide := stride / n
+	coded := e.coded[min(b.cIdx, 1)]
+	blocksWide := stride / 4
 	rows := len(recon) / stride
 
 	for i := range 4*n + 1 {
@@ -818,7 +789,7 @@ func (e *intraEncoder) prepareRef(b lossyBlock) {
 		}
 
 		if nx < 0 || ny < 0 || nx >= stride || ny >= rows ||
-			b.coded[ny/n*blocksWide+nx/n] == 0 {
+			coded[ny/4*blocksWide+nx/4] == 0 {
 			continue
 		}
 

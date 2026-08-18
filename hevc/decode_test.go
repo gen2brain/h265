@@ -209,7 +209,7 @@ func TestEncodeLossyIntraModes(t *testing.T) {
 			var e intraEncoder
 			e.reset(y, cb, cr, width, height, 26)
 			first := e.lumaMode(0, 0, lossyMPM(e.modes, width/16, 0, 0, 4))
-			e.codeBlock(lossyBlock{x: 0, y: 0, n: 16, mode: first, coded: e.depth}, true)
+			e.codeBlock(lossyBlock{x: 0, y: 0, n: 16, mode: first}, true)
 			e.modes[0], e.depth[0] = first, 2
 			mode := e.lumaMode(16, 0, lossyMPM(e.modes, width/16, 1, 0, 4))
 			if mode == intraDC {
