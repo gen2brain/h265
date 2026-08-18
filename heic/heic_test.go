@@ -8,6 +8,7 @@ import (
 	"image"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -71,6 +72,78 @@ func TestEncode(t *testing.T) {
 	if !bytes.Equal(got.Y, src.Y) || !bytes.Equal(got.Cb, src.Cb) || !bytes.Equal(got.Cr, src.Cr) {
 		t.Fatal("encoded planes differ")
 	}
+}
+
+// TestEncodeExternal holds the written container to libheif rather than to our
+// own reader, which is lenient about things a file should not do: a zero extent
+// length reads as the rest of the file here and as nothing there, and a file
+// with no colour description at all is anyone's guess.
+func TestEncodeExternal(t *testing.T) {
+	if _, err := exec.LookPath("heif-dec"); err != nil {
+		t.Skip("heif-dec not installed")
+	}
+
+	for _, size := range [][2]int{{32, 32}, {176, 144}} {
+		width, height := size[0], size[1]
+
+		src := image.NewYCbCr(image.Rect(0, 0, width, height), image.YCbCrSubsampleRatio420)
+		for i := range src.Y {
+			src.Y[i] = byte(i*17 + i/13)
+		}
+
+		for i := range src.Cb {
+			src.Cb[i] = byte(i*29 + 7)
+			src.Cr[i] = byte(i*43 + 11)
+		}
+
+		data, err := encodeToBytes(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		dir := t.TempDir()
+
+		in := filepath.Join(dir, "encoded.heic")
+		if err := os.WriteFile(in, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		out := filepath.Join(dir, "decoded.y4m")
+
+		cmd := exec.Command("heif-dec", "--quiet", in, out)
+		if b, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%dx%d: heif-dec: %v: %s", width, height, err, b)
+		}
+
+		planes, err := y4mPlanes(out)
+		if err != nil {
+			t.Fatalf("%dx%d: %v", width, height, err)
+		}
+
+		want := append(append(append([]byte{}, src.Y...), src.Cb...), src.Cr...)
+		if !bytes.Equal(planes, want) {
+			t.Fatalf("%dx%d: libheif decoded %d bytes, want %d equal", width, height, len(planes), len(want))
+		}
+	}
+}
+
+// y4mPlanes returns the sample data of the one frame in a YUV4MPEG2 file.
+func y4mPlanes(path string) ([]byte, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	for range 2 {
+		i := bytes.IndexByte(b, '\n')
+		if i < 0 {
+			return nil, errors.New("truncated y4m")
+		}
+
+		b = b[i+1:]
+	}
+
+	return b, nil
 }
 
 func BenchmarkEncode(b *testing.B) {

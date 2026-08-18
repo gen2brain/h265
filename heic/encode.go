@@ -9,6 +9,14 @@ import (
 	"github.com/gen2brain/h265/hevc"
 )
 
+// The written planes are what image.YCbCr holds, which is full range BT.601
+// carrying sRGB primaries and transfer.
+const (
+	encPrimaries = 1
+	encTransfer  = 13
+	encMatrix    = 6
+)
+
 type EncodeOptions struct{}
 
 func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
@@ -46,15 +54,15 @@ func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
 
 func makeHEIC(width, height int, params []hevc.NALUnit, data []byte) []byte {
 	ftyp := box("ftyp", []byte("heic\x00\x00\x00\x00mif1heic"))
-	meta := heicMeta(width, height, params, 0)
+	meta := heicMeta(width, height, params, 0, uint64(len(data)))
 	off := uint64(len(ftyp) + len(meta) + 8)
-	meta = heicMeta(width, height, params, off)
+	meta = heicMeta(width, height, params, off, uint64(len(data)))
 
 	return append(append(ftyp, meta...), box("mdat", data)...)
 }
 
-func heicMeta(width, height int, params []hevc.NALUnit, offset uint64) []byte {
-	hdlr := fullBox("hdlr", 0, 0, append([]byte("\x00\x00\x00\x00pict"), make([]byte, 12)...))
+func heicMeta(width, height int, params []hevc.NALUnit, offset, length uint64) []byte {
+	hdlr := fullBox("hdlr", 0, 0, append([]byte("\x00\x00\x00\x00pict"), make([]byte, 13)...))
 	pitm := fullBox("pitm", 0, 0, u16(1))
 	infe := fullBox("infe", 2, 0, append(append(append(u16(1), 0, 0), []byte("hvc1")...), []byte("image\x00")...))
 	iinf := fullBox("iinf", 0, 0, append(u16(1), infe...))
@@ -64,14 +72,16 @@ func heicMeta(width, height int, params []hevc.NALUnit, offset uint64) []byte {
 	ilocData = append(ilocData, u16(0)...)
 	ilocData = append(ilocData, u16(1)...)
 	ilocData = append(ilocData, u32(uint32(offset))...)
-	ilocData = append(ilocData, u32(0)...)
+	ilocData = append(ilocData, u32(uint32(length))...)
 	iloc := fullBox("iloc", 0, 0, ilocData)
 
 	ispe := fullBox("ispe", 0, 0, append(u32(uint32(width)), u32(uint32(height))...))
 	pixi := fullBox("pixi", 0, 0, []byte{3, 8, 8, 8})
 	hvcc := box("hvcC", marshalHvcC(params))
-	ipco := box("ipco", append(append(ispe, pixi...), hvcc...))
-	ipma := fullBox("ipma", 0, 0, append(append(append(u32(1), u16(1)...), 3), 0x81, 0x82, 0x83))
+	colr := box("colr", append(append(append([]byte("nclx"), u16(encPrimaries)...),
+		u16(encTransfer)...), append(u16(encMatrix), 0x80)...))
+	ipco := box("ipco", append(append(append(ispe, pixi...), hvcc...), colr...))
+	ipma := fullBox("ipma", 0, 0, append(append(append(u32(1), u16(1)...), 4), 0x81, 0x82, 0x83, 0x04))
 	iprp := box("iprp", append(ipco, ipma...))
 
 	meta := append(hdlr, pitm...)
@@ -100,7 +110,7 @@ func marshalHvcC(params []hevc.NALUnit) []byte {
 
 func box(typ string, data []byte) []byte {
 	out := make([]byte, 8, 8+len(data))
-	binary.BigEndian.PutUint32(out, uint32(cap(out)))
+	binary.BigEndian.PutUint32(out, uint32(8+len(data)))
 	copy(out[4:], typ)
 
 	return append(out, data...)
