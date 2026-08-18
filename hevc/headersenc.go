@@ -95,7 +95,8 @@ func (h encoderHeaders) sps() []byte {
 	}
 	w.ue(uint32(ctbLog2 - 4))
 	w.ue(0)
-	w.ue(2)
+	// 7.4.3.2 caps the transform at the coding tree block, and at 32.
+	w.ue(uint32(min(ctbLog2, 5) - 2))
 	w.ue(0)
 	w.ue(h.maxTrHierIntra)
 	w.bit(0)

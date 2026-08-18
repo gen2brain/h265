@@ -334,29 +334,46 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 }
 
 // TestEncodeCUSize covers the choice between one 32x32 coding unit and four
-// 16x16 ones. Flat content has nothing to gain from splitting and sharp detail
-// has, so the two must come out differently.
+// 16x16 ones. Flat content has nothing to gain from splitting; quadrants that
+// each run a different way cannot share one prediction mode, so they must.
 func TestEncodeCUSize(t *testing.T) {
 	const size = 64
 
+	flatY := make([]byte, size*size)
+	turnY := make([]byte, size*size)
+	cb := make([]byte, size*size/4)
+	cr := make([]byte, size*size/4)
+
+	for i := range cb {
+		cb[i], cr[i] = 128, 128
+	}
+
+	dirs := [4][2]int{{8, 0}, {0, 8}, {6, 6}, {6, -6}}
+
+	for j := range size {
+		for i := range size {
+			flatY[j*size+i] = 96
+			d := dirs[(j/16&1)*2+i/16&1]
+			turnY[j*size+i] = byte(68 + d[0]*(i%16) + d[1]*(j%16))
+		}
+	}
+
 	for _, c := range []struct {
 		name  string
-		kind  int
+		y     []byte
 		depth uint8
 	}{
-		{"flat", 4, 1},
-		{"checkerboard", 2, 2},
+		{"flat", flatY, 1},
+		{"turning", turnY, 2},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			r := rand.New(rand.NewPCG(5, 6))
-			y, cb, cr := lossyPattern(r, size, size, c.kind)
-
-			nals, err := encodeIntraLossyQP(y, cb, cr, size, size, 26)
+			nals, err := encodeIntraLossyQP(c.y, cb, cr, size, size, 26)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			var d Decoder
+
 			for _, nal := range nals {
 				if _, err := d.DecodeNAL(nal); err != nil {
 					t.Fatalf("DecodeNAL %d: %v", nal.Type, err)
@@ -369,6 +386,11 @@ func TestEncodeCUSize(t *testing.T) {
 
 			if got := d.ctuPrev.cuDepth[d.ctuPrev.tbIndex(0, 0)]; got != c.depth {
 				t.Fatalf("CU depth = %d, want %d", got, c.depth)
+			}
+
+			// A whole 32x32 unit leaves no transform boundary inside itself.
+			if inside := d.ctuPrev.blk[d.ctuPrev.blkIndex(16, 0)].tuV; inside == (c.depth == 1) {
+				t.Fatalf("transform boundary at 16 = %v", inside)
 			}
 		})
 	}

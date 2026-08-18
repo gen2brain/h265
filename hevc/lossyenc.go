@@ -69,6 +69,20 @@ type intraEncoder struct {
 	scratch lossyBlockScratch
 	before  cuState
 	kept    cuState
+	tuBase  cuState
+	tuKept  cuState
+	tu      cuTransform
+}
+
+// cuTransform holds both ways of coding a 32x32 coding unit's transform tree:
+// one unit of its own size, or four 16x16 ones.
+type cuTransform struct {
+	split        bool
+	y32          [32 * 32]int32
+	cb32, cr32   [16 * 16]int32
+	y            [4][16 * 16]int32
+	cb, cr       [4][8 * 8]int32
+	cbfCb, cbfCr bool
 }
 
 // cuState is everything coding one 32x32 block changes, so that an arm of the
@@ -94,13 +108,13 @@ type lossyBlock struct {
 }
 
 // lossyBlockScratch is the working memory one block needs. No two blocks are
-// ever in flight at once, and the largest is 16x16.
+// ever in flight at once, and the largest is 32x32.
 type lossyBlockScratch struct {
-	pred      [16 * 16]uint8
-	avail     [4*16 + 1]bool
-	residual  [16 * 16]int32
-	coef      [16 * 16]int32
-	reconCoef [16 * 16]int32
+	pred      [32 * 32]uint8
+	avail     [4*32 + 1]bool
+	residual  [32 * 32]int32
+	coef      [32 * 32]int32
+	reconCoef [32 * 32]int32
 	base, ref refSamples
 	transform transformScratch
 }
@@ -388,22 +402,22 @@ func (e *intraEncoder) leaf(x0, y0, d, mode int) error {
 
 		if tus[i].split {
 			for j := range 4 {
-				if err := e.codedResidual(tus[i].y[j][:], 2, 0, mode); err != nil {
+				if err := e.codedResidual(&e.cabac, tus[i].y[j][:], 2, 0, mode, 2); err != nil {
 					return err
 				}
 			}
-		} else if err := e.codedResidual(tus[i].y8[:], 3, 0, mode); err != nil {
+		} else if err := e.codedResidual(&e.cabac, tus[i].y8[:], 3, 0, mode, 1); err != nil {
 			return err
 		}
 
 		if tus[i].cbfCb {
-			if err := e.residual(tus[i].cb[:], 2, 1, mode); err != nil {
+			if err := e.residual(&e.cabac, tus[i].cb[:], 2, 1, mode); err != nil {
 				return err
 			}
 		}
 
 		if tus[i].cbfCr {
-			if err := e.residual(tus[i].cr[:], 2, 2, mode); err != nil {
+			if err := e.residual(&e.cabac, tus[i].cr[:], 2, 2, mode); err != nil {
 				return err
 			}
 		}
@@ -416,8 +430,8 @@ func (e *intraEncoder) leaf(x0, y0, d, mode int) error {
 	return nil
 }
 
-// cu32 codes a 32x32 coding unit as four 16x16 transform units, the largest
-// transform the sequence allows. A negative mode is searched for.
+// cu32 codes a 32x32 coding unit, choosing between one transform unit of its
+// own size and four 16x16 ones. A negative mode is searched for.
 func (e *intraEncoder) cu32(x0, y0, d, mode int) error {
 	blocksWide := e.width / 16
 	cand := lossyMPM(e.modes, blocksWide, x0/16, y0/16, 4)
@@ -426,58 +440,40 @@ func (e *intraEncoder) cu32(x0, y0, d, mode int) error {
 		mode = e.lumaMode(x0, y0, cand)
 	}
 
-	var (
-		qY       [4][16 * 16]int32
-		qCb, qCr [4][8 * 8]int32
-	)
+	t := &e.tu
+	base := len(e.bits.data)
+
+	e.save(&e.tuBase, x0, y0, base)
+
+	copy(t.y32[:], e.codeBlock(lossyBlock{x: x0, y: y0, n: 32, mode: mode}, true))
+	copy(t.cb32[:], e.codeBlock(lossyBlock{cIdx: 1, x: x0 / 2, y: y0 / 2, n: 16, mode: mode}, true))
+	copy(t.cr32[:], e.codeBlock(lossyBlock{cIdx: 2, x: x0 / 2, y: y0 / 2, n: 16, mode: mode}, true))
+
+	t.split = false
+	whole := e.rdCost(e.cuDistortion(x0, y0, 32), e.tu32Rate(mode))
+
+	e.save(&e.tuKept, x0, y0, base)
+	e.load(&e.tuBase, x0, y0, base)
 
 	for i := range 4 {
 		x, y := x0+i&1*16, y0+i>>1*16
-		copy(qY[i][:], e.codeBlock(lossyBlock{x: x, y: y, n: 16, mode: mode}, true))
-		copy(qCb[i][:], e.codeBlock(lossyBlock{cIdx: 1, x: x / 2, y: y / 2, n: 8, mode: mode}, true))
-		copy(qCr[i][:], e.codeBlock(lossyBlock{cIdx: 2, x: x / 2, y: y / 2, n: 8, mode: mode}, true))
+		copy(t.y[i][:], e.codeBlock(lossyBlock{x: x, y: y, n: 16, mode: mode}, true))
+		copy(t.cb[i][:], e.codeBlock(lossyBlock{cIdx: 1, x: x / 2, y: y / 2, n: 8, mode: mode}, true))
+		copy(t.cr[i][:], e.codeBlock(lossyBlock{cIdx: 2, x: x / 2, y: y / 2, n: 8, mode: mode}, true))
 	}
 
-	cbfCb, cbfCr := false, false
+	t.split = true
+	if whole <= e.rdCost(e.cuDistortion(x0, y0, 32), e.tu32Rate(mode)) {
+		t.split = false
 
-	for i := range 4 {
-		cbfCb = cbfCb || hasCoefficients(qCb[i][:])
-		cbfCr = cbfCr || hasCoefficients(qCr[i][:])
+		e.load(&e.tuKept, x0, y0, base)
 	}
 
 	lossyIntraLumaMode(&e.cabac, mode, cand)
 	e.cabac.encodeBin(ctxIntraChromaPredMode, 0)
-	e.cabac.encodeBin(ctxCBFCBCR, boolToBit(cbfCb))
-	e.cabac.encodeBin(ctxCBFCBCR, boolToBit(cbfCr))
 
-	for i := range 4 {
-		cbfCbLeaf := hasCoefficients(qCb[i][:])
-		cbfCrLeaf := hasCoefficients(qCr[i][:])
-		e.cabac.encodeBin(ctxSplitTransformFlag+1, 0)
-
-		if cbfCb {
-			e.cabac.encodeBin(ctxCBFCBCR+1, boolToBit(cbfCbLeaf))
-		}
-
-		if cbfCr {
-			e.cabac.encodeBin(ctxCBFCBCR+1, boolToBit(cbfCrLeaf))
-		}
-
-		if err := e.codedResidual(qY[i][:], 4, 0, mode); err != nil {
-			return err
-		}
-
-		if cbfCbLeaf {
-			if err := e.residual(qCb[i][:], 3, 1, mode); err != nil {
-				return err
-			}
-		}
-
-		if cbfCrLeaf {
-			if err := e.residual(qCr[i][:], 3, 2, mode); err != nil {
-				return err
-			}
-		}
+	if err := e.tu32Tree(&e.cabac, mode); err != nil {
+		return err
 	}
 
 	for j := range 2 {
@@ -491,20 +487,98 @@ func (e *intraEncoder) cu32(x0, y0, d, mode int) error {
 	return nil
 }
 
-// codedResidual writes cbf_luma and the levels behind it.
-func (e *intraEncoder) codedResidual(coef []int32, log2Size, cIdx, mode int) error {
+// tu32Rate is what the chosen transform tree costs, coded into a writer that
+// only counts.
+func (e *intraEncoder) tu32Rate(mode int) int64 {
+	w := e.cabac.counter()
+	_ = e.tu32Tree(&w, mode)
+
+	return w.rate
+}
+
+// tu32Tree is the transform_tree of 7.3.8.8 for a 32x32 coding unit.
+func (e *intraEncoder) tu32Tree(w *cabacWriter, mode int) error {
+	t := &e.tu
+
+	t.cbfCb, t.cbfCr = hasCoefficients(t.cb32[:]), hasCoefficients(t.cr32[:])
+	if t.split {
+		t.cbfCb, t.cbfCr = false, false
+
+		for i := range 4 {
+			t.cbfCb = t.cbfCb || hasCoefficients(t.cb[i][:])
+			t.cbfCr = t.cbfCr || hasCoefficients(t.cr[i][:])
+		}
+	}
+
+	w.encodeBin(ctxSplitTransformFlag, boolToBit(t.split))
+	w.encodeBin(ctxCBFCBCR, boolToBit(t.cbfCb))
+	w.encodeBin(ctxCBFCBCR, boolToBit(t.cbfCr))
+
+	if !t.split {
+		if err := e.codedResidual(w, t.y32[:], 5, 0, mode, 0); err != nil {
+			return err
+		}
+
+		if t.cbfCb {
+			if err := e.residual(w, t.cb32[:], 4, 1, mode); err != nil {
+				return err
+			}
+		}
+
+		if t.cbfCr {
+			return e.residual(w, t.cr32[:], 4, 2, mode)
+		}
+
+		return nil
+	}
+
+	for i := range 4 {
+		cbfCb, cbfCr := hasCoefficients(t.cb[i][:]), hasCoefficients(t.cr[i][:])
+		w.encodeBin(ctxSplitTransformFlag+1, 0)
+
+		if t.cbfCb {
+			w.encodeBin(ctxCBFCBCR+1, boolToBit(cbfCb))
+		}
+
+		if t.cbfCr {
+			w.encodeBin(ctxCBFCBCR+1, boolToBit(cbfCr))
+		}
+
+		if err := e.codedResidual(w, t.y[i][:], 4, 0, mode, 1); err != nil {
+			return err
+		}
+
+		if cbfCb {
+			if err := e.residual(w, t.cb[i][:], 3, 1, mode); err != nil {
+				return err
+			}
+		}
+
+		if cbfCr {
+			if err := e.residual(w, t.cr[i][:], 3, 2, mode); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// codedResidual writes cbf_luma and the levels behind it. Table 9-49 gives the
+// flag its own context at the root of a transform tree.
+func (e *intraEncoder) codedResidual(w *cabacWriter, coef []int32, log2Size, cIdx, mode, trafoDepth int) error {
 	cbf := hasCoefficients(coef)
-	e.cabac.encodeBin(ctxCBFLuma, boolToBit(cbf))
+	w.encodeBin(ctxCBFLuma+boolToInt(trafoDepth == 0), boolToBit(cbf))
 
 	if !cbf {
 		return nil
 	}
 
-	return e.residual(coef, log2Size, cIdx, mode)
+	return e.residual(w, coef, log2Size, cIdx, mode)
 }
 
-func (e *intraEncoder) residual(coef []int32, log2Size, cIdx, mode int) error {
-	return encodeResidual(&e.cabac, &e.s, &e.p, coef,
+func (e *intraEncoder) residual(w *cabacWriter, coef []int32, log2Size, cIdx, mode int) error {
+	return encodeResidual(w, &e.s, &e.p, coef,
 		residualBlock{log2Size: log2Size, cIdx: cIdx, predModeIntra: mode, intra: true})
 }
 
@@ -918,6 +992,14 @@ func lossyIntraLumaMode(w *cabacWriter, mode int, cand [3]int) {
 	}
 
 	w.encodeBypassBits(uint32(rem), 5)
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+
+	return 0
 }
 
 func hasCoefficients(coef []int32) bool {
