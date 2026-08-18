@@ -114,6 +114,7 @@ type lossyBlockScratch struct {
 	avail     [4*32 + 1]bool
 	residual  [32 * 32]int32
 	coef      [32 * 32]int32
+	num       [32 * 32]int64
 	reconCoef [32 * 32]int32
 	base, ref refSamples
 	transform transformScratch
@@ -823,10 +824,10 @@ func (e *intraEncoder) blockData(b lossyBlock, rdoq bool) ([]int32, []uint8) {
 		forwardTransform(reconCoef, residual, n, 8)
 	}
 
-	quantize(coef, reconCoef, n, qp, 8)
-
 	if rdoq {
-		terminalRDOQ(reconCoef, coef, n, b.mode, b.cIdx, qp)
+		e.rdoq(coef, reconCoef, n, qp, b.cIdx, b.mode)
+	} else {
+		quantize(coef, reconCoef, n, qp, 8)
 	}
 
 	copy(reconCoef, coef)
@@ -883,48 +884,6 @@ const lambdaScale = 146
 // QP the way the quantiser's step does.
 func lossyLambda(qp int) int64 {
 	return max(1, int64(math.Round(float64(lambdaScale)*math.Exp2(float64(qp-12)/3))))
-}
-
-// terminalRDOQ drops a lone trailing coefficient whose error costs less than
-// its bits.
-func terminalRDOQ(raw, level []int32, n, mode, cIdx, qp int) {
-	scanIdx := scanIndex(log2(n), cIdx, mode, true, 1)
-	sbScan := scanOrder[log2(n)-2][scanIdx]
-	coeffScan := scanOrder[2][scanIdx]
-	lastSB, lastPos, prevSB := -1, -1, -1
-
-	for i, sb := range sbScan {
-		for k, pos := range coeffScan {
-			index := ((int(sb.y)<<2)+int(pos.y))*n + (int(sb.x) << 2) + int(pos.x)
-			if level[index] == 0 {
-				continue
-			}
-
-			prevSB = lastSB
-			lastSB, lastPos = i, k
-		}
-	}
-
-	if lastSB < 0 || prevSB < 0 || lastSB != prevSB {
-		return
-	}
-
-	last := coeffScan[lastPos]
-	if last.x == 0 && last.y == 0 {
-		return
-	}
-
-	lastSBPos := sbScan[lastSB]
-
-	index := ((int(lastSBPos.y)<<2)+int(last.y))*n + (int(lastSBPos.x) << 2) + int(last.x)
-	if absLevel(level[index]) != 1 {
-		return
-	}
-
-	v := int64(raw[index])
-	if distortion := (v*v + 511) >> 9; distortion<<lambdaShift <= lossyLambda(qp)*2 {
-		level[index] = 0
-	}
 }
 
 // lossyMPM is the candidate list of 8.4.2. A block on the top edge of its

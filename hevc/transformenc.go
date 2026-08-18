@@ -112,9 +112,8 @@ func forwardTransformDST4(dst, src []int32, bitDepth int) {
 
 // quantize is 8.6.3 run backwards.
 func quantize(dst, src []int32, n, qp, bitDepth int) {
-	qbits := 14 + qp/6 + 15 - bitDepth - log2(n)
-	scale := (int64(1)<<20 + int64(levelScale[qp%6])/2) / int64(levelScale[qp%6])
-	offset := int64(1<<uint(qbits)) / 3
+	scale, qbits := quantScale(n, qp, bitDepth)
+	offset := int64(1<<qbits) / 3
 
 	for i, v := range src[:n*n] {
 		abs := int64(v)
@@ -122,7 +121,7 @@ func quantize(dst, src []int32, n, qp, bitDepth int) {
 			abs = -abs
 		}
 
-		level := min((abs*scale+offset)>>uint(qbits), int64(0x7fff))
+		level := min((abs*scale+offset)>>qbits, int64(0x7fff))
 		if v < 0 {
 			level = -level
 		}

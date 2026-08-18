@@ -475,6 +475,105 @@ func TestDequant(t *testing.T) {
 	})
 }
 
+// TestLevelError holds the constant that turns a coefficient's rounding error
+// into picture error to what the dequantiser and the inverse transform actually
+// do with one level of the quantiser.
+func TestLevelError(t *testing.T) {
+	var sc transformScratch
+
+	shift := residualShiftBits(8, false)
+
+	for _, n := range []int{4, 8, 16, 32} {
+		for _, qp := range []int{12, 20, 26, 33, 40, 51} {
+			coef := make([]int32, n*n)
+			coef[0] = 1
+
+			dequant(coef, nil, n, qp, 8, false)
+			inverseTransform(coef, n, false, 8, false, &sc)
+
+			var want float64
+
+			for _, v := range coef {
+				d := float64(v) / float64(int32(1)<<shift)
+				want += d * d
+			}
+
+			_, qbits := quantScale(n, qp, 8)
+			got := float64(levelError(int64(1)<<qbits, qbits-15, levelDist(qp))) / (1 << 12) / (1 << 30)
+
+			// The dequantiser rounds its step to an integer, which is where
+			// the last few percent go.
+			if math.Abs(got-want) > 0.05*want {
+				t.Fatalf("n=%d qp=%d: level costs %g, the transform makes %g", n, qp, got, want)
+			}
+		}
+	}
+}
+
+// TestRDOQLevels holds the quantiser to what it is allowed to do: a level is
+// either what rounding would give, one less, or nothing at all. The
+// coefficients are spread across the rounding boundary in sixteenths of a
+// level, which is where the choice is a real one.
+func TestRDOQLevels(t *testing.T) {
+	// A 4x4 is a single sub-block, so a level that goes to zero there went for
+	// its own cost rather than with the sub-block around it.
+	dropped, lowered := 0, 0
+
+	for _, n := range []int{4, 8, 16, 32} {
+		for _, qp := range []int{6, 26, 45} {
+			scale, qbits := quantScale(n, qp, 8)
+
+			raw := make([]int32, n*n)
+			for i := range raw {
+				raw[i] = int32(int64(i%32) << qbits / 16 / scale)
+				if i&1 != 0 {
+					raw[i] = -raw[i]
+				}
+			}
+
+			var e intraEncoder
+
+			e.reset(make([]uint8, 64*64), make([]uint8, 32*32), make([]uint8, 32*32), 64, 64, qp)
+
+			coef := make([]int32, n*n)
+			e.rdoq(coef, raw, n, qp, 0, intraDC)
+
+			for i, v := range coef {
+				abs := int64(raw[i])
+				if abs < 0 {
+					abs = -abs
+				}
+
+				nearest := int32((abs*scale + int64(1)<<(qbits-1)) >> qbits)
+
+				if v < 0 != (raw[i] < 0) && v != 0 {
+					t.Fatalf("n=%d qp=%d level %d: sign flipped", n, qp, i)
+				}
+
+				if m := absLevel(v); m != 0 && m != nearest && m != nearest-1 {
+					t.Fatalf("n=%d qp=%d level %d: %d, rounding gives %d", n, qp, i, m, nearest)
+				}
+
+				if v == 0 && nearest != 0 && n == 4 {
+					dropped++
+				}
+
+				if absLevel(v) == nearest-1 && nearest >= 2 {
+					lowered++
+				}
+			}
+		}
+	}
+
+	if dropped == 0 {
+		t.Fatal("no level was ever worth dropping on its own")
+	}
+
+	if lowered == 0 {
+		t.Fatal("no level was ever worth coding one lower")
+	}
+}
+
 func TestLog2(t *testing.T) {
 	for k := range 16 {
 		if got := log2(1 << k); got != k {

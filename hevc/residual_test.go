@@ -167,66 +167,6 @@ func TestScanIndex(t *testing.T) {
 	}
 }
 
-func TestTerminalRDOQ(t *testing.T) {
-	const n = 8
-	mode := intraVer
-	scan := scanOrder[2][scanIndex(3, 0, mode, true, 1)]
-	index := func(pos scanPos) int { return int(pos.y)*n + int(pos.x) }
-
-	t.Run("removes terminal level", func(t *testing.T) {
-		raw := make([]int32, n*n)
-		level := make([]int32, n*n)
-		level[index(scan[13])] = 2
-		level[index(scan[14])] = -1
-		raw[index(scan[14])] = 1
-		terminalRDOQ(raw, level, n, mode, 0, 26)
-		if level[index(scan[14])] != 0 {
-			t.Fatal("terminal level was not removed")
-		}
-		if raw[index(scan[14])] != 1 {
-			t.Fatal("raw coefficient changed")
-		}
-	})
-
-	t.Run("keeps ineligible terminal levels", func(t *testing.T) {
-		for _, test := range []struct {
-			name string
-			raw  int32
-			last int32
-		}{
-			{"level", 1, 2},
-			{"distortion", 1000, 1},
-		} {
-			t.Run(test.name, func(t *testing.T) {
-				raw := make([]int32, n*n)
-				level := make([]int32, n*n)
-				level[index(scan[13])] = 2
-				level[index(scan[14])] = test.last
-				raw[index(scan[14])] = test.raw
-				terminalRDOQ(raw, level, n, mode, 0, 26)
-				if level[index(scan[14])] != test.last {
-					t.Fatalf("got %d, want %d", level[index(scan[14])], test.last)
-				}
-			})
-		}
-	})
-
-	t.Run("keeps terminal level in another group", func(t *testing.T) {
-		sbScan := scanOrder[1][scanIndex(3, 0, mode, true, 1)]
-		raw := make([]int32, n*n)
-		level := make([]int32, n*n)
-		prevSB, prevPos := sbScan[0], scan[15]
-		lastSB, lastPos := sbScan[1], scan[1]
-		prev := ((int(prevSB.y)<<2)+int(prevPos.y))*n + (int(prevSB.x) << 2) + int(prevPos.x)
-		last := ((int(lastSB.y)<<2)+int(lastPos.y))*n + (int(lastSB.x) << 2) + int(lastPos.x)
-		level[prev], level[last], raw[last] = 2, 1, 1
-		terminalRDOQ(raw, level, n, mode, 0, 0)
-		if level[last] != 1 {
-			t.Fatal("terminal level in another group was removed")
-		}
-	})
-}
-
 // naiveSigCoeffCtx transcribes 9.3.4.2.5 without the shared helper's structure.
 func naiveSigCoeffCtx(xC, yC, log2Size, cIdx, scanIdx, prevCsbf int) int {
 	var sigCtx int
