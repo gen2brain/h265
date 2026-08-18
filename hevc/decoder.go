@@ -1,5 +1,5 @@
 /*
-Package hevc decodes an HEVC (H.265) bitstream.
+Package hevc decodes an HEVC (H.265) bitstream, and encodes an intra-only one.
 
 [Decoder.DecodeNAL] takes one NAL unit at a time and returns the pictures that
 are ready, which is not the same as the pictures it just decoded: a stream that
@@ -42,6 +42,28 @@ is not.
 wavefront rows and the loop filter row bands. Zero means GOMAXPROCS and one
 decodes serially. A picture without entropy_coding_sync_enabled_flag, or one a
 single block wide, is serial whatever the bound.
+
+# Encoding
+
+[Encoder] writes self-contained intra IDR access units from 8-bit 4:2:0 frames
+whose dimensions are non-zero multiples of 16. Every frame is coded on its own,
+so [Encoder.Flush] never has anything left to return.
+
+	enc, err := hevc.NewEncoder(hevc.EncoderOptions{Width: 1920, Height: 1080, QP: 26})
+	if err != nil {
+		return err
+	}
+
+	nals, err := enc.Encode(hevc.Frame{Y: y, Cb: cb, Cr: cr, StrideY: ys, StrideC: cs})
+
+[MarshalAnnexB] frames the result for a file and [MarshalNAL] writes one unit
+for a length-prefixed container, whose configuration record repeats the
+[ProfileTierLevel] of the sequence parameter set.
+
+A picture is one slice of 64x64 coding tree blocks, coded as 32x32 units and as
+16x16 ones along an edge a 32x32 does not fit. Prediction searches all 35 intra
+modes and the 8x8 transform blocks choose between one transform and four.
+[EncoderOptions.Lossless] codes the samples as PCM instead and ignores QP.
 
 # Errors
 

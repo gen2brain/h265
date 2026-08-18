@@ -35,6 +35,11 @@ func (r *refSamples) left(y int) int32       { return r.s[2*r.n-1-y] }
 func (r *refSamples) setTop(x int, v int32)  { r.s[2*r.n+1+x] = v }
 func (r *refSamples) setLeft(y int, v int32) { r.s[2*r.n-1-y] = v }
 
+func (r *refSamples) copyFrom(src *refSamples) {
+	r.n = src.n
+	copy(r.s[:4*src.n+1], src.s[:4*src.n+1])
+}
+
 // substitute is 8.4.4.2.2. avail runs in the same order as s.
 func (r *refSamples) substitute(avail []bool, bitDepth int) {
 	n := 4*r.n + 1

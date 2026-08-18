@@ -1,8 +1,8 @@
 package hevc
 
-func encodeResidual(w *cabacWriter, s *sps, p *pps, _ *sliceHeader, coef []int32,
-	b residualBlock, _ *[4]uint8,
-) error {
+// encodeResidual is the residual_coding syntax of 7.3.8.11. coef holds the
+// levels in raster order and must already carry the parity of 7.4.9.11.
+func encodeResidual(w *cabacWriter, s *sps, p *pps, coef []int32, b residualBlock) error {
 	if b.log2Size < 2 || b.log2Size > 5 || b.cIdx < 0 || b.cIdx > 2 ||
 		len(coef) != 1<<(b.log2Size<<1) {
 		return ErrInvalid
@@ -193,17 +193,19 @@ func (w *cabacWriter) encodeCoeffAbsLevelRemaining(v int32, rice, rng int) {
 	w.encodeBypassBits(uint32(v-((1<<k)+2)<<rice), n)
 }
 
+// encodeSubBlockLevels writes the level passes of 7.3.8.11 for one 4x4
+// sub-block.
 func encodeSubBlockLevels(w *cabacWriter, s *sps, p *pps, coef []int32, b residualBlock,
 	sb scanPos, coeffScan []scanPos, sig *[numSbCoeff]bool, subBlock, n int,
 	st *residualState,
 ) {
-	xS, yS := int(sb.x), int(sb.y)
 	ctxSet := 0
 	if subBlock > 0 && b.cIdx == 0 {
 		ctxSet = 2
 	}
 
 	lastCtx := 1
+
 	if st.started {
 		lastCtx = st.greater1Ctx
 		if lastCtx > 0 {
@@ -214,46 +216,63 @@ func encodeSubBlockLevels(w *cabacWriter, s *sps, p *pps, coef []int32, b residu
 			}
 		}
 	}
+
 	if lastCtx == 0 {
 		ctxSet++
 	}
+
 	st.started = true
 
-	var pos [numSbCoeff]int
+	// The passes visit the significant levels in the same order, so they are
+	// gathered once and then addressed by rank rather than by scan position.
+	var lev [numSbCoeff]int32
+
 	npos := 0
+	origin := (int(sb.y)*n + int(sb.x)) << 2
+	firstSig, lastSig := -1, -1
+
 	for k := numSbCoeff - 1; k >= 0; k-- {
-		if sig[k] {
-			pos[npos] = k
-			npos++
+		if !sig[k] {
+			continue
 		}
+
+		if lastSig < 0 {
+			lastSig = k
+		}
+
+		firstSig = k
+
+		sp := coeffScan[k]
+		lev[npos] = coef[origin+int(sp.y)*n+int(sp.x)]
+		npos++
 	}
+
 	if npos == 0 {
 		return
 	}
 
-	firstSig, lastSig := pos[npos-1], pos[0]
 	signHidden := lastSig-firstSig > 3 && !b.transquantBypass
 
 	var greater1 [numSbCoeff]bool
-	numGreater1, lastGreater1, greater1Ctx := 0, -1, 1
-	for _, k := range pos[:npos] {
-		if numGreater1 >= 8 {
-			continue
-		}
 
-		level := coefAt(coef, coeffScan[k], xS, yS, n)
-		greater1[k] = absLevel(level) > 1
+	lastGreater1, greater1Ctx := -1, 1
+
+	for i := range min(npos, 8) {
+		greater1[i] = absLevel(lev[i]) > 1
+
 		ctx := ctxSet*4 + min(3, greater1Ctx)
 		if b.cIdx > 0 {
 			ctx += 16
 		}
-		w.encodeBin(ctxCoeffAbsLevelGreater1Flag+ctx, boolToBit(greater1[k]))
-		numGreater1++
-		st.greater1Ctx, st.lastGreater1 = greater1Ctx, greater1[k]
-		if greater1[k] {
+
+		w.encodeBin(ctxCoeffAbsLevelGreater1Flag+ctx, boolToBit(greater1[i]))
+		st.greater1Ctx, st.lastGreater1 = greater1Ctx, greater1[i]
+
+		if greater1[i] {
 			greater1Ctx = 0
+
 			if lastGreater1 < 0 {
-				lastGreater1 = k
+				lastGreater1 = i
 			}
 		} else if greater1Ctx > 0 {
 			greater1Ctx++
@@ -265,47 +284,49 @@ func encodeSubBlockLevels(w *cabacWriter, s *sps, p *pps, coef []int32, b residu
 		if b.cIdx > 0 {
 			ctx += 4
 		}
-		w.encodeBin(ctxCoeffAbsLevelGreater2Flag+ctx,
-			boolToBit(absLevel(coefAt(coef, coeffScan[lastGreater1], xS, yS, n)) > 2))
+
+		w.encodeBin(ctxCoeffAbsLevelGreater2Flag+ctx, boolToBit(absLevel(lev[lastGreater1]) > 2))
 	}
 
-	for _, k := range pos[:npos] {
-		if p.signDataHidingEnabled && signHidden && k == firstSig {
+	for i := range npos {
+		if p.signDataHidingEnabled && signHidden && i == npos-1 {
 			continue
 		}
-		w.encodeBypass(boolToBit(coefAt(coef, coeffScan[k], xS, yS, n) < 0))
+
+		w.encodeBypass(boolToBit(lev[i] < 0))
 	}
 
-	rice, rng, numSig := 0, s.coeffRange(b.cIdx), 0
-	for _, k := range pos[:npos] {
-		level := absLevel(coefAt(coef, coeffScan[k], xS, yS, n))
+	rice, rng := 0, s.coeffRange(b.cIdx)
+
+	for i := range npos {
+		level := absLevel(lev[i])
+
 		base := int32(1)
-		if greater1[k] {
+		if greater1[i] {
 			base++
 		}
-		if k == lastGreater1 && level > 2 {
+
+		if i == lastGreater1 && level > 2 {
 			base++
 		}
 
 		want := int32(1)
-		if numSig < 8 {
+
+		if i < 8 {
 			want = 2
-			if k == lastGreater1 {
+			if i == lastGreater1 {
 				want = 3
 			}
 		}
+
 		if base == want {
 			w.encodeCoeffAbsLevelRemaining(level-base, rice, rng)
+
 			if level > 3<<rice {
 				rice = min(rice+1, 4)
 			}
 		}
-		numSig++
 	}
-}
-
-func coefAt(coef []int32, pos scanPos, xS, yS, n int) int32 {
-	return coef[(yS<<2+int(pos.y))*n+xS<<2+int(pos.x)]
 }
 
 func absLevel(v int32) int32 {

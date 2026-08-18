@@ -453,7 +453,7 @@ func TestEncodeResidualRoundTrip(t *testing.T) {
 			var w cabacWriter
 			w.init(&bits, 26, sh.sliceType, false)
 			var stat [4]uint8
-			if err := encodeResidual(&w, &s, &pps{}, &sh, want, b, &stat); err != nil {
+			if err := encodeResidual(&w, &s, &pps{}, want, b); err != nil {
 				t.Fatalf("case %d trial %d: encode: %v", testIdx, trial, err)
 			}
 			w.encodeTerminate(1)
@@ -502,12 +502,11 @@ func TestEncodeResidualEmptyDCSubBlock(t *testing.T) {
 		var (
 			bits putBits
 			w    cabacWriter
-			stat [4]uint8
 		)
 
 		w.init(&bits, 26, sliceI, false)
 
-		if err := encodeResidual(&w, &s, &p, &sliceHeader{sliceType: sliceI}, want, b, &stat); err != nil {
+		if err := encodeResidual(&w, &s, &p, want, b); err != nil {
 			t.Fatalf("size %d cIdx %d: encode: %v", n, b.cIdx, err)
 		}
 
@@ -519,6 +518,8 @@ func TestEncodeResidualEmptyDCSubBlock(t *testing.T) {
 		}
 
 		c.initContexts(26, sliceI, false)
+
+		var stat [4]uint8
 
 		got := make([]int32, len(want))
 		if _, err := decodeResidual(&c, &s, &p, &sliceHeader{sliceType: sliceI}, got, b, &stat); err != nil {
@@ -555,7 +556,7 @@ func TestEncodeResidualIntraModesRoundTrip(t *testing.T) {
 			var w cabacWriter
 			var stat [4]uint8
 			w.init(&bits, 26, sh.sliceType, false)
-			if err := encodeResidual(&w, &s, &pps{}, &sh, want, b, &stat); err != nil {
+			if err := encodeResidual(&w, &s, &pps{}, want, b); err != nil {
 				t.Fatalf("mode %d size %d: encode: %v", mode, n, err)
 			}
 			w.encodeTerminate(1)
@@ -603,7 +604,7 @@ func TestEncodeResidualSignDataHidingRoundTrip(t *testing.T) {
 		var w cabacWriter
 		var stat [4]uint8
 		w.init(&bits, 26, sh.sliceType, false)
-		if err := encodeResidual(&w, &s, &p, &sh, want, b, &stat); err != nil {
+		if err := encodeResidual(&w, &s, &p, want, b); err != nil {
 			t.Fatalf("size %d: encode: %v", n, err)
 		}
 		w.encodeTerminate(1)

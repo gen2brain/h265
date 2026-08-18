@@ -58,28 +58,60 @@ func BenchmarkDecode1080p(b *testing.B) { benchStream(b, "1080p.h265") }
 func BenchmarkDecodeTiles(b *testing.B) { benchStream(b, "tiles.h265") }
 func BenchmarkDecode10Bit(b *testing.B) { benchStream(b, "10bit_128x128.h265") }
 
-func BenchmarkEncodeIntraLossy(b *testing.B) {
-	const width, height = 176, 144
+// BenchmarkEncodeLossy covers both shapes the coding tree takes: 128x128 is
+// whole coding tree blocks and 176x144 is mostly edges, which is where the
+// 16x16 coding units and the 8x8 transform choice live.
+func BenchmarkEncodeLossy(b *testing.B) {
+	for _, size := range [][2]int{{128, 128}, {176, 144}} {
+		width, height := size[0], size[1]
 
-	y := make([]byte, width*height)
-	cb := make([]byte, width*height/4)
-	cr := make([]byte, width*height/4)
-	for i := range y {
-		y[i] = byte(i*17 + i/13)
-	}
-	for i := range cb {
-		cb[i] = byte(i*29 + 7)
-		cr[i] = byte(i*43 + 11)
-	}
+		y := make([]byte, width*height)
+		cb := make([]byte, width*height/4)
+		cr := make([]byte, width*height/4)
 
-	b.ReportAllocs()
-	b.SetBytes(width * height * 3 / 2)
-	b.ResetTimer()
+		for i := range y {
+			y[i] = byte(i*17 + i/13)
+		}
 
-	for b.Loop() {
-		if _, err := encodeIntraLossy(y, cb, cr, width, height); err != nil {
+		for i := range cb {
+			cb[i] = byte(i*29 + 7)
+			cr[i] = byte(i*43 + 11)
+		}
+
+		enc, err := NewEncoder(EncoderOptions{Width: width, Height: height})
+		if err != nil {
 			b.Fatal(err)
 		}
+
+		frame := Frame{Y: y, Cb: cb, Cr: cr, StrideY: width, StrideC: width / 2}
+
+		b.Run(fmt.Sprintf("%dx%d", width, height), func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(width * height * 3 / 2))
+
+			for b.Loop() {
+				if _, err := enc.Encode(frame); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkQuantize(b *testing.B) {
+	for _, n := range []int{4, 8, 16, 32} {
+		src := make([]int32, n*n)
+		dst := make([]int32, n*n)
+		for i := range src {
+			src[i] = int32(i*7919%1048576 - 524288)
+		}
+
+		b.Run(fmt.Sprintf("%dx%d", n, n), func(b *testing.B) {
+			b.SetBytes(int64(n * n * 4))
+			for b.Loop() {
+				quantize(dst, src, n, 26, 8)
+			}
+		})
 	}
 }
 
@@ -97,7 +129,7 @@ func BenchmarkEncodePCM(b *testing.B) {
 		cr[i] = byte(i*43 + 11)
 	}
 
-	enc, err := NewEncoder(EncoderOptions{Width: width, Height: height})
+	enc, err := NewEncoder(EncoderOptions{Width: width, Height: height, Lossless: true})
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -544,7 +576,7 @@ func TestEncodeIntraWideSpeedup(t *testing.T) {
 	}
 
 	on, off := wideSpeedup(t, 20, 1, func() {
-		if _, err := encodeIntraLossy(y, cb, cr, width, height); err != nil {
+		if _, err := encodeIntraLossyQP(y, cb, cr, width, height, 26); err != nil {
 			t.Fatal(err)
 		}
 	})

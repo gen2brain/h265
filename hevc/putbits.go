@@ -2,19 +2,18 @@ package hevc
 
 type putBits struct {
 	data  []byte
+	cur   uint8
 	nbits uint8
 }
 
 func (w *putBits) bit(v uint32) {
-	if w.nbits == 0 {
-		w.data = append(w.data, 0)
-	}
+	w.cur = w.cur<<1 | uint8(v&1)
+	w.nbits++
 
-	if v != 0 {
-		w.data[len(w.data)-1] |= 1 << (7 - w.nbits)
+	if w.nbits == 8 {
+		w.data = append(w.data, w.cur)
+		w.cur, w.nbits = 0, 0
 	}
-
-	w.nbits = (w.nbits + 1) & 7
 }
 
 func (w *putBits) bits(v uint64, n int) {
@@ -55,6 +54,11 @@ func (w *putBits) rbspTrailingBits() {
 	for w.nbits != 0 {
 		w.bit(0)
 	}
+}
+
+// count is the number of bits written, which the rate estimates measure.
+func (w *putBits) count() int {
+	return len(w.data)*8 + int(w.nbits)
 }
 
 func (w *putBits) bytes() []byte {

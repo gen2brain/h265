@@ -1,426 +1,513 @@
 package hevc
 
-func encodeIntraLossy(y, cb, cr []uint8, width, height int) ([]NALUnit, error) {
-	return encodeIntraLossyQP(y, cb, cr, width, height, 26)
-}
-
 func encodeIntraLossyQP(y, cb, cr []uint8, width, height, qp int) ([]NALUnit, error) {
 	if width <= 0 || height <= 0 || width&15 != 0 || height&15 != 0 ||
-		len(y) != width*height || len(cb) != width*height/4 || len(cr) != width*height/4 || qp < 0 || qp > 51 {
+		len(y) != width*height || len(cb) != width*height/4 || len(cr) != width*height/4 ||
+		qp < 0 || qp > 51 {
 		return nil, ErrInvalid
 	}
 
-	h := encoderHeaders{
-		width: width, height: height, levelIDC: pcmLevelIDC(width * height), deblockingDisabled: true,
-		signDataHidingEnabled: true, ctbLog2: 6, maxTrHierIntra: 2,
-	}
-	rbsp, err := lossySliceQP(y, cb, cr, width, height, qp)
+	var e intraEncoder
+
+	rbsp, err := e.slice(y, cb, cr, width, height, qp)
 	if err != nil {
 		return nil, err
 	}
 
+	return lossyNALs(width, height, rbsp), nil
+}
+
+func lossyNALs(width, height int, rbsp []byte) []NALUnit {
+	h := encoderHeaders{
+		width: width, height: height, levelIDC: pcmLevelIDC(width * height),
+		deblockingDisabled: true, signDataHidingEnabled: true, ctbLog2: 6, maxTrHierIntra: 2,
+	}
+
 	return []NALUnit{
-		{Type: NALVPS, TemporalID: 0, RBSP: h.vps()},
-		{Type: NALSPS, TemporalID: 0, RBSP: h.sps()},
-		{Type: NALPPS, TemporalID: 0, RBSP: h.pps()},
-		{Type: NALIdrNLP, TemporalID: 0, RBSP: rbsp},
-	}, nil
+		{Type: NALVPS, RBSP: h.vps()},
+		{Type: NALSPS, RBSP: h.sps()},
+		{Type: NALPPS, RBSP: h.pps()},
+		{Type: NALIdrNLP, RBSP: rbsp},
+	}
 }
 
-func lossySlice(y, cb, cr []uint8, width, height int) ([]byte, error) {
-	return lossySliceQP(y, cb, cr, width, height, 26)
+// intraEncoder codes one 8 bit 4:2:0 picture as a single intra slice of 64x64
+// coding tree blocks. A picture allocates only the bitstream it returns.
+type intraEncoder struct {
+	width, height int
+	qp, qpC       int
+	lambda        int64
+
+	src   [3][]uint8
+	recon [3][]uint8
+
+	// modes and depth are per 16x16 block, for 8.4.2 and 9.3.4.2.2. depth is
+	// also the availability map, being non-zero exactly where a block is coded.
+	modes  []int
+	depth  []uint8
+	coded8 []uint8
+	coded4 []uint8
+
+	bits  putBits
+	cabac cabacWriter
+	s     sps
+	p     pps
+
+	scratch lossyBlockScratch
 }
 
-func lossySliceQP(y, cb, cr []uint8, width, height, qp int) ([]byte, error) {
-	rbsp, _, _, _, err := lossySliceReconQP(y, cb, cr, width, height, qp)
-
-	return rbsp, err
+// lossyBlock names one transform block and how it is coded.
+type lossyBlock struct {
+	cIdx    int
+	x, y, n int
+	mode    int
+	coded   []uint8
+	dst     bool
 }
 
-func lossySliceRecon(y, cb, cr []uint8, width, height int) ([]byte, []uint8, []uint8, []uint8, error) {
-	return lossySliceReconQP(y, cb, cr, width, height, 26)
+// lossyBlockScratch is the working memory one block needs. No two blocks are
+// ever in flight at once, and the largest is 16x16.
+type lossyBlockScratch struct {
+	pred      [16 * 16]uint8
+	avail     [4*16 + 1]bool
+	residual  [16 * 16]int32
+	coef      [16 * 16]int32
+	reconCoef [16 * 16]int32
+	rate      [512]byte
+	base, ref refSamples
+	transform transformScratch
 }
 
-func lossySliceReconQP(y, cb, cr []uint8, width, height, qp int) ([]byte, []uint8, []uint8, []uint8, error) {
-	var bits putBits
-	bits.bit(1)
-	bits.bit(0)
-	bits.ue(0)
-	bits.ue(uint32(sliceI))
-	bits.se(int32(qp - 26))
-	bits.rbspTrailingBits()
+type lossyTU8Plan struct {
+	split        bool
+	y            [4][4 * 4]int32
+	y8           [8 * 8]int32
+	cb, cr       [4 * 4]int32
+	cbfCb, cbfCr bool
+}
 
-	s := &sps{chromaFormatIDC: 1}
-	p := &pps{signDataHidingEnabled: true}
-	var cabac cabacWriter
-	cabac.init(&bits, int32(qp), sliceI, false)
-	qpCb := int(chromaQP(int32(qp), 1))
-	qpCr := qpCb
+func (e *intraEncoder) slice(y, cb, cr []uint8, width, height, qp int) ([]byte, error) {
+	e.reset(y, cb, cr, width, height, qp)
 
-	reconY := make([]uint8, len(y))
-	reconCb := make([]uint8, len(cb))
-	reconCr := make([]uint8, len(cr))
-	var stat [4]uint8
-	modes := make([]int, width/16*height/16)
-	depth := make([]uint8, len(modes))
-	coded8 := make([]uint8, width/8*height/8)
-	coded4 := make([]uint8, width/4*height/4)
-	var modeScratch, yScratch, cbScratch, crScratch lossyBlockScratch
-	blocksWide := width / 16
-	blocksWide8 := width / 8
-
-	markCoded8 := func(x, y int) {
-		for j := range 2 {
-			for i := range 2 {
-				coded8[(y/8+j)*blocksWide8+x/8+i] = 1
+	for y0 := 0; y0 < height; y0 += 64 {
+		for x0 := 0; x0 < width; x0 += 64 {
+			if err := e.tree(x0, y0, 6, 0); err != nil {
+				return nil, err
 			}
+
+			e.cabac.encodeTerminate(boolToBit(x0+64 >= width && y0+64 >= height))
 		}
 	}
-	blocksWide4 := width / 4
 
-	markCoded4 := func(x, y, size int) {
-		for j := range size / 4 {
-			for i := range size / 4 {
-				coded4[(y/4+j)*blocksWide4+x/4+i] = 1
-			}
+	return e.cabac.bytes(), nil
+}
+
+func (e *intraEncoder) reset(y, cb, cr []uint8, width, height, qp int) {
+	e.width, e.height = width, height
+	e.qp, e.qpC = qp, int(chromaQP(int32(qp), 1))
+	e.lambda = lossyLambda(qp)
+	e.src = [3][]uint8{y, cb, cr}
+	e.s = sps{chromaFormatIDC: 1}
+	e.p = pps{signDataHidingEnabled: true}
+
+	e.recon[0] = regrow(e.recon[0], len(y))
+	e.recon[1] = regrow(e.recon[1], len(cb))
+	e.recon[2] = regrow(e.recon[2], len(cr))
+	e.modes = regrow(e.modes, width/16*height/16)
+	e.depth = regrow(e.depth, len(e.modes))
+	e.coded8 = regrow(e.coded8, width/8*height/8)
+	e.coded4 = regrow(e.coded4, width/4*height/4)
+
+	e.bits = putBits{}
+	e.bits.bit(1)
+	e.bits.bit(0)
+	e.bits.ue(0)
+	e.bits.ue(uint32(sliceI))
+	e.bits.se(int32(qp - 26))
+	e.bits.rbspTrailingBits()
+	e.cabac.init(&e.bits, int32(qp), sliceI, false)
+}
+
+func regrow[T any](s []T, n int) []T {
+	if cap(s) < n {
+		return make([]T, n)
+	}
+
+	s = s[:n]
+	clear(s)
+
+	return s
+}
+
+func (e *intraEncoder) stride(cIdx int) int {
+	if cIdx == 0 {
+		return e.width
+	}
+
+	return e.width / 2
+}
+
+func (e *intraEncoder) blockQP(cIdx int) int {
+	if cIdx == 0 {
+		return e.qp
+	}
+
+	return e.qpC
+}
+
+// tree is the coding quadtree of 7.3.8.4. A 32x32 is coded whole; a block at
+// the picture edge splits without a flag.
+func (e *intraEncoder) tree(x0, y0, log2Size, d int) error {
+	if log2Size == 4 {
+		return e.leaf(x0, y0, d)
+	}
+
+	size := 1 << log2Size
+
+	if x0+size <= e.width && y0+size <= e.height {
+		split := log2Size != 5
+		e.cabac.encodeBin(ctxSplitCodingUnitFlag+e.splitCtx(x0, y0, d), boolToBit(split))
+
+		if !split {
+			return e.cu32(x0, y0, d)
 		}
 	}
 
-	encodeLeaf := func(x0, y0, d int) error {
-		cand := lossyMPM(modes, blocksWide, x0/16, y0/16, 4)
-		mode := lossyLumaModeRDOWithScratch(reconY, y, width, x0, y0, depth, cand, &cabac, qp, &modeScratch)
-		var tus [4]lossyTU8Plan
+	half := size / 2
 
-		for i := range 4 {
-			x, yy := x0+i&1*8, y0+i>>1*8
-			var base [8 * 8]uint8
-			for j := range 8 {
-				copy(base[j*8:], reconY[(yy+j)*width+x:][:8])
-			}
-			idx8 := yy/8*blocksWide8 + x/8
-			var idx4 [4]int
-			for j := range 2 {
-				for k := range 2 {
-					idx4[j*2+k] = (yy/4+j)*blocksWide4 + x/4 + k
-				}
-			}
-			base8 := coded8[idx8]
-			var base4 [4]uint8
-			for j, idx := range idx4 {
-				base4[j] = coded4[idx]
-			}
+	for i := range 4 {
+		x, y := x0+i&1*half, y0+i>>1*half
+		if x >= e.width || y >= e.height {
+			continue
+		}
 
-			restore := func() {
-				for j := range 8 {
-					copy(reconY[(yy+j)*width+x:][:8], base[j*8:])
-				}
-				coded8[idx8] = base8
-				for j, idx := range idx4 {
-					coded4[idx] = base4[j]
-				}
-			}
-			distortion := func() int64 {
-				var dist int64
-				for j := range 8 {
-					for k := range 8 {
-						delta := int64(y[(yy+j)*width+x+k]) - int64(reconY[(yy+j)*width+x+k])
-						dist += delta * delta
-					}
-				}
-				return dist
-			}
+		if err := e.tree(x, y, log2Size-1, d+1); err != nil {
+			return err
+		}
+	}
 
-			var split lossyTU8Plan
-			split.split = true
+	return nil
+}
+
+func (e *intraEncoder) splitCtx(x0, y0, d int) int {
+	blocksWide := e.width / 16
+	ctx := 0
+
+	if x0 > 0 && int(e.depth[y0/16*blocksWide+(x0-1)/16]) > d {
+		ctx++
+	}
+
+	if y0 > 0 && int(e.depth[(y0-1)/16*blocksWide+x0/16]) > d {
+		ctx++
+	}
+
+	return ctx
+}
+
+// leaf codes a 16x16 coding unit, whose transform tree splits to 8x8 and then
+// to 4x4 where that is cheaper.
+func (e *intraEncoder) leaf(x0, y0, d int) error {
+	blocksWide := e.width / 16
+	cand := lossyMPM(e.modes, blocksWide, x0/16, y0/16, 4)
+	mode := e.lumaMode(x0, y0, cand)
+
+	var tus [4]lossyTU8Plan
+
+	for i := range 4 {
+		tus[i] = e.tu8(x0+i&1*8, y0+i>>1*8, mode)
+	}
+
+	rootCb, rootCr := false, false
+
+	for i := range 4 {
+		rootCb = rootCb || tus[i].cbfCb
+		rootCr = rootCr || tus[i].cbfCr
+	}
+
+	e.cabac.encodeBin(ctxPartMode, 1)
+	lossyIntraLumaMode(&e.cabac, mode, cand)
+	e.cabac.encodeBin(ctxIntraChromaPredMode, 0)
+	e.cabac.encodeBin(ctxSplitTransformFlag+1, 1)
+	e.cabac.encodeBin(ctxCBFCBCR, boolToBit(rootCb))
+	e.cabac.encodeBin(ctxCBFCBCR, boolToBit(rootCr))
+
+	for i := range 4 {
+		e.cabac.encodeBin(ctxSplitTransformFlag+2, boolToBit(tus[i].split))
+
+		if rootCb {
+			e.cabac.encodeBin(ctxCBFCBCR+1, boolToBit(tus[i].cbfCb))
+		}
+
+		if rootCr {
+			e.cabac.encodeBin(ctxCBFCBCR+1, boolToBit(tus[i].cbfCr))
+		}
+
+		if tus[i].split {
 			for j := range 4 {
-				px, py := x+j&1*4, yy+j>>1*4
-				copy(split.y[j][:], lossyBlockTransformCodedWithScratch(reconY, y, width, px, py, 4, mode, 0, coded4, qp, true, false, &yScratch))
-			}
-			coded8[idx8] = 1
-			splitDist := distortion()
-			restore()
-
-			var unsplit lossyTU8Plan
-			copy(unsplit.y8[:], lossyBlockTransformCodedWithScratch(reconY, y, width, x, yy, 8, mode, 0, coded8, qp, false, false, &yScratch))
-			for _, idx := range idx4 {
-				coded4[idx] = 1
-			}
-			unsplitDist := distortion()
-			chosen := split
-			lambda := lossyLambda(qp)
-			splitCost := splitDist + lambda*lossyTU8Rate(&cabac, &split, mode, &yScratch)
-			unsplitCost := unsplitDist + lambda*lossyTU8Rate(&cabac, &unsplit, mode, &yScratch)
-			if unsplitCost <= splitCost {
-				chosen = unsplit
-			}
-			restore()
-			if chosen.split {
-				for j := range 4 {
-					px, py := x+j&1*4, yy+j>>1*4
-					copy(chosen.y[j][:], lossyBlockTransformCodedWithScratch(reconY, y, width, px, py, 4, mode, 0, coded4, qp, true, true, &yScratch))
-				}
-			} else {
-				copy(chosen.y8[:], lossyBlockTransformCodedWithScratch(reconY, y, width, x, yy, 8, mode, 0, coded8, qp, false, true, &yScratch))
-			}
-			coded8[idx8] = 1
-			for _, idx := range idx4 {
-				coded4[idx] = 1
-			}
-			tus[i] = chosen
-			copy(tus[i].cb[:], lossyBlockCodedWithScratch(reconCb, cb, width/2, x/2, yy/2, 4, mode, 1, coded8, qpCb, &cbScratch))
-			copy(tus[i].cr[:], lossyBlockCodedWithScratch(reconCr, cr, width/2, x/2, yy/2, 4, mode, 2, coded8, qpCr, &crScratch))
-			tus[i].cbfCb = hasCoefficients(tus[i].cb[:])
-			tus[i].cbfCr = hasCoefficients(tus[i].cr[:])
-		}
-
-		rootCb, rootCr := false, false
-		for i := range 4 {
-			rootCb = rootCb || tus[i].cbfCb
-			rootCr = rootCr || tus[i].cbfCr
-		}
-
-		cabac.encodeBin(ctxPartMode, 1)
-		lossyIntraLumaMode(&cabac, mode, cand)
-		modes[y0/16*width/16+x0/16] = mode
-		cabac.encodeBin(ctxIntraChromaPredMode, 0)
-		cabac.encodeBin(ctxSplitTransformFlag+1, 1)
-		cabac.encodeBin(ctxCBFCBCR, boolToBit(rootCb))
-		cabac.encodeBin(ctxCBFCBCR, boolToBit(rootCr))
-
-		for i := range 4 {
-			cabac.encodeBin(ctxSplitTransformFlag+2, boolToBit(tus[i].split))
-			if rootCb {
-				cabac.encodeBin(ctxCBFCBCR+1, boolToBit(tus[i].cbfCb))
-			}
-			if rootCr {
-				cabac.encodeBin(ctxCBFCBCR+1, boolToBit(tus[i].cbfCr))
-			}
-
-			if tus[i].split {
-				for j := range 4 {
-					cbfY := hasCoefficients(tus[i].y[j][:])
-					cabac.encodeBin(ctxCBFLuma, boolToBit(cbfY))
-					if cbfY {
-						if err := encodeResidual(&cabac, s, p, nil, tus[i].y[j][:],
-							residualBlock{log2Size: 2, predModeIntra: mode, intra: true}, &stat); err != nil {
-							return err
-						}
-					}
-				}
-			} else {
-				cbfY := hasCoefficients(tus[i].y8[:])
-				cabac.encodeBin(ctxCBFLuma, boolToBit(cbfY))
-				if cbfY {
-					if err := encodeResidual(&cabac, s, p, nil, tus[i].y8[:],
-						residualBlock{log2Size: 3, predModeIntra: mode, intra: true}, &stat); err != nil {
-						return err
-					}
-				}
-			}
-			if tus[i].cbfCb {
-				if err := encodeResidual(&cabac, s, p, nil, tus[i].cb[:],
-					residualBlock{log2Size: 2, cIdx: 1, predModeIntra: mode, intra: true}, &stat); err != nil {
+				if err := e.codedResidual(tus[i].y[j][:], 2, 0, mode); err != nil {
 					return err
 				}
 			}
-			if tus[i].cbfCr {
-				if err := encodeResidual(&cabac, s, p, nil, tus[i].cr[:],
-					residualBlock{log2Size: 2, cIdx: 2, predModeIntra: mode, intra: true}, &stat); err != nil {
-					return err
-				}
-			}
+		} else if err := e.codedResidual(tus[i].y8[:], 3, 0, mode); err != nil {
+			return err
 		}
 
-		modes[y0*blocksWide/16+x0/16] = mode
-		depth[y0*blocksWide/16+x0/16] = uint8(d)
-
-		return nil
-	}
-
-	encodeCU32 := func(x0, y0, d int) error {
-		cand := lossyMPM(modes, blocksWide, x0/16, y0/16, 4)
-		mode := lossyLumaModeRDOWithScratch(reconY, y, width, x0, y0, depth, cand, &cabac, qp, &modeScratch)
-		var qY [4][16 * 16]int32
-		var qCb, qCr [4][8 * 8]int32
-
-		for i := range 4 {
-			x, yy := x0+i&1*16, y0+i>>1*16
-			copy(qY[i][:], lossyBlockCodedWithScratch(reconY, y, width, x, yy, 16, mode, 0, depth, qp, &yScratch))
-			markCoded8(x, yy)
-			markCoded4(x, yy, 16)
-			copy(qCb[i][:], lossyBlockCodedWithScratch(reconCb, cb, width/2, x/2, yy/2, 8, mode, 1, depth, qpCb, &cbScratch))
-			copy(qCr[i][:], lossyBlockCodedWithScratch(reconCr, cr, width/2, x/2, yy/2, 8, mode, 2, depth, qpCr, &crScratch))
-		}
-
-		cbfCb, cbfCr := false, false
-		for i := range 4 {
-			cbfCb = cbfCb || hasCoefficients(qCb[i][:])
-			cbfCr = cbfCr || hasCoefficients(qCr[i][:])
-		}
-
-		lossyIntraLumaMode(&cabac, mode, cand)
-		cabac.encodeBin(ctxIntraChromaPredMode, 0)
-		cabac.encodeBin(ctxCBFCBCR, boolToBit(cbfCb))
-		cabac.encodeBin(ctxCBFCBCR, boolToBit(cbfCr))
-
-		for i := range 4 {
-			cbfCbLeaf := hasCoefficients(qCb[i][:])
-			cbfCrLeaf := hasCoefficients(qCr[i][:])
-			cabac.encodeBin(ctxSplitTransformFlag+1, 0)
-			if cbfCb {
-				cabac.encodeBin(ctxCBFCBCR+1, boolToBit(cbfCbLeaf))
-			}
-			if cbfCr {
-				cabac.encodeBin(ctxCBFCBCR+1, boolToBit(cbfCrLeaf))
-			}
-			cabac.encodeBin(ctxCBFLuma, boolToBit(hasCoefficients(qY[i][:])))
-
-			if hasCoefficients(qY[i][:]) {
-				if err := encodeResidual(&cabac, s, p, nil, qY[i][:],
-					residualBlock{log2Size: 4, predModeIntra: mode, intra: true}, &stat); err != nil {
-					return err
-				}
-			}
-			if cbfCbLeaf {
-				if err := encodeResidual(&cabac, s, p, nil, qCb[i][:],
-					residualBlock{log2Size: 3, cIdx: 1, predModeIntra: mode, intra: true}, &stat); err != nil {
-					return err
-				}
-			}
-			if cbfCrLeaf {
-				if err := encodeResidual(&cabac, s, p, nil, qCr[i][:],
-					residualBlock{log2Size: 3, cIdx: 2, predModeIntra: mode, intra: true}, &stat); err != nil {
-					return err
-				}
-			}
-		}
-
-		for j := range 2 {
-			for i := range 2 {
-				idx := (y0/16+j)*blocksWide + x0/16 + i
-				modes[idx] = mode
-				depth[idx] = uint8(d)
-			}
-		}
-
-		return nil
-	}
-
-	var encodeTree func(int, int, int, int) error
-	encodeTree = func(x0, y0, log2Size, d int) error {
-		size := 1 << log2Size
-		full := x0+size <= width && y0+size <= height
-		if log2Size == 5 && full {
-			ctx := 0
-			if x0 > 0 && int(depth[y0/16*blocksWide+(x0-1)/16]) > d {
-				ctx++
-			}
-			if y0 > 0 && int(depth[(y0-1)/16*blocksWide+x0/16]) > d {
-				ctx++
-			}
-			cabac.encodeBin(ctxSplitCodingUnitFlag+ctx, 0)
-
-			return encodeCU32(x0, y0, d)
-		}
-		if log2Size == 4 {
-			return encodeLeaf(x0, y0, d)
-		}
-		if full {
-			ctx := 0
-			if x0 > 0 && int(depth[y0/16*blocksWide+(x0-1)/16]) > d {
-				ctx++
-			}
-			if y0 > 0 && int(depth[(y0-1)/16*blocksWide+x0/16]) > d {
-				ctx++
-			}
-			cabac.encodeBin(ctxSplitCodingUnitFlag+ctx, 1)
-		}
-
-		half := size / 2
-		for i := range 4 {
-			x, y := x0+i&1*half, y0+i>>1*half
-			if x >= width || y >= height {
-				continue
-			}
-			if err := encodeTree(x, y, log2Size-1, d+1); err != nil {
+		if tus[i].cbfCb {
+			if err := e.residual(tus[i].cb[:], 2, 1, mode); err != nil {
 				return err
 			}
 		}
 
+		if tus[i].cbfCr {
+			if err := e.residual(tus[i].cr[:], 2, 2, mode); err != nil {
+				return err
+			}
+		}
+	}
+
+	idx := y0/16*blocksWide + x0/16
+	e.modes[idx] = mode
+	e.depth[idx] = uint8(d)
+
+	return nil
+}
+
+// cu32 codes a 32x32 coding unit as four 16x16 transform units, the largest
+// transform the sequence allows.
+func (e *intraEncoder) cu32(x0, y0, d int) error {
+	blocksWide := e.width / 16
+	cand := lossyMPM(e.modes, blocksWide, x0/16, y0/16, 4)
+	mode := e.lumaMode(x0, y0, cand)
+
+	var (
+		qY       [4][16 * 16]int32
+		qCb, qCr [4][8 * 8]int32
+	)
+
+	for i := range 4 {
+		x, y := x0+i&1*16, y0+i>>1*16
+		copy(qY[i][:], e.codeBlock(lossyBlock{x: x, y: y, n: 16, mode: mode, coded: e.depth}, true))
+		e.markCoded(x, y, 16)
+		copy(qCb[i][:], e.codeBlock(lossyBlock{cIdx: 1, x: x / 2, y: y / 2, n: 8, mode: mode,
+			coded: e.depth}, true))
+		copy(qCr[i][:], e.codeBlock(lossyBlock{cIdx: 2, x: x / 2, y: y / 2, n: 8, mode: mode,
+			coded: e.depth}, true))
+	}
+
+	cbfCb, cbfCr := false, false
+
+	for i := range 4 {
+		cbfCb = cbfCb || hasCoefficients(qCb[i][:])
+		cbfCr = cbfCr || hasCoefficients(qCr[i][:])
+	}
+
+	lossyIntraLumaMode(&e.cabac, mode, cand)
+	e.cabac.encodeBin(ctxIntraChromaPredMode, 0)
+	e.cabac.encodeBin(ctxCBFCBCR, boolToBit(cbfCb))
+	e.cabac.encodeBin(ctxCBFCBCR, boolToBit(cbfCr))
+
+	for i := range 4 {
+		cbfCbLeaf := hasCoefficients(qCb[i][:])
+		cbfCrLeaf := hasCoefficients(qCr[i][:])
+		e.cabac.encodeBin(ctxSplitTransformFlag+1, 0)
+
+		if cbfCb {
+			e.cabac.encodeBin(ctxCBFCBCR+1, boolToBit(cbfCbLeaf))
+		}
+
+		if cbfCr {
+			e.cabac.encodeBin(ctxCBFCBCR+1, boolToBit(cbfCrLeaf))
+		}
+
+		if err := e.codedResidual(qY[i][:], 4, 0, mode); err != nil {
+			return err
+		}
+
+		if cbfCbLeaf {
+			if err := e.residual(qCb[i][:], 3, 1, mode); err != nil {
+				return err
+			}
+		}
+
+		if cbfCrLeaf {
+			if err := e.residual(qCr[i][:], 3, 2, mode); err != nil {
+				return err
+			}
+		}
+	}
+
+	for j := range 2 {
+		for i := range 2 {
+			idx := (y0/16+j)*blocksWide + x0/16 + i
+			e.modes[idx] = mode
+			e.depth[idx] = uint8(d)
+		}
+	}
+
+	return nil
+}
+
+// codedResidual writes cbf_luma and the levels behind it.
+func (e *intraEncoder) codedResidual(coef []int32, log2Size, cIdx, mode int) error {
+	cbf := hasCoefficients(coef)
+	e.cabac.encodeBin(ctxCBFLuma, boolToBit(cbf))
+
+	if !cbf {
 		return nil
 	}
 
-	for y0 := 0; y0 < height; y0 += 64 {
-		for x0 := 0; x0 < width; x0 += 64 {
-			if err := encodeTree(x0, y0, 6, 0); err != nil {
-				return nil, nil, nil, nil, err
-			}
-			cabac.encodeTerminate(boolToBit(x0+64 >= width && y0+64 >= height))
+	return e.residual(coef, log2Size, cIdx, mode)
+}
+
+func (e *intraEncoder) residual(coef []int32, log2Size, cIdx, mode int) error {
+	return encodeResidual(&e.cabac, &e.s, &e.p, coef,
+		residualBlock{log2Size: log2Size, cIdx: cIdx, predModeIntra: mode, intra: true})
+}
+
+// tu8 codes one 8x8 quadrant of a 16x16 coding unit, choosing between one 8x8
+// transform and four 4x4 ones on their coded cost.
+func (e *intraEncoder) tu8(x, y, mode int) lossyTU8Plan {
+	w := e.width
+	idx8 := y/8*(w/8) + x/8
+
+	var idx4 [4]int
+
+	for j := range 2 {
+		for k := range 2 {
+			idx4[j*2+k] = (y/4+j)*(w/4) + x/4 + k
 		}
 	}
 
-	return cabac.bytes(), reconY, reconCb, reconCr, nil
-}
+	var base [8 * 8]uint8
 
-func lossyLumaMode(recon, src []uint8, stride, x, y int) int {
-	var scratch lossyBlockScratch
+	for j := range 8 {
+		copy(base[j*8:], e.recon[0][(y+j)*w+x:][:8])
+	}
 
-	return lossyLumaModeWithScratch(recon, src, stride, x, y, &scratch)
-}
+	base8 := e.coded8[idx8]
 
-func lossyLumaModeWithScratch(recon, src []uint8, stride, x, y int, scratch *lossyBlockScratch) int {
-	return lossyLumaModeCodedWithScratch(recon, src, stride, x, y, nil, 26, scratch)
-}
+	var base4 [4]uint8
 
-func lossyLumaModeCodedWithScratch(recon, src []uint8, stride, x, y int, coded []uint8,
-	qp int, scratch *lossyBlockScratch,
-) int {
-	bestMode, bestDist := intraPlanar, int64(-1)
-	for mode := intraPlanar; mode <= 34; mode++ {
-		_, trial := lossyBlockDataWithScratch(recon, src, stride, x, y, 16, mode, 0, coded, qp, false, false, scratch)
-		var dist int64
-		for j := range 16 {
-			for i := range 16 {
-				d := int64(src[(y+j)*stride+x+i]) - int64(trial[j*16+i])
-				dist += d * d
-			}
+	for j, idx := range idx4 {
+		base4[j] = e.coded4[idx]
+	}
+
+	restore := func() {
+		for j := range 8 {
+			copy(e.recon[0][(y+j)*w+x:][:8], base[j*8:])
 		}
-		if bestDist < 0 || dist < bestDist {
-			bestMode, bestDist = mode, dist
+
+		e.coded8[idx8] = base8
+
+		for j, idx := range idx4 {
+			e.coded4[idx] = base4[j]
 		}
 	}
-	return bestMode
+
+	quarters := [4]lossyBlock{}
+	for j := range 4 {
+		quarters[j] = lossyBlock{x: x + j&1*4, y: y + j>>1*4, n: 4, mode: mode,
+			coded: e.coded4, dst: true}
+	}
+
+	whole := lossyBlock{x: x, y: y, n: 8, mode: mode, coded: e.coded8}
+
+	split := lossyTU8Plan{split: true}
+
+	for j := range 4 {
+		copy(split.y[j][:], e.codeBlock(quarters[j], false))
+	}
+
+	splitDist := e.distortion(0, x, y, 8, e.recon[0][y*w+x:], w)
+
+	restore()
+
+	var unsplit lossyTU8Plan
+
+	copy(unsplit.y8[:], e.codeBlock(whole, false))
+
+	unsplitDist := e.distortion(0, x, y, 8, e.recon[0][y*w+x:], w)
+
+	chosen := split
+	if unsplitDist+e.lambda*e.tu8Rate(&unsplit, mode) <=
+		splitDist+e.lambda*e.tu8Rate(&split, mode) {
+		chosen = unsplit
+	}
+
+	restore()
+
+	if chosen.split {
+		for j := range 4 {
+			copy(chosen.y[j][:], e.codeBlock(quarters[j], true))
+		}
+	} else {
+		copy(chosen.y8[:], e.codeBlock(whole, true))
+	}
+
+	e.coded8[idx8] = 1
+
+	for _, idx := range idx4 {
+		e.coded4[idx] = 1
+	}
+
+	copy(chosen.cb[:], e.codeBlock(lossyBlock{cIdx: 1, x: x / 2, y: y / 2, n: 4, mode: mode,
+		coded: e.coded8}, true))
+	copy(chosen.cr[:], e.codeBlock(lossyBlock{cIdx: 2, x: x / 2, y: y / 2, n: 4, mode: mode,
+		coded: e.coded8}, true))
+	chosen.cbfCb = hasCoefficients(chosen.cb[:])
+	chosen.cbfCr = hasCoefficients(chosen.cr[:])
+
+	return chosen
 }
 
-func lossyLumaModeRDOWithScratch(recon, src []uint8, stride, x, y int, coded []uint8, cand [3]int,
-	cabac *cabacWriter, qp int, scratch *lossyBlockScratch,
-) int {
+func (e *intraEncoder) markCoded(x, y, size int) {
+	for j := range size / 8 {
+		for i := range size / 8 {
+			e.coded8[(y/8+j)*(e.width/8)+x/8+i] = 1
+		}
+	}
+
+	for j := range size / 4 {
+		for i := range size / 4 {
+			e.coded4[(y/4+j)*(e.width/4)+x/4+i] = 1
+		}
+	}
+}
+
+// lumaMode picks the intra mode of a 16x16 block: all 35 are coded for their
+// distortion, and the four closest are costed again with their bits.
+func (e *intraEncoder) lumaMode(x, y int, cand [3]int) int {
+	b := lossyBlock{x: x, y: y, n: 16, coded: e.depth}
+	e.prepareRef(b)
+
 	bestModes := [4]int{intraPlanar, intraPlanar, intraPlanar, intraPlanar}
 	bestDist := [4]int64{1<<63 - 1, 1<<63 - 1, 1<<63 - 1, 1<<63 - 1}
+
 	for mode := intraPlanar; mode <= 34; mode++ {
-		_, trial := lossyBlockDataWithScratch(recon, src, stride, x, y, 16, mode, 0, coded, qp, false, false, scratch)
-		var dist int64
-		for j := range 16 {
-			for i := range 16 {
-				d := int64(src[(y+j)*stride+x+i]) - int64(trial[j*16+i])
-				dist += d * d
-			}
-		}
+		b.mode = mode
+		_, trial := e.blockData(b, false)
+		dist := e.distortion(0, x, y, 16, trial, 16)
+
 		for i := range bestModes {
 			if dist >= bestDist[i] {
 				continue
 			}
+
 			copy(bestModes[i+1:], bestModes[i:len(bestModes)-1])
 			copy(bestDist[i+1:], bestDist[i:len(bestDist)-1])
 			bestModes[i], bestDist[i] = mode, dist
+
 			break
 		}
 	}
+
 	bestMode, bestCost := bestModes[0], int64(-1)
-	lambda := lossyLambda(qp)
+
 	for i, mode := range bestModes {
-		coef, _ := lossyBlockDataWithScratch(recon, src, stride, x, y, 16, mode, 0, coded, qp, false, false, scratch)
-		cost := bestDist[i] + lambda*lossyModeRate(cabac, cand, mode, coef, scratch)
+		b.mode = mode
+		coef, _ := e.blockData(b, false)
+
+		cost := bestDist[i] + e.lambda*e.modeRate(cand, mode, coef)
 		if bestCost < 0 || cost < bestCost {
 			bestMode, bestCost = mode, cost
 		}
@@ -429,61 +516,183 @@ func lossyLumaModeRDOWithScratch(recon, src []uint8, stride, x, y int, coded []u
 	return bestMode
 }
 
-func lossyModeRate(cabac *cabacWriter, cand [3]int, mode int, coef []int32, scratch *lossyBlockScratch) int64 {
-	bits := putBits{data: scratch.rate[:0]}
-	w := *cabac
+// modeRate is what one mode costs in bits, coded into a copy of the arithmetic
+// coder so the real one is untouched.
+func (e *intraEncoder) modeRate(cand [3]int, mode int, coef []int32) int64 {
+	bits := putBits{data: e.scratch.rate[:0]}
+	w := e.cabac
 	w.bits = &bits
+
 	lossyIntraLumaMode(&w, mode, cand)
+
 	cbf := hasCoefficients(coef)
 	w.encodeBin(ctxCBFLuma, boolToBit(cbf))
+
 	if cbf {
-		_ = encodeResidual(&w, &sps{chromaFormatIDC: 1}, &pps{signDataHidingEnabled: true}, nil, coef,
-			residualBlock{log2Size: 4, predModeIntra: mode, intra: true}, &[4]uint8{})
-	}
-	w.encodeTerminate(1)
-	if bits.nbits == 0 {
-		return int64(len(bits.data) * 8)
+		_ = encodeResidual(&w, &e.s, &e.p, coef,
+			residualBlock{log2Size: 4, predModeIntra: mode, intra: true})
 	}
 
-	return int64((len(bits.data)-1)*8 + int(bits.nbits))
+	w.encodeTerminate(1)
+
+	return int64(bits.count())
 }
 
-func lossyTU8Rate(cabac *cabacWriter, plan *lossyTU8Plan, mode int, scratch *lossyBlockScratch) int64 {
-	bits := putBits{data: scratch.rate[:0]}
-	w := *cabac
+func (e *intraEncoder) tu8Rate(plan *lossyTU8Plan, mode int) int64 {
+	bits := putBits{data: e.scratch.rate[:0]}
+	w := e.cabac
 	w.bits = &bits
+
 	w.encodeBin(ctxSplitTransformFlag+2, boolToBit(plan.split))
+
 	if plan.split {
 		for i := range plan.y {
-			cbf := hasCoefficients(plan.y[i][:])
-			w.encodeBin(ctxCBFLuma, boolToBit(cbf))
-			if cbf {
-				_ = encodeResidual(&w, &sps{chromaFormatIDC: 1}, &pps{signDataHidingEnabled: true}, nil, plan.y[i][:],
-					residualBlock{log2Size: 2, predModeIntra: mode, intra: true}, &[4]uint8{})
-			}
+			e.rateResidual(&w, plan.y[i][:], 2, mode)
 		}
 	} else {
-		cbf := hasCoefficients(plan.y8[:])
-		w.encodeBin(ctxCBFLuma, boolToBit(cbf))
-		if cbf {
-			_ = encodeResidual(&w, &sps{chromaFormatIDC: 1}, &pps{signDataHidingEnabled: true}, nil, plan.y8[:],
-				residualBlock{log2Size: 3, predModeIntra: mode, intra: true}, &[4]uint8{})
-		}
-	}
-	w.encodeTerminate(1)
-	if bits.nbits == 0 {
-		return int64(len(bits.data) * 8)
+		e.rateResidual(&w, plan.y8[:], 3, mode)
 	}
 
-	return int64((len(bits.data)-1)*8 + int(bits.nbits))
+	w.encodeTerminate(1)
+
+	return int64(bits.count())
 }
 
+func (e *intraEncoder) rateResidual(w *cabacWriter, coef []int32, log2Size, mode int) {
+	cbf := hasCoefficients(coef)
+	w.encodeBin(ctxCBFLuma, boolToBit(cbf))
+
+	if cbf {
+		_ = encodeResidual(w, &e.s, &e.p, coef,
+			residualBlock{log2Size: log2Size, predModeIntra: mode, intra: true})
+	}
+}
+
+// distortion is the squared error between the source and block, which is a
+// trial reconstruction or a window on the picture reconstruction.
+func (e *intraEncoder) distortion(cIdx, x, y, n int, block []uint8, blockStride int) int64 {
+	stride := e.stride(cIdx)
+	src := e.src[cIdx]
+
+	var dist int64
+
+	for j := range n {
+		for i := range n {
+			d := int64(src[(y+j)*stride+x+i]) - int64(block[j*blockStride+i])
+			dist += d * d
+		}
+	}
+
+	return dist
+}
+
+// codeBlock codes one transform block and writes its reconstruction back.
+func (e *intraEncoder) codeBlock(b lossyBlock, rdoq bool) []int32 {
+	e.prepareRef(b)
+	coef, block := e.blockData(b, rdoq)
+
+	stride := e.stride(b.cIdx)
+	for j := range b.n {
+		copy(e.recon[b.cIdx][(b.y+j)*stride+b.x:], block[j*b.n:(j+1)*b.n])
+	}
+
+	b.coded[b.y/b.n*(stride/b.n)+b.x/b.n] = 1
+
+	return coef
+}
+
+// blockData predicts, transforms, quantises and reconstructs one block against
+// the reference samples prepareRef has already built.
+func (e *intraEncoder) blockData(b lossyBlock, rdoq bool) ([]int32, []uint8) {
+	n := b.n
+	count := n * n
+	stride := e.stride(b.cIdx)
+	qp := e.blockQP(b.cIdx)
+
+	pred := e.scratch.pred[:count]
+	residual := e.scratch.residual[:count]
+	coef := e.scratch.coef[:count]
+	reconCoef := e.scratch.reconCoef[:count]
+
+	e.scratch.ref.copyFrom(&e.scratch.base)
+	filterRef(&e.scratch.ref, b.mode, b.cIdx, 8, &e.s)
+	intraPredict(pred, 0, n, &e.scratch.ref, b.mode, b.cIdx, 8)
+
+	src := e.src[b.cIdx]
+
+	for j := range n {
+		for i := range n {
+			residual[j*n+i] = int32(src[(b.y+j)*stride+b.x+i]) - int32(pred[j*n+i])
+		}
+	}
+
+	if b.dst {
+		forwardTransformDST4(reconCoef, residual, 8)
+	} else {
+		forwardTransform(reconCoef, residual, n, 8)
+	}
+
+	quantize(coef, reconCoef, n, qp, 8)
+
+	if rdoq {
+		terminalRDOQ(reconCoef, coef, n, b.mode, b.cIdx, qp)
+	}
+
+	normalizeSignDataHiding(coef, n, b.mode, b.cIdx)
+
+	copy(reconCoef, coef)
+	dequant(reconCoef, nil, n, qp, 8, false)
+	inverseTransform(reconCoef, n, b.dst, 8, false, &e.scratch.transform)
+	addResidual(pred, n, 0, 0, n, residualShiftBits(8, false), reconCoef, 8)
+
+	return coef, pred
+}
+
+// prepareRef builds the reference samples of 8.4.4.2.2, which do not depend on
+// the prediction mode.
+func (e *intraEncoder) prepareRef(b lossyBlock) {
+	n, stride := b.n, e.stride(b.cIdx)
+	recon := e.recon[b.cIdx]
+	avail := e.scratch.avail[:4*n+1]
+	clear(avail)
+
+	e.scratch.base.n = n
+	blocksWide := stride / n
+	rows := len(recon) / stride
+
+	for i := range 4*n + 1 {
+		var nx, ny int
+
+		switch {
+		case i < 2*n:
+			nx, ny = b.x-1, b.y+2*n-1-i
+		case i == 2*n:
+			nx, ny = b.x-1, b.y-1
+		default:
+			nx, ny = b.x+i-2*n-1, b.y-1
+		}
+
+		if nx < 0 || ny < 0 || nx >= stride || ny >= rows ||
+			b.coded[ny/n*blocksWide+nx/n] == 0 {
+			continue
+		}
+
+		e.scratch.base.s[i] = int32(recon[ny*stride+nx])
+		avail[i] = true
+	}
+
+	e.scratch.base.substitute(avail, 8)
+}
+
+// lossyLambda weights bits against squared error, doubling every three QP.
 func lossyLambda(qp int) int64 {
 	shift := max(qp-12, 0) / 3
 
 	return max(int64(1), int64(9<<shift)/16)
 }
 
+// terminalRDOQ drops a lone trailing coefficient whose error costs less than
+// its bits.
 func terminalRDOQ(raw, level []int32, n, mode, cIdx, qp int) {
 	scanIdx := scanIndex(log2(n), cIdx, mode, true, 1)
 	sbScan := scanOrder[log2(n)-2][scanIdx]
@@ -496,6 +705,7 @@ func terminalRDOQ(raw, level []int32, n, mode, cIdx, qp int) {
 			if level[index] == 0 {
 				continue
 			}
+
 			prevSB = lastSB
 			lastSB, lastPos = i, k
 		}
@@ -509,210 +719,92 @@ func terminalRDOQ(raw, level []int32, n, mode, cIdx, qp int) {
 	if last.x == 0 && last.y == 0 {
 		return
 	}
+
 	lastSBPos := sbScan[lastSB]
+
 	index := ((int(lastSBPos.y)<<2)+int(last.y))*n + (int(lastSBPos.x) << 2) + int(last.x)
 	if absLevel(level[index]) != 1 {
 		return
 	}
 
 	v := int64(raw[index])
-	distortion := (v*v + 511) >> 9
-	if distortion <= lossyLambda(qp)*2 {
+	if distortion := (v*v + 511) >> 9; distortion <= lossyLambda(qp)*2 {
 		level[index] = 0
 	}
 }
 
-func lossyBlock(recon, src []uint8, stride, x, y, n, mode, cIdx int) []int32 {
-	var scratch lossyBlockScratch
-
-	return lossyBlockWithScratch(recon, src, stride, x, y, n, mode, cIdx, &scratch)
-}
-
-func lossyBlockWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx int,
-	scratch *lossyBlockScratch,
-) []int32 {
-	return lossyBlockCodedWithScratch(recon, src, stride, x, y, n, mode, cIdx, nil, 26, scratch)
-}
-
-func lossyBlockCodedWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx int, coded []uint8,
-	qp int, scratch *lossyBlockScratch,
-) []int32 {
-	return lossyBlockTransformCodedWithScratch(recon, src, stride, x, y, n, mode, cIdx, coded, qp, false, true, scratch)
-}
-
-func lossyBlockTransformCodedWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx int, coded []uint8,
-	qp int, dst, rdoq bool, scratch *lossyBlockScratch,
-) []int32 {
-	coef, block := lossyBlockDataWithScratch(recon, src, stride, x, y, n, mode, cIdx, coded, qp, dst, rdoq, scratch)
-	for j := range n {
-		copy(recon[(y+j)*stride+x:], block[j*n:(j+1)*n])
-	}
-	if coded != nil {
-		coded[y/n*(stride/n)+x/n] = 1
-	}
-	return coef
-}
-
-type lossyBlockScratch struct {
-	pred                      []uint8
-	avail                     []bool
-	residual, coef, reconCoef []int32
-	rate                      [512]byte
-	ref                       refSamples
-	transform                 transformScratch
-}
-
-type lossyTU8Plan struct {
-	split        bool
-	y            [4][4 * 4]int32
-	y8           [8 * 8]int32
-	cb, cr       [4 * 4]int32
-	cbfCb, cbfCr bool
-}
-
-func lossyBlockDataWithScratch(recon, src []uint8, stride, x, y, n, mode, cIdx int,
-	coded []uint8, qp int, dst, rdoq bool,
-	scratch *lossyBlockScratch,
-) ([]int32, []uint8) {
-	count := n * n
-	if cap(scratch.pred) < count {
-		scratch.pred = make([]uint8, count)
-	}
-	if cap(scratch.avail) < 4*n+1 {
-		scratch.avail = make([]bool, 4*n+1)
-	}
-	if cap(scratch.residual) < count {
-		scratch.residual = make([]int32, count)
-	}
-	if cap(scratch.coef) < count {
-		scratch.coef = make([]int32, count)
-	}
-	if cap(scratch.reconCoef) < count {
-		scratch.reconCoef = make([]int32, count)
-	}
-
-	pred := scratch.pred[:count]
-	avail := scratch.avail[:4*n+1]
-	residual := scratch.residual[:count]
-	coef := scratch.coef[:count]
-	reconCoef := scratch.reconCoef[:count]
-
-	lossyPrediction(recon, stride, x, y, n, mode, cIdx, coded, pred, avail, &scratch.ref)
-	for j := range n {
-		for i := range n {
-			residual[j*n+i] = int32(src[(y+j)*stride+x+i]) - int32(pred[j*n+i])
-		}
-	}
-
-	rawCoef := reconCoef
-	if dst {
-		forwardTransformDST4(rawCoef, residual, 8)
-	} else {
-		forwardTransform(rawCoef, residual, n, 8)
-	}
-	quantize(coef, rawCoef, n, qp, 8)
-	if rdoq {
-		terminalRDOQ(rawCoef, coef, n, mode, cIdx, qp)
-	}
-	normalizeSignDataHiding(coef, n, mode, cIdx)
-
-	copy(reconCoef, coef)
-	dequant(reconCoef, nil, n, qp, 8, false)
-	inverseTransform(reconCoef, n, dst, 8, false, &scratch.transform)
-	addResidual(pred, n, 0, 0, n, residualShiftBits(8, false), reconCoef, 8)
-
-	return coef, pred
-}
-
+// normalizeSignDataHiding gives every sub-block the parity 7.4.9.11 infers the
+// sign of its first coefficient from.
 func normalizeSignDataHiding(coef []int32, n, mode, cIdx int) {
 	scanIdx := scanIndex(log2(n), cIdx, mode, true, 1)
 	sbScan := scanOrder[log2(n)-2][scanIdx]
 	coeffScan := scanOrder[2][scanIdx]
 
+	var off [numSbCoeff]int
+
+	for k, pos := range coeffScan {
+		off[k] = int(pos.y)*n + int(pos.x)
+	}
+
 	for _, sb := range sbScan {
 		firstSig, lastSig := -1, -1
+		base := (int(sb.y)*n + int(sb.x)) << 2
+
 		var sumAbs int32
-		for k, pos := range coeffScan {
-			index := ((int(sb.y)<<2)+int(pos.y))*n + (int(sb.x) << 2) + int(pos.x)
-			level := coef[index]
+
+		for k := range numSbCoeff {
+			level := coef[base+off[k]]
 			if level == 0 {
 				continue
 			}
+
 			if firstSig < 0 {
 				firstSig = k
 			}
+
 			lastSig = k
 			sumAbs += absLevel(level)
 		}
+
 		if lastSig-firstSig <= 3 {
 			continue
 		}
 
-		pos := coeffScan[firstSig]
-		index := ((int(sb.y)<<2)+int(pos.y))*n + (int(sb.x) << 2) + int(pos.x)
+		index := base + off[firstSig]
+
 		negative := coef[index] < 0
 		if (sumAbs&1 != 0) == negative {
 			continue
 		}
-		if absLevel(coef[index]) > 1 {
-			if negative {
-				coef[index]++
-			} else {
-				coef[index]--
-			}
-		} else if negative {
+
+		switch {
+		case absLevel(coef[index]) > 1 && negative:
+			coef[index]++
+		case absLevel(coef[index]) > 1:
 			coef[index]--
-		} else {
+		case negative:
+			coef[index]--
+		default:
 			coef[index]++
 		}
 	}
 }
 
-func lossyPrediction(recon []uint8, stride, x, y, n, mode, cIdx int, coded []uint8, out []uint8, avail []bool,
-	ref *refSamples,
-) {
-	ref.n = n
-	clear(avail)
-	blocksWide := stride / n
-	block := y/n*blocksWide + x/n
-	for i := range 4*n + 1 {
-		var nx, ny int
-		switch {
-		case i < 2*n:
-			nx, ny = x-1, y+2*n-1-i
-		case i == 2*n:
-			nx, ny = x-1, y-1
-		default:
-			nx, ny = x+i-2*n-1, y-1
-		}
-
-		ok := nx >= 0 && ny >= 0 && nx < stride && ny < len(recon)/stride
-		if ok {
-			if coded != nil {
-				ok = coded[ny/n*blocksWide+nx/n] != 0
-			} else {
-				ok = ny/n*blocksWide+nx/n < block
-			}
-		}
-		if ok {
-			ref.s[i] = int32(recon[ny*stride+nx])
-			avail[i] = true
-		}
-	}
-	ref.substitute(avail, 8)
-	filterRef(ref, mode, cIdx, 8, &sps{chromaFormatIDC: 1})
-	intraPredict(out, 0, n, ref, mode, cIdx, 8)
-}
-
+// lossyMPM is the candidate list of 8.4.2. A block on the top edge of its
+// coding tree block has no candidate above it.
 func lossyMPM(modes []int, blocksWide, x, y, ctbBlocks int) [3]int {
 	candA, candB := intraDC, intraDC
+
 	if x > 0 {
 		candA = modes[y*blocksWide+x-1]
 	}
+
 	if y > 0 && y%ctbBlocks != 0 {
 		candB = modes[(y-1)*blocksWide+x]
 	}
+
 	var cand [3]int
+
 	switch {
 	case candA == candB && candA < 2:
 		cand = [3]int{intraPlanar, intraDC, intraVer}
@@ -720,6 +812,7 @@ func lossyMPM(modes []int, blocksWide, x, y, ctbBlocks int) [3]int {
 		cand = [3]int{candA, 2 + (candA+29)%32, 2 + (candA-2+1)%32}
 	default:
 		cand[0], cand[1] = candA, candB
+
 		switch {
 		case candA != intraPlanar && candB != intraPlanar:
 			cand[2] = intraPlanar
@@ -729,6 +822,7 @@ func lossyMPM(modes []int, blocksWide, x, y, ctbBlocks int) [3]int {
 			cand[2] = intraVer
 		}
 	}
+
 	return cand
 }
 
@@ -737,29 +831,29 @@ func lossyIntraLumaMode(w *cabacWriter, mode int, cand [3]int) {
 		if mode != m {
 			continue
 		}
+
 		w.encodeBin(ctxPrevIntraLumaPredFlag, 1)
+
 		if i == 0 {
 			w.encodeBypass(0)
 		} else {
 			w.encodeBypass(1)
 			w.encodeBypass(uint32(i - 1))
 		}
+
 		return
 	}
+
 	w.encodeBin(ctxPrevIntraLumaPredFlag, 0)
-	for i := 0; i < len(cand); i++ {
-		for j := i + 1; j < len(cand); j++ {
-			if cand[j] < cand[i] {
-				cand[i], cand[j] = cand[j], cand[i]
-			}
-		}
-	}
+
 	rem := mode
+
 	for _, m := range cand {
 		if mode > m {
 			rem--
 		}
 	}
+
 	w.encodeBypassBits(uint32(rem), 5)
 }
 

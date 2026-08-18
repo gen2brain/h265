@@ -150,7 +150,7 @@ func TestEncodeLossyIntraIDR(t *testing.T) {
 	cb := src[width*height : width*height*5/4]
 	cr := src[width*height*5/4:]
 
-	nals, err := encodeIntraLossy(y, cb, cr, width, height)
+	nals, err := encodeIntraLossyQP(y, cb, cr, width, height, 26)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,16 +206,18 @@ func TestEncodeLossyIntraModes(t *testing.T) {
 				}
 			}
 
-			recon := make([]byte, len(y))
-			first := lossyLumaMode(recon, y, width, 0, 0)
-			lossyBlock(recon, y, width, 0, 0, 16, first, 0)
-			mode := lossyLumaMode(recon, y, width, 16, 0)
+			var e intraEncoder
+			e.reset(y, cb, cr, width, height, 26)
+			first := e.lumaMode(0, 0, lossyMPM(e.modes, width/16, 0, 0, 4))
+			e.codeBlock(lossyBlock{x: 0, y: 0, n: 16, mode: first, coded: e.depth}, true)
+			e.modes[0], e.depth[0] = first, 2
+			mode := e.lumaMode(16, 0, lossyMPM(e.modes, width/16, 1, 0, 4))
 			if mode == intraDC {
 				t.Fatal("gradient selected DC")
 			}
 			modes[mode] = true
 
-			nals, err := encodeIntraLossy(y, cb, cr, width, height)
+			nals, err := encodeIntraLossyQP(y, cb, cr, width, height, 26)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -253,7 +255,7 @@ func TestEncodeLossyIntraTransformChoice(t *testing.T) {
 		cb[i] = 112
 		cr[i] = 144
 	}
-	nals, err := encodeIntraLossy(y, cb, cr, width, height)
+	nals, err := encodeIntraLossyQP(y, cb, cr, width, height, 26)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,10 +279,7 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 
 	y, cb, cr := lossyTestFrame(width, height)
 
-	rbsp, wantY, wantCb, wantCr, err := lossySliceRecon(y, cb, cr, width, height)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rbsp, recon := encodeRecon(t, y, cb, cr, width, height, 26)
 
 	h := encoderHeaders{
 		width: width, height: height, levelIDC: pcmLevelIDC(width * height), deblockingDisabled: true,
@@ -327,7 +326,7 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 	if got := d.ctuPrev.cuDepth[d.ctuPrev.tbIndex(0, 0)]; got != 1 {
 		t.Fatalf("CU depth = %d, want 1", got)
 	}
-	want := append(append(append([]byte{}, wantY...), wantCb...), wantCr...)
+	want := append(append(append([]byte{}, recon[0]...), recon[1]...), recon[2]...)
 	if got := planarYUV(pics[0]); !bytes.Equal(got, want) {
 		for i := range want {
 			if got[i] != want[i] {
@@ -338,36 +337,46 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 }
 
 func TestLossyTU8Rate(t *testing.T) {
-	var bits putBits
-	var w cabacWriter
-	w.init(&bits, 26, sliceI, false)
-	before := w
+	e := new(intraEncoder)
+	e.reset(make([]byte, 16*16), make([]byte, 8*8), make([]byte, 8*8), 16, 16, 26)
+	before := e.cabac
 	plan := lossyTU8Plan{split: true}
 	plan.y[0][0] = 1
-	var scratch lossyBlockScratch
 
-	if rate := lossyTU8Rate(&w, &plan, intraPlanar, &scratch); rate <= 0 {
+	if rate := e.tu8Rate(&plan, intraPlanar); rate <= 0 {
 		t.Fatalf("rate = %d", rate)
 	}
-	if w != before {
+	if e.cabac != before {
 		t.Fatal("CABAC state changed")
 	}
 	if allocs := testing.AllocsPerRun(100, func() {
-		lossyTU8Rate(&w, &plan, intraPlanar, &scratch)
+		e.tu8Rate(&plan, intraPlanar)
 	}); allocs != 0 {
 		t.Fatalf("allocations = %f", allocs)
 	}
+}
+
+// encodeRecon codes a picture and hands back the reconstruction the encoder
+// built, which is what a decoder must reproduce sample for sample.
+func encodeRecon(t *testing.T, y, cb, cr []uint8, width, height, qp int) ([]byte, [3][]uint8) {
+	t.Helper()
+
+	var e intraEncoder
+
+	rbsp, err := e.slice(y, cb, cr, width, height, qp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return rbsp, e.recon
 }
 
 func TestEncodeLossyIntraExternal(t *testing.T) {
 	const width, height = 48, 48
 
 	y, cb, cr := lossyTestFrame(width, height)
-	_, wantY, wantCb, wantCr, err := lossySliceRecon(y, cb, cr, width, height)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nals, err := encodeIntraLossy(y, cb, cr, width, height)
+	_, recon := encodeRecon(t, y, cb, cr, width, height, 26)
+	nals, err := encodeIntraLossyQP(y, cb, cr, width, height, 26)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +385,7 @@ func TestEncodeLossyIntraExternal(t *testing.T) {
 	if err := os.WriteFile(stream, MarshalAnnexB(nals), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	want := append(append(append([]byte{}, wantY...), wantCb...), wantCr...)
+	want := append(append(append([]byte{}, recon[0]...), recon[1]...), recon[2]...)
 
 	for _, tool := range []string{"dec265", "ffmpeg"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -418,10 +427,7 @@ func TestEncodeLossyIntraQP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, wantY, wantCb, wantCr, err := lossySliceReconQP(y, cb, cr, width, height, qp)
-			if err != nil {
-				t.Fatal(err)
-			}
+			_, recon := encodeRecon(t, y, cb, cr, width, height, qp)
 
 			var d Decoder
 			for _, nal := range nals {
@@ -433,7 +439,7 @@ func TestEncodeLossyIntraQP(t *testing.T) {
 			if len(pics) != 1 {
 				t.Fatalf("pictures = %d", len(pics))
 			}
-			want := append(append(append([]byte{}, wantY...), wantCb...), wantCr...)
+			want := append(append(append([]byte{}, recon[0]...), recon[1]...), recon[2]...)
 			if got := planarYUV(pics[0]); !bytes.Equal(got, want) {
 				t.Fatal("decoded reconstruction differs")
 			}
@@ -459,10 +465,8 @@ func TestEncodeLossyIntraQualityBaseline(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, reconY, _, _, err := lossySliceReconQP(y, cb, cr, width, height, qp)
-		if err != nil {
-			t.Fatal(err)
-		}
+		_, recon := encodeRecon(t, y, cb, cr, width, height, qp)
+		reconY := recon[0]
 
 		var sse uint64
 		for i := range y {
@@ -544,9 +548,9 @@ func TestEncoder(t *testing.T) {
 	if len(nals) != 4 || nals[3].Type != NALIdrNLP {
 		t.Fatalf("NALs = %+v", nals)
 	}
-	y, _ := packPlane(frame.Y, frame.StrideY, 16, 16)
-	cb, _ := packPlane(frame.Cb, frame.StrideC, 8, 8)
-	cr, _ := packPlane(frame.Cr, frame.StrideC, 8, 8)
+	y, _ := packPlane(nil, frame.Y, frame.StrideY, 16, 16)
+	cb, _ := packPlane(nil, frame.Cb, frame.StrideC, 8, 8)
+	cr, _ := packPlane(nil, frame.Cr, frame.StrideC, 8, 8)
 	want, err := encodeIntraLossyQP(y, cb, cr, 16, 16, 34)
 	if err != nil {
 		t.Fatal(err)
