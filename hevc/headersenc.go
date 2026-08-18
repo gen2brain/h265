@@ -12,6 +12,7 @@ type encoderHeaders struct {
 	signDataHidingEnabled bool
 	ctbLog2               uint8
 	maxTrHierIntra        uint32
+	wavefront             bool
 }
 
 // writeProfileTierLevel is 7.3.3: Main profile, Main tier, progressive frames
@@ -143,7 +144,7 @@ func (h encoderHeaders) pps() []byte {
 	w.bit(0)
 	w.bit(0)
 	w.bit(0)
-	w.bit(0)
+	w.bit(boolToBit(h.wavefront))
 	w.bit(1)
 	w.bit(1)
 	w.bit(0)

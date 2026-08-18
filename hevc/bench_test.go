@@ -132,6 +132,31 @@ func BenchmarkEncodeReal(b *testing.B) {
 	}
 }
 
+// BenchmarkEncodeThreads is the wavefront against itself. It saturates well
+// short of the core count, which is the thing to fix before adding cores.
+func BenchmarkEncodeThreads(b *testing.B) {
+	frame, width, height := benchFrame(b, "realworld_720p.h265")
+
+	for _, threads := range []int{1, 2, 4, 8} {
+		enc, err := NewEncoder(EncoderOptions{Width: width, Height: height})
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		enc.Threads(threads)
+
+		b.Run(fmt.Sprintf("t%d", threads), func(b *testing.B) {
+			b.SetBytes(int64(width * height * 3 / 2))
+
+			for b.Loop() {
+				if _, err := enc.Encode(frame); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkEncodeLossy covers both shapes the coding tree takes: 128x128 is
 // whole coding tree blocks and 176x144 is mostly edges, which is where the
 // 16x16 coding units and the 8x8 transform choice live.

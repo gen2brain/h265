@@ -464,7 +464,22 @@ func TestWriteParameterSets(t *testing.T) {
 	}
 
 	if p.id != 0 || p.spsID != 0 || !p.signDataHidingEnabled || !p.deblockingControlPresen ||
-		p.deblockingDisabled || p.tilesEnabled || p.entropyCodingSync {
+		p.deblockingDisabled || p.tilesEnabled || p.entropyCodingSync ||
+		!p.loopFilterAcrossSlices {
 		t.Fatalf("PPS = %+v", p)
+	}
+
+	// The flags either side of entropy_coding_sync are written positionally,
+	// so each one is read back with the others held where they were.
+	h.wavefront = true
+
+	p, err = parsePPS(h.pps())
+	if err != nil {
+		t.Fatalf("wavefront PPS: %v", err)
+	}
+
+	if !p.entropyCodingSync || p.tilesEnabled || !p.loopFilterAcrossSlices ||
+		!p.deblockingControlPresen || p.deblockingDisabled || !p.signDataHidingEnabled {
+		t.Fatalf("wavefront PPS = %+v", p)
 	}
 }

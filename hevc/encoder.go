@@ -1,6 +1,9 @@
 package hevc
 
-import "errors"
+import (
+	"errors"
+	"runtime"
+)
 
 // ErrInvalidEncodeInput means the frame or the options do not describe
 // something this encoder can code.
@@ -31,9 +34,18 @@ type Encoder struct {
 	width, height int
 	qp            int
 	lossless      bool
+	threads       int
 
 	intra  intraEncoder
 	planes [3][]uint8
+}
+
+// Threads bounds the goroutines coding one picture's rows. Zero and one code
+// serially, and only they leave 9.3.1's synchronisation out of the stream.
+func (e *Encoder) Threads(n int) {
+	if e != nil {
+		e.threads = n
+	}
 }
 
 func NewEncoder(opts EncoderOptions) (*Encoder, error) {
@@ -78,12 +90,14 @@ func (e *Encoder) Encode(frame Frame) ([]NALUnit, error) {
 		return e.pcm()
 	}
 
+	e.intra.threads = e.waveThreads()
+
 	rbsp, err := e.intra.slice(e.planes[0], e.planes[1], e.planes[2], cw, ch, e.qp)
 	if err != nil {
 		return nil, err
 	}
 
-	return lossyNALs(e.width, e.height, rbsp), nil
+	return lossyNALs(e.width, e.height, rbsp, e.intra.wavefront), nil
 }
 
 func (e *Encoder) pcm() ([]NALUnit, error) {
@@ -137,4 +151,16 @@ func padPlane(dst, src []uint8, stride, width, height, paddedW, paddedH int) ([]
 	}
 
 	return out, true
+}
+
+func (e *Encoder) waveThreads() int {
+	if e.threads == 0 {
+		return 1
+	}
+
+	if e.threads < 0 {
+		return runtime.GOMAXPROCS(0)
+	}
+
+	return e.threads
 }

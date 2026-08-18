@@ -1,6 +1,9 @@
 package hevc
 
-import "math"
+import (
+	"math"
+	"slices"
+)
 
 func encodeIntraLossyQP(y, cb, cr []uint8, width, height, qp int) ([]NALUnit, error) {
 	if !validFrame(width, height, len(y), len(cb), len(cr)) || qp < 0 || qp > 51 {
@@ -19,7 +22,7 @@ func encodeIntraLossyQP(y, cb, cr []uint8, width, height, qp int) ([]NALUnit, er
 		return nil, err
 	}
 
-	return lossyNALs(width, height, rbsp), nil
+	return lossyNALs(width, height, rbsp, e.wavefront), nil
 }
 
 // codedSize rounds a picture dimension up to the minimum coding block size,
@@ -33,12 +36,13 @@ func validFrame(width, height, ny, ncb, ncr int) bool {
 		ny == width*height && ncb == width*height/4 && ncr == width*height/4
 }
 
-func lossyNALs(width, height int, rbsp []byte) []NALUnit {
+func lossyNALs(width, height int, rbsp []byte, wavefront bool) []NALUnit {
 	cw, ch := codedSize(width), codedSize(height)
 	h := encoderHeaders{
 		width: cw, height: ch, cropRight: cw - width, cropBottom: ch - height,
 		levelIDC:           pcmLevelIDC(cw * ch),
 		deblockingDisabled: true, ctbLog2: 6, maxTrHierIntra: 2,
+		wavefront: wavefront,
 	}
 
 	return append(h.parameterSets(), NALUnit{Type: NALIdrNLP, RBSP: rbsp})
@@ -69,6 +73,10 @@ type intraEncoder struct {
 	// hint is the last slice's length, so the next one is allocated once
 	// rather than grown into.
 	hint int
+
+	// threads is what the rows may spread over, wavefront whether they may.
+	threads   int
+	wavefront bool
 
 	scratch lossyBlockScratch
 	before  cuState
@@ -155,20 +163,168 @@ type lossyTU8Plan struct {
 func (e *intraEncoder) slice(y, cb, cr []uint8, width, height, qp int) ([]byte, error) {
 	e.reset(y, cb, cr, width, height, qp)
 
-	for y0 := 0; y0 < height; y0 += 64 {
-		for x0 := 0; x0 < width; x0 += 64 {
-			if err := e.tree(x0, y0, 6, 0); err != nil {
-				return nil, err
-			}
+	rows, cols := ctbCount(height), ctbCount(width)
+	e.wavefront = e.threads > 1 && rows > 1 && cols > 1
 
-			e.cabac.encodeTerminate(boolToBit(x0+64 >= width && y0+64 >= height))
+	if e.wavefront {
+		subs, err := e.encodeWavefront(rows, cols, min(e.threads, rows))
+		if err != nil {
+			return nil, err
+		}
+
+		out := e.sliceRBSP(subs)
+		e.hint = len(out) + len(out)/8
+
+		return out, nil
+	}
+
+	subs := make([][]byte, rows)
+
+	var sync [nContexts]uint8
+
+	for k := range rows {
+		e.startRow(k, &sync)
+
+		if err := e.ctbRow(k, rows, cols, &sync); err != nil {
+			return nil, err
+		}
+
+		if e.wavefront {
+			subs[k] = e.cabac.bytes()
 		}
 	}
 
-	out := e.cabac.bytes()
+	if !e.wavefront {
+		subs = [][]byte{e.cabac.bytes()}
+	}
+
+	out := e.sliceRBSP(subs)
 	e.hint = len(out) + len(out)/8
 
 	return out, nil
+}
+
+// sliceRBSP puts the segment header in front of the substreams. 7.4.7.1 counts
+// the entry points in the slice data bytes a decoder sees.
+func (e *intraEncoder) sliceRBSP(subs [][]byte) []byte {
+	var w putBits
+
+	w.bit(1)
+	w.bit(0)
+	w.ue(0)
+	w.ue(uint32(sliceI))
+	w.se(int32(e.qp - 26))
+
+	if e.wavefront {
+		sizes := escapedSizes(subs)
+
+		w.ue(uint32(len(sizes)))
+
+		if len(sizes) > 0 {
+			bits := 1
+			for max := slices.Max(sizes); max>>bits != 0; bits++ {
+			}
+
+			w.ue(uint32(bits - 1))
+
+			for _, n := range sizes {
+				w.bits(uint64(n-1), bits)
+			}
+		}
+	}
+
+	w.rbspTrailingBits()
+
+	out := w.bytes()
+	for _, s := range subs {
+		out = append(out, s...)
+	}
+
+	return out
+}
+
+// escapedSizes is the length of every substream but the last, in the bytes the
+// emulation prevention of 7.3.1.1 leaves. A header ends on a set bit, so the
+// run of zeros never carries into the data.
+func escapedSizes(subs [][]byte) []uint32 {
+	if len(subs) < 2 {
+		return nil
+	}
+
+	out := make([]uint32, len(subs)-1)
+	zeros := 0
+
+	for i, sub := range subs {
+		var n uint32
+
+		for _, b := range sub {
+			if zeros == 2 && b <= 3 {
+				n++
+
+				zeros = 0
+			}
+
+			n++
+
+			if b == 0 {
+				zeros++
+			} else {
+				zeros = 0
+			}
+		}
+
+		if i < len(out) {
+			out[i] = n
+		}
+	}
+
+	return out
+}
+
+// ctbCount is how many coding tree blocks of 64 samples a dimension takes.
+func ctbCount(n int) int { return (n + 63) / 64 }
+
+// startRow begins a substream. Without the wavefront the rows are one stream.
+func (e *intraEncoder) startRow(k int, sync *[nContexts]uint8) {
+	if !e.wavefront {
+		if k == 0 {
+			e.bits = putBits{data: make([]byte, 0, e.hint)}
+			e.cabac.init(&e.bits, int32(e.qp), sliceI, false)
+		}
+
+		return
+	}
+
+	e.bits = putBits{}
+	e.cabac.init(&e.bits, int32(e.qp), sliceI, false)
+
+	// 9.3.1 hands a row the contexts the row above left after its second block.
+	if k > 0 {
+		e.cabac.state = *sync
+	}
+}
+
+// ctbRow codes one row. The end_of_subset_one_bit of 7.3.8.1 closes every row
+// but the last.
+func (e *intraEncoder) ctbRow(k, rows, cols int, sync *[nContexts]uint8) error {
+	for x := range cols {
+		if err := e.tree(x*64, k*64, 6, 0); err != nil {
+			return err
+		}
+
+		last := k == rows-1 && x == cols-1
+		e.cabac.encodeTerminate(boolToBit(last))
+
+		if e.wavefront && x == min(1, cols-1) {
+			*sync = e.cabac.state
+		}
+
+		if e.wavefront && !last && x == cols-1 {
+			e.cabac.encodeTerminate(1)
+		}
+	}
+
+	return nil
 }
 
 func (e *intraEncoder) reset(y, cb, cr []uint8, width, height, qp int) {
@@ -187,13 +343,7 @@ func (e *intraEncoder) reset(y, cb, cr []uint8, width, height, qp int) {
 	e.coded[0] = regrow(e.coded[0], width/4*height/4)
 	e.coded[1] = regrow(e.coded[1], width/8*height/8)
 
-	e.bits = putBits{data: make([]byte, 0, e.hint)}
-	e.bits.bit(1)
-	e.bits.bit(0)
-	e.bits.ue(0)
-	e.bits.ue(uint32(sliceI))
-	e.bits.se(int32(qp - 26))
-	e.bits.rbspTrailingBits()
+	e.bits = putBits{}
 	e.cabac.init(&e.bits, int32(qp), sliceI, false)
 }
 

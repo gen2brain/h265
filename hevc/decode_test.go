@@ -684,16 +684,24 @@ func TestEncodeExternal(t *testing.T) {
 		width, height int
 		qp            int
 		pcm           bool
+		threads       int
 	}{
-		{48, 48, 26, false},
-		{64, 64, 1, false},
-		{80, 48, 51, false},
-		{176, 144, 34, false},
-		{50, 34, 26, false},
-		{130, 98, 30, false},
-		{32, 32, 0, true},
-		{80, 48, 0, true},
-		{66, 18, 0, true},
+		{48, 48, 26, false, 0},
+		{64, 64, 1, false, 0},
+		{80, 48, 51, false, 0},
+		{176, 144, 34, false, 0},
+		{50, 34, 26, false, 0},
+		{130, 98, 30, false, 0},
+		{32, 32, 0, true, 0},
+		{80, 48, 0, true, 0},
+		{66, 18, 0, true, 0},
+
+		// The wavefront needs two rows and two columns of coding tree blocks
+		// before it changes anything, and its entry points are what another
+		// decoder is most likely to disagree with.
+		{192, 192, 26, false, 3},
+		{320, 144, 34, false, 2},
+		{144, 320, 18, false, 4},
 	}
 
 	for _, c := range cases {
@@ -706,10 +714,38 @@ func TestEncodeExternal(t *testing.T) {
 			err  error
 		)
 
-		if c.pcm {
+		switch {
+		case c.pcm:
 			nals, err = encodePCM(y, cb, cr, c.width, c.height)
 			want = append(append(append([]byte{}, y...), cb...), cr...)
-		} else {
+
+		case c.threads > 0:
+			enc, e := NewEncoder(EncoderOptions{Width: c.width, Height: c.height, QP: c.qp})
+			if e != nil {
+				t.Fatal(e)
+			}
+
+			enc.Threads(c.threads)
+
+			nals, err = enc.Encode(Frame{Y: y, Cb: cb, Cr: cr,
+				StrideY: c.width, StrideC: c.width / 2})
+
+			if !enc.intra.wavefront {
+				t.Fatalf("%dx%d did not take the wavefront", c.width, c.height)
+			}
+
+			cw := codedSize(c.width)
+			for j := range c.height {
+				want = append(want, enc.intra.recon[0][j*cw:j*cw+c.width]...)
+			}
+
+			for ch := 1; ch < 3; ch++ {
+				for j := range c.height / 2 {
+					want = append(want, enc.intra.recon[ch][j*cw/2:j*cw/2+c.width/2]...)
+				}
+			}
+
+		default:
 			var recon [3][]uint8
 
 			_, recon = encodeRecon(t, y, cb, cr, c.width, c.height, c.qp)
@@ -736,8 +772,12 @@ func TestEncodeExternal(t *testing.T) {
 			}
 
 			name := fmt.Sprintf("%s/%dx%d/qp%d", tool, c.width, c.height, c.qp)
-			if c.pcm {
+
+			switch {
+			case c.pcm:
 				name = fmt.Sprintf("%s/%dx%d/pcm", tool, c.width, c.height)
+			case c.threads > 0:
+				name = fmt.Sprintf("%s/%dx%d/wpp%d", tool, c.width, c.height, c.threads)
 			}
 
 			t.Run(name, func(t *testing.T) {
@@ -755,6 +795,75 @@ func TestEncodeExternal(t *testing.T) {
 					t.Fatalf("decoded %d bytes, want %d", len(got), len(want))
 				}
 			})
+		}
+	}
+}
+
+// TestEncodeWavefront pins the two things the row threading must not change:
+// the stream a given picture codes to, whatever it is spread over, and that
+// the stream is the reconstruction the encoder predicted from.
+func TestEncodeWavefront(t *testing.T) {
+	const width, height = 320, 192
+
+	r := rand.New(rand.NewPCG(51, 52))
+	y, cb, cr := lossyPattern(r, width, height, 3)
+	frame := Frame{Y: y, Cb: cb, Cr: cr, StrideY: width, StrideC: width / 2}
+
+	var first []byte
+
+	for _, threads := range []int{2, 3, 5, 16} {
+		enc, err := NewEncoder(EncoderOptions{Width: width, Height: height, QP: 30})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		enc.Threads(threads)
+
+		nals, err := enc.Encode(frame)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !enc.intra.wavefront {
+			t.Fatal("no wavefront")
+		}
+
+		stream := MarshalAnnexB(nals)
+
+		if first == nil {
+			first = stream
+		} else if !bytes.Equal(stream, first) {
+			t.Fatalf("threads=%d: stream differs", threads)
+		}
+
+		var d Decoder
+
+		var pics []*Picture
+
+		for _, nal := range SplitAnnexB(stream) {
+			out, err := d.DecodeNAL(nal)
+			if err != nil {
+				t.Fatalf("threads=%d: %v", threads, err)
+			}
+
+			pics = append(pics, out...)
+		}
+
+		pics = append(pics, d.Flush()...)
+
+		if len(pics) != 1 {
+			t.Fatalf("threads=%d: %d pictures", threads, len(pics))
+		}
+
+		p := pics[0]
+		cw := codedSize(width)
+
+		for j := range height {
+			for i := range width {
+				if got, want := p.Y[j*p.StrideY+i], enc.intra.recon[0][j*cw+i]; got != want {
+					t.Fatalf("threads=%d: luma %d,%d = %d, want %d", threads, i, j, got, want)
+				}
+			}
 		}
 	}
 }
