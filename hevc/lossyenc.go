@@ -85,6 +85,13 @@ type cuTransform struct {
 	cbfCb, cbfCr bool
 }
 
+// flat reports whether the coding unit took one transform of its own size and
+// left no residual in it.
+func (t *cuTransform) flat() bool {
+	return !t.split && !hasCoefficients(t.y32[:]) &&
+		!hasCoefficients(t.cb32[:]) && !hasCoefficients(t.cr32[:])
+}
+
 // cuState is everything coding one 32x32 block changes, so that an arm of the
 // size decision can be taken back or put back.
 type cuState struct {
@@ -251,6 +258,12 @@ func (e *intraEncoder) cuSize(x0, y0, d int) error {
 
 	if err := e.cu32(x0, y0, d, mode); err != nil {
 		return err
+	}
+
+	// Four coding units cost more syntax than one and cannot predict better than
+	// a block one transform already codes without residual.
+	if e.tu.flat() {
+		return nil
 	}
 
 	whole := e.rdCost(e.cuDistortion(x0, y0, 32), e.cabac.rate-start)
@@ -671,7 +684,7 @@ func (e *intraEncoder) lumaMode(x, y int, cand [3]int) int {
 		filterRef(&e.scratch.ref, mode, 0, 8, &e.s)
 		intraPredict(pred, 0, 16, &e.scratch.ref, mode, 0, 8)
 
-		s := e.satd(x, y, pred, 16)
+		s := e.satd(x, y, pred, 16, score[modeShortlist-1])
 
 		for i := range short {
 			if s >= score[i] {
@@ -704,7 +717,8 @@ func (e *intraEncoder) lumaMode(x, y int, cand [3]int) int {
 // satd is the Hadamard transformed absolute difference between the source and a
 // prediction, over 8x8 at a time. It stands in for what the residual will cost
 // far better than the plain difference does, and for a fraction of coding it.
-func (e *intraEncoder) satd(x, y int, pred []uint8, n int) int64 {
+// The sum only grows, so one that has already reached limit is returned short.
+func (e *intraEncoder) satd(x, y int, pred []uint8, n int, limit int64) int64 {
 	src := e.src[0]
 	stride := e.width
 
@@ -712,6 +726,10 @@ func (e *intraEncoder) satd(x, y int, pred []uint8, n int) int64 {
 
 	for by := 0; by < n; by += 8 {
 		for bx := 0; bx < n; bx += 8 {
+			if sum >= limit {
+				return sum
+			}
+
 			var d [64]int32
 
 			for j := range 8 {

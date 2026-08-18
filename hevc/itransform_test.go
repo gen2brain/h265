@@ -713,8 +713,21 @@ func TestSATD(t *testing.T) {
 		}
 
 		want := int64(n / 8 * (n / 8) * 64 * c)
-		if got := e.satd(0, 0, pred, n); got != want {
+		if got := e.satd(0, 0, pred, n, 1<<62); got != want {
 			t.Fatalf("flat difference of %d: %d, want %d", c, got, want)
+		}
+
+		// A limit may only cut the sum short once it has been reached.
+		if got := e.satd(0, 0, pred, n, want+1); got != want {
+			t.Fatalf("limit above the sum of %d: %d, want %d", c, got, want)
+		}
+
+		if c == 0 {
+			continue
+		}
+
+		if got := e.satd(0, 0, pred, n, want/2); got < want/2 {
+			t.Fatalf("limit of %d cut the sum to %d, below the limit", want/2, got)
 		}
 	}
 }

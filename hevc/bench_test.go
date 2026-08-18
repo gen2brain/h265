@@ -58,6 +58,82 @@ func BenchmarkDecode1080p(b *testing.B) { benchStream(b, "1080p.h265") }
 func BenchmarkDecodeTiles(b *testing.B) { benchStream(b, "tiles.h265") }
 func BenchmarkDecode10Bit(b *testing.B) { benchStream(b, "10bit_128x128.h265") }
 
+// benchFrame decodes the first picture of a stream into the planes an encoder
+// takes, cropped to an even size.
+func benchFrame(b *testing.B, name string) (Frame, int, int) {
+	b.Helper()
+
+	data, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		b.Skip(err)
+	}
+
+	var d Decoder
+
+	var pics []*Picture
+
+	for _, nal := range SplitAnnexB(data) {
+		if len(pics) > 0 {
+			break
+		}
+
+		out, _ := d.DecodeNAL(nal)
+		pics = append(pics, out...)
+	}
+
+	if len(pics) == 0 {
+		pics = d.Flush()
+	}
+
+	if len(pics) == 0 {
+		b.Skipf("%s decoded no pictures", name)
+	}
+
+	p := pics[0]
+	w, h := p.CropW&^1, p.CropH&^1
+
+	f := Frame{
+		Y: make([]byte, w*h), Cb: make([]byte, w*h/4), Cr: make([]byte, w*h/4),
+		StrideY: w, StrideC: w / 2,
+	}
+
+	for j := range h {
+		copy(f.Y[j*w:(j+1)*w], p.Y[(p.CropY+j)*p.StrideY+p.CropX:])
+	}
+
+	for j := range h / 2 {
+		copy(f.Cb[j*w/2:(j+1)*w/2], p.Cb[(p.CropY/2+j)*p.StrideC+p.CropX/2:])
+		copy(f.Cr[j*w/2:(j+1)*w/2], p.Cr[(p.CropY/2+j)*p.StrideC+p.CropX/2:])
+	}
+
+	return f, w, h
+}
+
+// BenchmarkEncodeReal encodes real pictures. The synthetic patterns of
+// BenchmarkEncodeLossy never leave a block without residual and never let a
+// mode search settle, so they hide what the coding decisions cost.
+func BenchmarkEncodeReal(b *testing.B) {
+	for _, name := range []string{"realworld_320x240.h265", "realworld_720p.h265"} {
+		frame, width, height := benchFrame(b, name)
+
+		enc, err := NewEncoder(EncoderOptions{Width: width, Height: height})
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		b.Run(fmt.Sprintf("%dx%d", width, height), func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(width * height * 3 / 2))
+
+			for b.Loop() {
+				if _, err := enc.Encode(frame); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkEncodeLossy covers both shapes the coding tree takes: 128x128 is
 // whole coding tree blocks and 176x144 is mostly edges, which is where the
 // 16x16 coding units and the 8x8 transform choice live.

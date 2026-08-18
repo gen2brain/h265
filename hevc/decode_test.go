@@ -396,6 +396,46 @@ func TestEncodeCUSize(t *testing.T) {
 	}
 }
 
+// TestCUTransformFlat pins both halves of the test the size decision skips the
+// split arm on: no residual, and one transform rather than four.
+func TestCUTransformFlat(t *testing.T) {
+	var tu cuTransform
+
+	if !tu.flat() {
+		t.Fatal("an empty 32x32 transform is not flat")
+	}
+
+	tu.split = true
+
+	if tu.flat() {
+		t.Fatal("four transforms are flat")
+	}
+
+	tu.split = false
+
+	for _, c := range []struct {
+		name  string
+		coef  []int32
+		index int
+	}{
+		{"luma", tu.y32[:], 1023},
+		{"cb", tu.cb32[:], 255},
+		{"cr", tu.cr32[:], 0},
+	} {
+		c.coef[c.index] = 1
+
+		if tu.flat() {
+			t.Fatalf("a %s coefficient is flat", c.name)
+		}
+
+		c.coef[c.index] = 0
+	}
+
+	if !tu.flat() {
+		t.Fatal("cleared again and not flat")
+	}
+}
+
 func TestLossyTU8Rate(t *testing.T) {
 	e := new(intraEncoder)
 	e.reset(make([]byte, 16*16), make([]byte, 8*8), make([]byte, 8*8), 16, 16, 26)
