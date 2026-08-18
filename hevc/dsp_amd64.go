@@ -57,6 +57,9 @@ func predBi8AVX512(dst *uint8, dstStride int, a, b *int16, srcStride, w, h, shif
 func idctCols8AVX2(dst, src, m *int32, n, mstride, shift int, rnd, lo, hi int32)
 
 //go:noescape
+func predAngular8AVX2(dst *uint8, stride int, ref *int32, angle, n int)
+
+//go:noescape
 func satd16x8AVX2(src *uint8, srcStride int, pred *uint8, predStride int) int64
 
 //go:noescape
@@ -206,4 +209,14 @@ func dspInit(d *dspContext) {
 		predPlanar8AVX2(&dst[0], stride, &r.s[2*n+1], &r.s[2*n-1],
 			int(r.top(n)), int(r.left(n)), n, shift)
 	}
+}
+
+func predAngularRows(dst []uint8, stride int, ref []int32, angle, n int) bool {
+	if !hasAVX2 || n < 8 {
+		return false
+	}
+
+	predAngular8AVX2(&dst[0], stride, &ref[0], angle, n)
+
+	return true
 }

@@ -384,6 +384,58 @@ func BenchmarkOdd(b *testing.B) {
 	}
 }
 
+// angularRowsGo is what predAngularRows replaces, written out here because the
+// production one is inlined into predAngular's generic body.
+func angularRowsGo(dst []uint8, stride int, ref []int32, angle, n int) {
+	for b := range n {
+		idx := int(int32(b+1) * int32(angle) >> 5)
+		fact := int32(b+1) * int32(angle) & 31
+		row := ref[idx+1:]
+
+		for a := range n {
+			v := row[a]
+			if fact != 0 {
+				v = ((32-fact)*row[a] + fact*row[a+1] + 16) >> 5
+			}
+
+			dst[b*stride+a] = uint8(v)
+		}
+	}
+}
+
+func BenchmarkPredAngular(b *testing.B) {
+	for _, n := range []int{8, 16, 32} {
+		var ref [3 * 32 * 2]int32
+
+		for i := range ref {
+			ref[i] = int32(i*7919%251 + 3)
+		}
+
+		base := 2 * n
+		dst := make([]uint8, n*n)
+
+		b.Run(fmt.Sprintf("go/%dx%d", n, n), func(b *testing.B) {
+			for b.Loop() {
+				angularRowsGo(dst, n, ref[base:], 9, n)
+			}
+
+			b.ReportMetric(float64(n*n)*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
+		})
+
+		if !predAngularRows(dst, n, ref[base:], 0, n) {
+			continue
+		}
+
+		b.Run(fmt.Sprintf("asm/%dx%d", n, n), func(b *testing.B) {
+			for b.Loop() {
+				predAngularRows(dst, n, ref[base:], 9, n)
+			}
+
+			b.ReportMetric(float64(n*n)*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
+		})
+	}
+}
+
 func BenchmarkPredPlanar(b *testing.B) {
 	for _, n := range []int{8, 16, 32} {
 		var r refSamples

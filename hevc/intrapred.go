@@ -232,22 +232,24 @@ func predAngular[P pixel](dst []P, off, stride int, r *refSamples, mode, cIdx, b
 
 	var ref [3 * 32 * 2]int32
 
+	// The corner sits at 2n in both r.s and ref.
 	base := 2 * n
-
-	set := func(i int, v int32) { ref[base+i] = v }
 
 	vertical := mode >= 18
 
-	main := r.top
-	side := r.left
-
-	if !vertical {
-		main, side = r.left, r.top
+	m := n
+	if angle >= 0 {
+		m = 2 * n
 	}
 
-	set(0, r.corner())
-	for x := 1; x <= n; x++ {
-		set(x, main(x-1))
+	if vertical {
+		copy(ref[base:base+m+1], r.s[base:base+m+1])
+	} else {
+		ref[base] = r.s[base]
+
+		for x := 1; x <= m; x++ {
+			ref[base+x] = r.s[base-x]
+		}
 	}
 
 	if angle < 0 {
@@ -255,20 +257,24 @@ func predAngular[P pixel](dst []P, off, stride int, r *refSamples, mode, cIdx, b
 			inv := intraInvAngle[mode-11]
 
 			for x := -1; x >= lim; x-- {
-				i := (int32(x)*inv + 128) >> 8
-				if i == 0 {
-					set(x, r.corner())
+				i := int((int32(x)*inv + 128) >> 8)
 
-					continue
+				switch {
+				case i == 0:
+					ref[base+x] = r.s[base]
+				case vertical:
+					ref[base+x] = r.s[base-i]
+				default:
+					ref[base+x] = r.s[base+i]
 				}
-
-				set(x, side(int(i)-1))
 			}
 		}
-	} else {
-		for x := n + 1; x <= 2*n; x++ {
-			set(x, main(x-1))
-		}
+	}
+
+	if p, ok := any(dst).([]uint8); ok && predAngular8(p[off:], stride, ref[base:], int(angle), n, vertical) {
+		finishAngular(dst, off, stride, r, mode, cIdx, bitDepth)
+
+		return
 	}
 
 	for b := range n {
@@ -300,6 +306,36 @@ func predAngular[P pixel](dst []P, off, stride int, r *refSamples, mode, cIdx, b
 		}
 	}
 
+	finishAngular(dst, off, stride, r, mode, cIdx, bitDepth)
+}
+
+// predAngular8 runs the kernel. A horizontal mode is the same prediction
+// transposed, so it is taken that way and turned back.
+func predAngular8(dst []uint8, stride int, ref []int32, angle, n int, vertical bool) bool {
+	if vertical {
+		return predAngularRows(dst, stride, ref, angle, n)
+	}
+
+	var tmp [32 * 32]uint8
+
+	if !predAngularRows(tmp[:], n, ref, angle, n) {
+		return false
+	}
+
+	for y := range n {
+		row := dst[y*stride : y*stride+n]
+
+		for x := range row {
+			row[x] = tmp[x*n+y]
+		}
+	}
+
+	return true
+}
+
+// finishAngular is the boundary smoothing of 8.4.4.2.6.
+func finishAngular[P pixel](dst []P, off, stride int, r *refSamples, mode, cIdx, bitDepth int) {
+	n := r.n
 	if cIdx != 0 || n >= 32 {
 		return
 	}

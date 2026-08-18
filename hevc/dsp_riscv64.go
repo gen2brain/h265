@@ -33,6 +33,9 @@ func predBi8RVV(dst *uint8, dstStride int, a, b *int16, srcStride, w, h, shift i
 func idctColsRVV(dst, src, m *int32, n, mstride, shift int, rnd, lo, hi int32)
 
 //go:noescape
+func predAngular8RVV(dst *uint8, stride int, ref *int32, angle, n int)
+
+//go:noescape
 func satd16x8RVV(src *uint8, srcStride int, pred *uint8, predStride int) int64
 
 //go:noescape
@@ -129,4 +132,14 @@ func dspInit(d *dspContext) {
 		predPlanar8RVV(&dst[0], stride, &r.s[2*n+1], &r.s[2*n-1],
 			int(r.top(n)), int(r.left(n)), n, shift)
 	}
+}
+
+func predAngularRows(dst []uint8, stride int, ref []int32, angle, n int) bool {
+	if n < 8 {
+		return false
+	}
+
+	predAngular8RVV(&dst[0], stride, &ref[0], angle, n)
+
+	return true
 }

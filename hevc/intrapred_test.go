@@ -521,3 +521,60 @@ func TestPredPlanarAsm(t *testing.T) {
 		}
 	}
 }
+
+// TestPredAngularAsm holds the kernel to the interpolation it replaces, over
+// every vertical mode and size. A negative angle reads the reference before the
+// corner, which is why ref is sliced out of a whole array.
+func TestPredAngularAsm(t *testing.T) {
+	var probe [3 * 32 * 2]int32
+
+	if !predAngularRows(make([]uint8, 64), 8, probe[16:], 32, 8) {
+		t.Skip("no assembly for this target")
+	}
+
+	rnd := rand.New(rand.NewPCG(31, 32))
+
+	for _, n := range []int{8, 16, 32} {
+		var ref [3 * 32 * 2]int32
+
+		for i := range ref {
+			ref[i] = int32(rnd.IntN(256))
+		}
+
+		base := 2 * n
+
+		for mode := 18; mode <= 34; mode++ {
+			angle := intraPredAngle[mode-2]
+			stride := n + 7
+
+			got := make([]uint8, stride*n)
+			want := make([]uint8, stride*n)
+
+			if !predAngularRows(got, stride, ref[base:], int(angle), n) {
+				t.Fatalf("n=%d mode=%d: kernel declined", n, mode)
+			}
+
+			for b := range n {
+				idx := int(int32(b+1) * angle >> 5)
+				fact := int32(b+1) * angle & 31
+				row := ref[base+idx+1:]
+
+				for a := range n {
+					v := row[a]
+					if fact != 0 {
+						v = ((32-fact)*row[a] + fact*row[a+1] + 16) >> 5
+					}
+
+					want[b*stride+a] = uint8(v)
+				}
+			}
+
+			for i := range got {
+				if got[i] != want[i] {
+					t.Fatalf("n=%d mode=%d: [%d] = %d, want %d",
+						n, mode, i, got[i], want[i])
+				}
+			}
+		}
+	}
+}

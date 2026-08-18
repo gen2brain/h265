@@ -104,3 +104,81 @@ cols:
 	BLT  rows
 
 	RET
+
+// func predAngular8NEON(dst *uint8, stride int, ref *int32, angle, n int)
+//
+// The interpolation of 8.4.4.2.6 for a vertical mode, eight outputs at a time.
+// ref is the corner, and a negative angle reads the n entries before it. The
+// weights sum to 32, so the result is a sample again and needs no clamp, and a
+// zero second weight lands on the sample itself.
+TEXT ·predAngular8NEON(SB), NOSPLIT, $0-40
+	MOVD dst+0(FP), R0
+	MOVD stride+8(FP), R1
+	MOVD ref+16(FP), R2
+	MOVD angle+24(FP), R3
+	MOVD n+32(FP), R4
+
+	MOVD $16, R5
+	VDUP R5, V16.S4
+
+	MOVD $0, R6
+	MOVD R0, R7
+
+rowloop:
+	ADD $1, R6, R8
+	MUL R3, R8, R8
+	ASR $5, R8, R9
+	AND $31, R8, R8
+
+	LSL  $2, R9, R10
+	ADD  R2, R10
+	ADD  $4, R10
+	ADD  $4, R10, R11
+
+	MOVD $32, R12
+	SUB  R8, R12, R12
+	VDUP R12, V17.S4
+	VDUP R8, V18.S4
+
+	MOVD $0, R13
+	MOVD R10, R14
+	MOVD R11, R15
+	MOVD R7, R16
+
+mixloop:
+	VLD1 (R14), [V2.S4, V3.S4]
+	VLD1 (R15), [V4.S4, V5.S4]
+
+	MUL4S(2, 2, 17)
+	MUL4S(3, 3, 17)
+	MUL4S(4, 4, 18)
+	MUL4S(5, 5, 18)
+
+	VADD V4.S4, V2.S4, V2.S4
+	VADD V5.S4, V3.S4, V3.S4
+	VADD V16.S4, V2.S4, V2.S4
+	VADD V16.S4, V3.S4, V3.S4
+
+	VUSHR $5, V2.S4, V2.S4
+	VUSHR $5, V3.S4, V3.S4
+
+	SQXTN4H_(6, 2)
+	SQXTN2_8H_(6, 3)
+	SQXTUN8B_(7, 6)
+
+	VST1 [V7.B8], (R16)
+
+	ADD  $32, R14
+	ADD  $32, R15
+	ADD  $8, R16
+	ADD  $8, R13
+	CMP  R4, R13
+	BLT  mixloop
+
+nextrow:
+	ADD $1, R6
+	ADD R1, R7
+	CMP R4, R6
+	BLT rowloop
+
+	RET

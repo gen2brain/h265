@@ -101,3 +101,68 @@ cols:
 
 	VZEROUPPER
 	RET
+
+// func predAngular8AVX2(dst *uint8, stride int, ref *int32, angle, n int)
+//
+// The interpolation of 8.4.4.2.6 for a vertical mode, eight outputs at a time.
+// ref is the corner, and a negative angle reads the n entries before it. The
+// weights sum to 32, so the result is a sample again and needs no clamp, and a
+// zero second weight lands on the sample itself.
+TEXT ·predAngular8AVX2(SB), NOSPLIT, $0-40
+	MOVQ dst+0(FP), DI
+	MOVQ stride+8(FP), R8
+	MOVQ ref+16(FP), SI
+	MOVQ angle+24(FP), R9
+	MOVQ n+32(FP), CX
+
+	MOVL         $16, AX
+	VMOVD        AX, X15
+	VPBROADCASTD X15, Y15
+
+	XORQ BX, BX
+	MOVQ DI, R12
+
+rowloop:
+	LEAQ  1(BX), AX
+	IMULQ R9, AX
+	MOVQ  AX, DX
+	SARQ  $5, DX
+	ANDQ  $31, AX
+
+	LEAQ 4(SI)(DX*4), R10
+
+	MOVQ         $32, R11
+	SUBQ         AX, R11
+	VMOVD        R11, X0
+	VPBROADCASTD X0, Y0
+	VMOVD        AX, X1
+	VPBROADCASTD X1, Y1
+
+	XORQ R13, R13
+
+mixloop:
+	VMOVDQU (R10)(R13*4), Y2
+	VMOVDQU 4(R10)(R13*4), Y3
+	VPMULLD Y0, Y2, Y2
+	VPMULLD Y1, Y3, Y3
+	VPADDD  Y3, Y2, Y2
+	VPADDD  Y15, Y2, Y2
+	VPSRAD  $5, Y2, Y2
+
+	VPACKSSDW Y2, Y2, Y2
+	VPERMQ    $0x08, Y2, Y2
+	VPACKUSWB X2, X2, X2
+	VMOVQ     X2, (R12)(R13*1)
+
+	ADDQ $8, R13
+	CMPQ R13, CX
+	JLT  mixloop
+
+nextrow:
+	ADDQ R8, R12
+	INCQ BX
+	CMPQ BX, CX
+	JLT  rowloop
+
+	VZEROUPPER
+	RET

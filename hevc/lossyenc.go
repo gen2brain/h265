@@ -66,6 +66,10 @@ type intraEncoder struct {
 	s     sps
 	p     pps
 
+	// hint is the last slice's length, so the next one is allocated once
+	// rather than grown into.
+	hint int
+
 	scratch lossyBlockScratch
 	before  cuState
 	kept    cuState
@@ -152,7 +156,10 @@ func (e *intraEncoder) slice(y, cb, cr []uint8, width, height, qp int) ([]byte, 
 		}
 	}
 
-	return e.cabac.bytes(), nil
+	out := e.cabac.bytes()
+	e.hint = len(out) + len(out)/8
+
+	return out, nil
 }
 
 func (e *intraEncoder) reset(y, cb, cr []uint8, width, height, qp int) {
@@ -171,7 +178,7 @@ func (e *intraEncoder) reset(y, cb, cr []uint8, width, height, qp int) {
 	e.coded[0] = regrow(e.coded[0], width/4*height/4)
 	e.coded[1] = regrow(e.coded[1], width/8*height/8)
 
-	e.bits = putBits{}
+	e.bits = putBits{data: make([]byte, 0, e.hint)}
 	e.bits.bit(1)
 	e.bits.bit(0)
 	e.bits.ue(0)
