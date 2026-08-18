@@ -742,7 +742,7 @@ func (e *intraEncoder) satd(x, y int, pred []uint8, n int, limit int64) int64 {
 			}
 
 			for j := range 8 {
-				hadamard8(d[j*8 : j*8+8])
+				hadamard8((*[8]int32)(d[j*8 : j*8+8]))
 			}
 
 			var col [8]int32
@@ -752,7 +752,7 @@ func (e *intraEncoder) satd(x, y int, pred []uint8, n int, limit int64) int64 {
 					col[j] = d[j*8+i]
 				}
 
-				hadamard8(col[:])
+				hadamard8(&col)
 
 				for j := range 8 {
 					sum += int64(absLevel(col[j]))
@@ -764,7 +764,7 @@ func (e *intraEncoder) satd(x, y int, pred []uint8, n int, limit int64) int64 {
 	return sum
 }
 
-func hadamard8(v []int32) {
+func hadamard8(v *[8]int32) {
 	var t [8]int32
 
 	for i := range 4 {
@@ -923,6 +923,11 @@ func (e *intraEncoder) blockData(b lossyBlock, rdoq bool) ([]int32, []uint8) {
 		e.rdoq(coef, reconCoef, n, qp, b.cIdx, b.mode)
 	} else {
 		quantize(coef, reconCoef, n, qp, 8)
+	}
+
+	// A block that quantised to nothing reconstructs as its own prediction.
+	if !hasCoefficients(coef) {
+		return coef, pred
 	}
 
 	copy(reconCoef, coef)

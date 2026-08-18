@@ -687,8 +687,8 @@ func TestHadamard8(t *testing.T) {
 			want[i] = 8 * v[i]
 		}
 
-		hadamard8(v[:])
-		hadamard8(v[:])
+		hadamard8(&v)
+		hadamard8(&v)
 
 		if v != want {
 			t.Fatalf("twice over gives %v, want %v", v, want)

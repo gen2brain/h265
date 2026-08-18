@@ -234,7 +234,6 @@ func predAngular[P pixel](dst []P, off, stride int, r *refSamples, mode, cIdx, b
 
 	base := 2 * n
 
-	get := func(i int) int32 { return ref[base+i] }
 	set := func(i int, v int32) { ref[base+i] = v }
 
 	vertical := mode >= 18
@@ -275,20 +274,28 @@ func predAngular[P pixel](dst []P, off, stride int, r *refSamples, mode, cIdx, b
 	for b := range n {
 		idx := int(int32(b+1) * angle >> 5)
 		fact := int32(b+1) * angle & 31
+		row := ref[base+idx+1 : base+idx+2+n]
 
-		for a := range n {
-			var v int32
+		switch {
+		case fact == 0 && vertical:
+			out := dst[off+b*stride : off+b*stride+n]
 
-			if fact != 0 {
-				v = ((32-fact)*get(a+idx+1) + fact*get(a+idx+2) + 16) >> 5
-			} else {
-				v = get(a + idx + 1)
+			for a := range out {
+				out[a] = P(row[a])
 			}
+		case fact == 0:
+			for a := range n {
+				dst[off+a*stride+b] = P(row[a])
+			}
+		case vertical:
+			out := dst[off+b*stride : off+b*stride+n]
 
-			if vertical {
-				dst[off+b*stride+a] = P(v)
-			} else {
-				dst[off+a*stride+b] = P(v)
+			for a := range out {
+				out[a] = P(((32-fact)*row[a] + fact*row[a+1] + 16) >> 5)
+			}
+		default:
+			for a := range n {
+				dst[off+a*stride+b] = P(((32-fact)*row[a] + fact*row[a+1] + 16) >> 5)
 			}
 		}
 	}
