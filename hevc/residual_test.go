@@ -579,6 +579,49 @@ func TestEncodeResidualIntraModesRoundTrip(t *testing.T) {
 	}
 }
 
+// hideSigns gives every sub-block the parity 7.4.9.11 infers the sign of its
+// first coefficient from, which a stream coded with sign_data_hiding_enabled
+// has to carry. The encoder leaves the tool off, so this is only here to make
+// input the syntax accepts.
+func hideSigns(coef []int32, n, mode, cIdx int) {
+	sbScan := scanOrder[log2(n)-2][scanIndex(log2(n), cIdx, mode, true, 1)]
+	coeffScan := scanOrder[2][scanIndex(log2(n), cIdx, mode, true, 1)]
+
+	for _, sb := range sbScan {
+		first, last := -1, -1
+		origin := (int(sb.y)*n + int(sb.x)) << 2
+
+		var sum int32
+
+		for k, pos := range coeffScan {
+			level := coef[origin+int(pos.y)*n+int(pos.x)]
+			if level == 0 {
+				continue
+			}
+
+			if first < 0 {
+				first = k
+			}
+
+			last = k
+			sum += absLevel(level)
+		}
+
+		if last-first <= 3 {
+			continue
+		}
+
+		i := origin + int(coeffScan[first].y)*n + int(coeffScan[first].x)
+		if negative := coef[i] < 0; (sum&1 != 0) != negative {
+			if coef[i] < 0 {
+				coef[i]--
+			} else {
+				coef[i]++
+			}
+		}
+	}
+}
+
 func TestEncodeResidualSignDataHidingRoundTrip(t *testing.T) {
 	for _, b := range []residualBlock{
 		{log2Size: 2},
@@ -595,7 +638,7 @@ func TestEncodeResidualSignDataHidingRoundTrip(t *testing.T) {
 				}
 			}
 		}
-		normalizeSignDataHiding(want, n, b.predModeIntra, b.cIdx)
+		hideSigns(want, n, b.predModeIntra, b.cIdx)
 
 		s := sps{chromaFormatIDC: 1}
 		p := pps{signDataHidingEnabled: true}

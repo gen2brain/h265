@@ -38,7 +38,7 @@ func lossyNALs(width, height int, rbsp []byte) []NALUnit {
 	h := encoderHeaders{
 		width: cw, height: ch, cropRight: cw - width, cropBottom: ch - height,
 		levelIDC:           pcmLevelIDC(cw * ch),
-		deblockingDisabled: true, signDataHidingEnabled: true, ctbLog2: 6, maxTrHierIntra: 2,
+		deblockingDisabled: true, ctbLog2: 6, maxTrHierIntra: 2,
 	}
 
 	return append(h.parameterSets(), NALUnit{Type: NALIdrNLP, RBSP: rbsp})
@@ -138,7 +138,7 @@ func (e *intraEncoder) reset(y, cb, cr []uint8, width, height, qp int) {
 	e.lambda = lossyLambda(qp)
 	e.src = [3][]uint8{y, cb, cr}
 	e.s = sps{chromaFormatIDC: 1}
-	e.p = pps{signDataHidingEnabled: true}
+	e.p = pps{}
 
 	e.recon[0] = regrow(e.recon[0], len(y))
 	e.recon[1] = regrow(e.recon[1], len(cb))
@@ -785,8 +785,6 @@ func (e *intraEncoder) blockData(b lossyBlock, rdoq bool) ([]int32, []uint8) {
 		terminalRDOQ(reconCoef, coef, n, b.mode, b.cIdx, qp)
 	}
 
-	normalizeSignDataHiding(coef, n, b.mode, b.cIdx)
-
 	copy(reconCoef, coef)
 	dequant(reconCoef, nil, n, qp, 8, false)
 	inverseTransform(reconCoef, n, b.dst, 8, false, &e.scratch.transform)
@@ -881,63 +879,6 @@ func terminalRDOQ(raw, level []int32, n, mode, cIdx, qp int) {
 	v := int64(raw[index])
 	if distortion := (v*v + 511) >> 9; distortion<<lambdaShift <= lossyLambda(qp)*2 {
 		level[index] = 0
-	}
-}
-
-// normalizeSignDataHiding gives every sub-block the parity 7.4.9.11 infers the
-// sign of its first coefficient from.
-func normalizeSignDataHiding(coef []int32, n, mode, cIdx int) {
-	scanIdx := scanIndex(log2(n), cIdx, mode, true, 1)
-	sbScan := scanOrder[log2(n)-2][scanIdx]
-	coeffScan := scanOrder[2][scanIdx]
-
-	var off [numSbCoeff]int
-
-	for k, pos := range coeffScan {
-		off[k] = int(pos.y)*n + int(pos.x)
-	}
-
-	for _, sb := range sbScan {
-		firstSig, lastSig := -1, -1
-		base := (int(sb.y)*n + int(sb.x)) << 2
-
-		var sumAbs int32
-
-		for k := range numSbCoeff {
-			level := coef[base+off[k]]
-			if level == 0 {
-				continue
-			}
-
-			if firstSig < 0 {
-				firstSig = k
-			}
-
-			lastSig = k
-			sumAbs += absLevel(level)
-		}
-
-		if lastSig-firstSig <= 3 {
-			continue
-		}
-
-		index := base + off[firstSig]
-
-		negative := coef[index] < 0
-		if (sumAbs&1 != 0) == negative {
-			continue
-		}
-
-		switch {
-		case absLevel(coef[index]) > 1 && negative:
-			coef[index]++
-		case absLevel(coef[index]) > 1:
-			coef[index]--
-		case negative:
-			coef[index]--
-		default:
-			coef[index]++
-		}
 	}
 }
 

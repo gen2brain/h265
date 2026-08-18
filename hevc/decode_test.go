@@ -283,7 +283,7 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 
 	h := encoderHeaders{
 		width: width, height: height, levelIDC: pcmLevelIDC(width * height), deblockingDisabled: true,
-		signDataHidingEnabled: true, ctbLog2: 6, maxTrHierIntra: 2,
+		ctbLog2: 6, maxTrHierIntra: 2,
 	}
 	s, err := parseSPS(h.sps())
 	if err != nil {
@@ -345,7 +345,7 @@ func TestEncodeCUSize(t *testing.T) {
 		depth uint8
 	}{
 		{"flat", 4, 1},
-		{"bilevel", 6, 2},
+		{"checkerboard", 2, 2},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := rand.New(rand.NewPCG(5, 6))
