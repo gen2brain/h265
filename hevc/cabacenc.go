@@ -1,7 +1,7 @@
 package hevc
 
-// cabacWriter is the arithmetic encoder of 9.3.4. One with no bits to write to
-// counts what it would have written in rate instead.
+// cabacWriter is the arithmetic encoder of 9.3.4. It always counts what it
+// writes in rate, and one with no bits to write to only counts.
 type cabacWriter struct {
 	low         uint32
 	rng         uint32
@@ -79,10 +79,9 @@ func (w *cabacWriter) encodeBin(ctx int, bin uint32) {
 	}
 
 	w.state[ctx] = transState[128+signed]
+	w.rate += int64(entropyBits[s^uint8(bin&1)])
 
 	if w.bits == nil {
-		w.rate += int64(entropyBits[s^uint8(bin&1)])
-
 		return
 	}
 
@@ -98,9 +97,9 @@ func (w *cabacWriter) encodeBin(ctx int, bin uint32) {
 }
 
 func (w *cabacWriter) encodeBypass(bin uint32) {
-	if w.bits == nil {
-		w.rate += 1 << rateShift
+	w.rate += 1 << rateShift
 
+	if w.bits == nil {
 		return
 	}
 
@@ -136,9 +135,9 @@ func (w *cabacWriter) encodeBypassBits(v uint32, n int) {
 // encodeTerminate codes a bin against the fixed range of two, which is the
 // probability state 63 holds.
 func (w *cabacWriter) encodeTerminate(bin uint32) {
-	if w.bits == nil {
-		w.rate += int64(entropyBits[126+(bin&1)])
+	w.rate += int64(entropyBits[126+(bin&1)])
 
+	if w.bits == nil {
 		return
 	}
 

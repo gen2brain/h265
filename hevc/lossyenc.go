@@ -65,6 +65,22 @@ type intraEncoder struct {
 	p     pps
 
 	scratch lossyBlockScratch
+	before  cuState
+	kept    cuState
+}
+
+// cuState is everything coding one 32x32 block changes, so that an arm of the
+// size decision can be taken back or put back.
+type cuState struct {
+	cabac      cabacWriter
+	bits       []byte
+	cur, nbits uint8
+	y          [32 * 32]uint8
+	cb, cr     [16 * 16]uint8
+	modes      [4]int
+	depth      [4]uint8
+	coded8     [16]uint8
+	coded4     [64]uint8
 }
 
 // lossyBlock names one transform block and how it is coded.
@@ -167,22 +183,21 @@ func (e *intraEncoder) blockQP(cIdx int) int {
 	return e.qpC
 }
 
-// tree is the coding quadtree of 7.3.8.4. A 32x32 is coded whole; a block at
-// the picture edge splits without a flag.
+// tree is the coding quadtree of 7.3.8.4. A full 32x32 chooses its own size; a
+// block at the picture edge splits without a flag.
 func (e *intraEncoder) tree(x0, y0, log2Size, d int) error {
 	if log2Size == 4 {
-		return e.leaf(x0, y0, d)
+		return e.leaf(x0, y0, d, -1)
 	}
 
 	size := 1 << log2Size
 
 	if x0+size <= e.width && y0+size <= e.height {
-		split := log2Size != 5
-		e.cabac.encodeBin(ctxSplitCodingUnitFlag+e.splitCtx(x0, y0, d), boolToBit(split))
-
-		if !split {
-			return e.cu32(x0, y0, d)
+		if log2Size == 5 {
+			return e.cuSize(x0, y0, d)
 		}
+
+		e.cabac.encodeBin(ctxSplitCodingUnitFlag+e.splitCtx(x0, y0, d), 1)
 	}
 
 	half := size / 2
@@ -201,6 +216,119 @@ func (e *intraEncoder) tree(x0, y0, log2Size, d int) error {
 	return nil
 }
 
+// cuSize codes a full 32x32 block both ways and keeps the cheaper: one coding
+// unit of its own, or four 16x16 ones.
+func (e *intraEncoder) cuSize(x0, y0, d int) error {
+	base, start := len(e.bits.data), e.cabac.rate
+	ctx := ctxSplitCodingUnitFlag + e.splitCtx(x0, y0, d)
+
+	// Both arms pick their first mode by searching the same top-left 16x16
+	// against the same reconstruction, so the search is done once for both.
+	mode := e.lumaMode(x0, y0, lossyMPM(e.modes, e.width/16, x0/16, y0/16, 4))
+
+	e.save(&e.before, x0, y0, base)
+
+	e.cabac.encodeBin(ctx, 0)
+
+	if err := e.cu32(x0, y0, d, mode); err != nil {
+		return err
+	}
+
+	whole := e.rdCost(e.cuDistortion(x0, y0, 32), e.cabac.rate-start)
+
+	e.save(&e.kept, x0, y0, base)
+	e.load(&e.before, x0, y0, base)
+
+	e.cabac.encodeBin(ctx, 1)
+
+	// Both halves of the cost only grow with each quadrant, so a split that has
+	// already lost is abandoned where it stands.
+	split := int64(0)
+
+	for i := range 4 {
+		x, y := x0+i&1*16, y0+i>>1*16
+		first := -1
+
+		if i == 0 {
+			first = mode
+		}
+
+		if err := e.leaf(x, y, d+1, first); err != nil {
+			return err
+		}
+
+		split += e.cuDistortion(x, y, 16)
+		if e.rdCost(split, e.cabac.rate-start) > whole {
+			e.load(&e.kept, x0, y0, base)
+
+			return nil
+		}
+	}
+
+	if whole <= e.rdCost(split, e.cabac.rate-start) {
+		e.load(&e.kept, x0, y0, base)
+	}
+
+	return nil
+}
+
+// cuDistortion is the squared error of a block, chroma included, which is what
+// the two arms of the size decision differ over.
+func (e *intraEncoder) cuDistortion(x0, y0, n int) int64 {
+	cs := e.width / 2
+	dist := e.distortion(0, x0, y0, n, e.recon[0][y0*e.width+x0:], e.width)
+
+	for c := 1; c < 3; c++ {
+		dist += e.distortion(c, x0/2, y0/2, n/2, e.recon[c][y0/2*cs+x0/2:], cs)
+	}
+
+	return dist
+}
+
+func (e *intraEncoder) save(s *cuState, x0, y0, base int) {
+	s.cabac = e.cabac
+	s.bits = append(s.bits[:0], e.bits.data[base:]...)
+	s.cur, s.nbits = e.bits.cur, e.bits.nbits
+
+	cs, bw := e.width/2, e.width/16
+	saveRect(s.y[:], e.recon[0], e.width, x0, y0, 32, 32)
+	saveRect(s.cb[:], e.recon[1], cs, x0/2, y0/2, 16, 16)
+	saveRect(s.cr[:], e.recon[2], cs, x0/2, y0/2, 16, 16)
+	saveRect(s.modes[:], e.modes, bw, x0/16, y0/16, 2, 2)
+	saveRect(s.depth[:], e.depth, bw, x0/16, y0/16, 2, 2)
+	saveRect(s.coded8[:], e.coded8, e.width/8, x0/8, y0/8, 4, 4)
+	saveRect(s.coded4[:], e.coded4, e.width/4, x0/4, y0/4, 8, 8)
+}
+
+func (e *intraEncoder) load(s *cuState, x0, y0, base int) {
+	e.cabac = s.cabac
+	e.bits.data = append(e.bits.data[:base], s.bits...)
+	e.bits.cur, e.bits.nbits = s.cur, s.nbits
+
+	cs, bw := e.width/2, e.width/16
+	loadRect(e.recon[0], s.y[:], e.width, x0, y0, 32, 32)
+	loadRect(e.recon[1], s.cb[:], cs, x0/2, y0/2, 16, 16)
+	loadRect(e.recon[2], s.cr[:], cs, x0/2, y0/2, 16, 16)
+	loadRect(e.modes, s.modes[:], bw, x0/16, y0/16, 2, 2)
+	loadRect(e.depth, s.depth[:], bw, x0/16, y0/16, 2, 2)
+	loadRect(e.coded8, s.coded8[:], e.width/8, x0/8, y0/8, 4, 4)
+	loadRect(e.coded4, s.coded4[:], e.width/4, x0/4, y0/4, 8, 8)
+}
+
+// saveRect lifts a w by h rectangle out of a picture-wide map, loadRect puts
+// one back.
+func saveRect[T any](dst, src []T, stride, x, y, w, h int) {
+	for j := range h {
+		copy(dst[j*w:(j+1)*w], src[(y+j)*stride+x:])
+	}
+}
+
+func loadRect[T any](dst, src []T, stride, x, y, w, h int) {
+	for j := range h {
+		copy(dst[(y+j)*stride+x:][:w], src[j*w:])
+	}
+}
+
 func (e *intraEncoder) splitCtx(x0, y0, d int) int {
 	blocksWide := e.width / 16
 	ctx := 0
@@ -217,11 +345,14 @@ func (e *intraEncoder) splitCtx(x0, y0, d int) int {
 }
 
 // leaf codes a 16x16 coding unit, whose transform tree splits to 8x8 and then
-// to 4x4 where that is cheaper.
-func (e *intraEncoder) leaf(x0, y0, d int) error {
+// to 4x4 where that is cheaper. A negative mode is searched for.
+func (e *intraEncoder) leaf(x0, y0, d, mode int) error {
 	blocksWide := e.width / 16
 	cand := lossyMPM(e.modes, blocksWide, x0/16, y0/16, 4)
-	mode := e.lumaMode(x0, y0, cand)
+
+	if mode < 0 {
+		mode = e.lumaMode(x0, y0, cand)
+	}
 
 	var tus [4]lossyTU8Plan
 
@@ -285,11 +416,14 @@ func (e *intraEncoder) leaf(x0, y0, d int) error {
 }
 
 // cu32 codes a 32x32 coding unit as four 16x16 transform units, the largest
-// transform the sequence allows.
-func (e *intraEncoder) cu32(x0, y0, d int) error {
+// transform the sequence allows. A negative mode is searched for.
+func (e *intraEncoder) cu32(x0, y0, d, mode int) error {
 	blocksWide := e.width / 16
 	cand := lossyMPM(e.modes, blocksWide, x0/16, y0/16, 4)
-	mode := e.lumaMode(x0, y0, cand)
+
+	if mode < 0 {
+		mode = e.lumaMode(x0, y0, cand)
+	}
 
 	var (
 		qY       [4][16 * 16]int32

@@ -323,9 +323,6 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 	if len(pics) != 1 {
 		t.Fatalf("pictures = %d", len(pics))
 	}
-	if got := d.ctuPrev.cuDepth[d.ctuPrev.tbIndex(0, 0)]; got != 1 {
-		t.Fatalf("CU depth = %d, want 1", got)
-	}
 	want := append(append(append([]byte{}, recon[0]...), recon[1]...), recon[2]...)
 	if got := planarYUV(pics[0]); !bytes.Equal(got, want) {
 		for i := range want {
@@ -333,6 +330,47 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 				t.Fatalf("sample %d = %d, want %d", i, got[i], want[i])
 			}
 		}
+	}
+}
+
+// TestEncodeCUSize covers the choice between one 32x32 coding unit and four
+// 16x16 ones. Flat content has nothing to gain from splitting and sharp detail
+// has, so the two must come out differently.
+func TestEncodeCUSize(t *testing.T) {
+	const size = 64
+
+	for _, c := range []struct {
+		name  string
+		kind  int
+		depth uint8
+	}{
+		{"flat", 4, 1},
+		{"bilevel", 6, 2},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := rand.New(rand.NewPCG(5, 6))
+			y, cb, cr := lossyPattern(r, size, size, c.kind)
+
+			nals, err := encodeIntraLossyQP(y, cb, cr, size, size, 26)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var d Decoder
+			for _, nal := range nals {
+				if _, err := d.DecodeNAL(nal); err != nil {
+					t.Fatalf("DecodeNAL %d: %v", nal.Type, err)
+				}
+			}
+
+			if pics := d.Flush(); len(pics) != 1 {
+				t.Fatalf("pictures = %d", len(pics))
+			}
+
+			if got := d.ctuPrev.cuDepth[d.ctuPrev.tbIndex(0, 0)]; got != c.depth {
+				t.Fatalf("CU depth = %d, want %d", got, c.depth)
+			}
+		})
 	}
 }
 
