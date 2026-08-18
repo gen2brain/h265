@@ -102,3 +102,53 @@ outsum:
 	BNEZ X22, outrows
 
 	RET
+
+// func quantize8RVV(dst, src *int32, count int, scale, offset int32, qbits int)
+//
+// The forward direction of 8.6.3. The magnitude is unsigned, which keeps the
+// widening multiply exact over the whole int32 range.
+TEXT ·quantize8RVV(SB), NOSPLIT, $0-40
+	MOV dst+0(FP), X10
+	MOV src+8(FP), X11
+	MOV count+16(FP), X12
+	MOVW scale+24(FP), X13
+	MOVW offset+28(FP), X14
+	MOV qbits+32(FP), X15
+
+	SLLI $32, X14, X14
+	SRLI $32, X14, X14
+
+	MOV $0x7fff, X16
+
+loop:
+	VSETVLI X12, E32, M1, TA, MA, X17
+
+	VLE32V (X11), V1
+
+	VRSUBVX X0, V1, V2
+	VMAXVV  V1, V2, V2
+
+	VWMULUVX X13, V2, V4
+
+	VSETVLI X17, E64, M2, TA, MA, X0
+	VADDVX  X14, V4, V4
+	VSRLVX  X15, V4, V4
+
+	VSETVLI X17, E32, M1, TA, MA, X0
+	VNSRLWI $0, V4, V6
+
+	VMINVX X16, V6, V6
+
+	VSRAVI $31, V1, V7
+	VXORVV V7, V6, V6
+	VSUBVV V7, V6, V6
+
+	VSE32V V6, (X10)
+
+	SLLI $2, X17, X18
+	ADD  X18, X11
+	ADD  X18, X10
+	SUB  X17, X12
+	BNEZ X12, loop
+
+	RET

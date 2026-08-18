@@ -180,12 +180,24 @@ func BenchmarkQuantize(b *testing.B) {
 			src[i] = int32(i*7919%1048576 - 524288)
 		}
 
-		b.Run(fmt.Sprintf("%dx%d", n, n), func(b *testing.B) {
+		scale, qbits := quantScale(n, 26, 8)
+		offset := int64(1<<qbits) / 3
+
+		b.Run(fmt.Sprintf("go/%dx%d", n, n), func(b *testing.B) {
 			b.SetBytes(int64(n * n * 4))
 			for b.Loop() {
-				quantize(dst, src, n, 26, 8)
+				quantizeGo(dst, src, n*n, scale, offset, qbits)
 			}
 		})
+
+		if k := quantize8Asm; k != nil {
+			b.Run(fmt.Sprintf("asm/%dx%d", n, n), func(b *testing.B) {
+				b.SetBytes(int64(n * n * 4))
+				for b.Loop() {
+					k(dst, src, n*n, int32(scale), int32(offset), int(qbits))
+				}
+			})
+		}
 	}
 }
 
@@ -329,6 +341,41 @@ func BenchmarkSATD(b *testing.B) {
 
 			b.ReportMetric(128*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
 		})
+	}
+}
+
+func BenchmarkSSE(b *testing.B) {
+	for _, n := range []int{8, 16, 32} {
+		const srcStride = 64
+
+		src := make([]uint8, srcStride*n)
+		block := make([]uint8, n*n)
+
+		for i := range src {
+			src[i] = uint8(i*7919%251 + 3)
+		}
+
+		for i := range block {
+			block[i] = uint8(i*104729%241 + 7)
+		}
+
+		b.Run(fmt.Sprintf("go/%dx%d", n, n), func(b *testing.B) {
+			for b.Loop() {
+				sse8Go(src, srcStride, block, n, n)
+			}
+
+			b.ReportMetric(float64(n*n)*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
+		})
+
+		if k := sse8Asm; k != nil {
+			b.Run(fmt.Sprintf("asm/%dx%d", n, n), func(b *testing.B) {
+				for b.Loop() {
+					k(src, srcStride, block, n, n)
+				}
+
+				b.ReportMetric(float64(n*n)*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
+			})
+		}
 	}
 }
 

@@ -288,3 +288,57 @@ outsum16:
 
 	VZEROUPPER
 	RET
+
+// func quantize8AVX2(dst, src *int32, count int, scale, offset int32, qbits int)
+//
+// The forward direction of 8.6.3. The magnitude is unsigned, which keeps the
+// widening multiply exact over the whole int32 range.
+TEXT ·quantize8AVX2(SB), NOSPLIT, $0-40
+	MOVQ dst+0(FP), DI
+	MOVQ src+8(FP), SI
+	MOVQ count+16(FP), CX
+	MOVL scale+24(FP), AX
+	MOVL offset+28(FP), DX
+	MOVQ qbits+32(FP), R8
+
+	VMOVD        AX, X10
+	VPBROADCASTD X10, Y10
+
+	MOVLQZX      DX, DX
+	VMOVQ        DX, X11
+	VPBROADCASTQ X11, Y11
+
+	MOVL         $0x7fff, AX
+	VMOVD        AX, X12
+	VPBROADCASTD X12, Y12
+
+	VMOVQ R8, X13
+
+	XORQ BX, BX
+
+loop:
+	VMOVDQU (SI)(BX*4), Y1
+	VPABSD  Y1, Y2
+
+	VPMULUDQ Y10, Y2, Y3
+	VPSRLQ   $32, Y2, Y4
+	VPMULUDQ Y10, Y4, Y4
+
+	VPADDQ Y11, Y3, Y3
+	VPADDQ Y11, Y4, Y4
+	VPSRLQ X13, Y3, Y3
+	VPSRLQ X13, Y4, Y4
+
+	VPSLLQ $32, Y4, Y4
+	VPOR   Y4, Y3, Y3
+
+	VPMINSD Y12, Y3, Y3
+	VPSIGND Y1, Y3, Y3
+	VMOVDQU Y3, (DI)(BX*4)
+
+	ADDQ $8, BX
+	CMPQ BX, CX
+	JLT  loop
+
+	VZEROUPPER
+	RET

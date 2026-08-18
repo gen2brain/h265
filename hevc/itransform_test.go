@@ -2,6 +2,7 @@ package hevc
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"slices"
@@ -904,6 +905,98 @@ func TestSATDAsm(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSSEAsm holds the kernel to the block it replaces, at every size.
+func TestSSEAsm(t *testing.T) {
+	k := sse8Asm
+	if k == nil {
+		t.Skip("no assembly for this target")
+	}
+
+	rnd := rand.New(rand.NewPCG(41, 42))
+
+	for _, n := range []int{8, 16, 32} {
+		const srcStride = 71
+
+		blockStride := n + 3
+
+		src := make([]uint8, srcStride*(n+2))
+		block := make([]uint8, blockStride*(n+2))
+
+		for _, c := range []struct {
+			name       string
+			srcF, blkF func(i int) uint8
+		}{
+			{"noise",
+				func(int) uint8 { return uint8(rnd.IntN(256)) },
+				func(int) uint8 { return uint8(rnd.IntN(256)) }},
+			{"white on black", func(int) uint8 { return 255 }, func(int) uint8 { return 0 }},
+			{"black on white", func(int) uint8 { return 0 }, func(int) uint8 { return 255 }},
+			{"equal", func(i int) uint8 { return uint8(i) }, func(i int) uint8 { return uint8(i) }},
+		} {
+			t.Run(fmt.Sprintf("%dx%d/%s", n, n, c.name), func(t *testing.T) {
+				for i := range src {
+					src[i] = c.srcF(i)
+				}
+
+				for i := range block {
+					block[i] = c.blkF(i)
+				}
+
+				for _, off := range []int{0, 1, srcStride + 2} {
+					s, b := src[off:], block[off%blockStride:]
+
+					want := sse8Go(s, srcStride, b, blockStride, n)
+					if got := k(s, srcStride, b, blockStride, n); got != want {
+						t.Fatalf("offset %d: %d, want %d", off, got, want)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestQuantizeAsm holds the kernel to the scalar quantiser over the whole int32
+// range, which is what the function promises even if a transform never gets
+// there.
+func TestQuantizeAsm(t *testing.T) {
+	k := quantize8Asm
+	if k == nil {
+		t.Skip("no assembly for this target")
+	}
+
+	rnd := rand.New(rand.NewPCG(43, 44))
+
+	for _, n := range []int{4, 8, 16, 32} {
+		for _, qp := range []int{0, 7, 18, 26, 42, 51} {
+			scale, qbits := quantScale(n, qp, 8)
+			offset := int64(1<<qbits) / 3
+
+			src := make([]int32, n*n)
+			for i := range src {
+				src[i] = int32(rnd.Uint32())
+			}
+
+			for i, v := range []int32{0, 1, -1, 32767, -32768, 1 << 20, -1 << 20,
+				1<<31 - 1, -1 << 31} {
+				src[i] = v
+			}
+
+			got := make([]int32, n*n)
+			want := make([]int32, n*n)
+
+			k(got, src, n*n, int32(scale), int32(offset), int(qbits))
+			quantizeGo(want, src, n*n, scale, offset, qbits)
+
+			for i := range got {
+				if got[i] != want[i] {
+					t.Fatalf("n=%d qp=%d: [%d] of %d = %d, want %d",
+						n, qp, i, src[i], got[i], want[i])
+				}
+			}
+		}
 	}
 }
 

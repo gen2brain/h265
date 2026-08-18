@@ -36,6 +36,12 @@ func idctColsRVV(dst, src, m *int32, n, mstride, shift int, rnd, lo, hi int32)
 func predAngular8RVV(dst *uint8, stride int, ref *int32, angle, n int)
 
 //go:noescape
+func sse8RVV(src *uint8, srcStride int, block *uint8, blockStride, n int) int64
+
+//go:noescape
+func quantize8RVV(dst, src *int32, count int, scale, offset int32, qbits int)
+
+//go:noescape
 func satd16x8RVV(src *uint8, srcStride int, pred *uint8, predStride int) int64
 
 //go:noescape
@@ -83,6 +89,14 @@ func dspInit(d *dspContext) {
 
 	satd16x8Asm = func(src []uint8, srcStride int, pred []uint8, predStride int) int64 {
 		return satd16x8RVV(&src[0], srcStride, &pred[0], predStride)
+	}
+
+	sse8Asm = func(src []uint8, srcStride int, block []uint8, blockStride, n int) int64 {
+		return sse8RVV(&src[0], srcStride, &block[0], blockStride, n)
+	}
+
+	quantize8Asm = func(dst, src []int32, count int, scale, offset int32, qbits int) {
+		quantize8RVV(&dst[0], &src[0], count, scale, offset, qbits)
 	}
 
 	forwardTransform8Asm = func(dst, src []int32, n int) {

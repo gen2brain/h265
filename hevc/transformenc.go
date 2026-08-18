@@ -115,7 +115,17 @@ func quantize(dst, src []int32, n, qp, bitDepth int) {
 	scale, qbits := quantScale(n, qp, bitDepth)
 	offset := int64(1<<qbits) / 3
 
-	for i, v := range src[:n*n] {
+	if k := quantize8Asm; k != nil {
+		k(dst, src, n*n, int32(scale), int32(offset), int(qbits))
+
+		return
+	}
+
+	quantizeGo(dst, src, n*n, scale, offset, qbits)
+}
+
+func quantizeGo(dst, src []int32, count int, scale, offset int64, qbits uint) {
+	for i, v := range src[:count] {
 		abs := int64(v)
 		if abs < 0 {
 			abs = -abs

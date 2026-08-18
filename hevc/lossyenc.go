@@ -871,11 +871,20 @@ func (e *intraEncoder) distortion(cIdx, x, y, n int, block []uint8, blockStride 
 	stride := e.stride(cIdx)
 	src := e.src[cIdx]
 
+	if k := sse8Asm; k != nil {
+		return k(src[y*stride+x:], stride, block, blockStride, n)
+	}
+
+	return sse8Go(src[y*stride+x:], stride, block, blockStride, n)
+}
+
+// sse8Go is the squared error of an n by n block.
+func sse8Go(src []uint8, srcStride int, block []uint8, blockStride, n int) int64 {
 	var dist int64
 
 	for j := range n {
 		for i := range n {
-			d := int64(src[(y+j)*stride+x+i]) - int64(block[j*blockStride+i])
+			d := int64(src[j*srcStride+i]) - int64(block[j*blockStride+i])
 			dist += d * d
 		}
 	}
