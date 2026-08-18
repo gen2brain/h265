@@ -118,12 +118,16 @@ type lossyBlock struct {
 	x, y, n int
 	mode    int
 	dst     bool
+
+	// pred is a prediction already made, which the mode search keeps from its sweep.
+	pred []uint8
 }
 
 // lossyBlockScratch is the working memory one block needs. No two blocks are
 // ever in flight at once, and the largest is 32x32.
 type lossyBlockScratch struct {
 	pred      [32 * 32]uint8
+	modePred  [modeShortlist][16 * 16]uint8
 	avail     [4*32 + 1]bool
 	residual  [32 * 32]int32
 	coef      [32 * 32]int32
@@ -707,18 +711,33 @@ func (e *intraEncoder) lumaMode(x, y int, cand [3]int) int {
 	var (
 		short [modeShortlist]int
 		score [modeShortlist]int64
+		slot  [modeShortlist]int
 	)
 
 	for i := range short {
-		short[i], score[i] = intraPlanar, 1<<62
+		short[i], score[i], slot[i] = intraPlanar, 1<<62, i
 	}
 
 	pred := e.scratch.pred[:16*16]
 
+	// The smoothing has one outcome at a fixed size, so it is built once.
+	filtered := false
+
 	for mode := intraPlanar; mode <= 34; mode++ {
-		e.scratch.ref.copyFrom(&e.scratch.base)
-		filterRef(&e.scratch.ref, mode, 0, 8, &e.s)
-		intraPredict(pred, 0, 16, &e.scratch.ref, mode, 0, 8)
+		ref := &e.scratch.base
+
+		if filterFlag(mode, 16, 0, &e.s) && !e.s.intraSmoothingDisabled {
+			if !filtered {
+				e.scratch.ref.copyFrom(&e.scratch.base)
+				filterRef(&e.scratch.ref, mode, 0, 8, &e.s)
+
+				filtered = true
+			}
+
+			ref = &e.scratch.ref
+		}
+
+		intraPredict(pred, 0, 16, ref, mode, 0, 8)
 
 		s := e.satd(x, y, pred, 16, score[modeShortlist-1])
 
@@ -727,9 +746,14 @@ func (e *intraEncoder) lumaMode(x, y int, cand [3]int) int {
 				continue
 			}
 
+			// The prediction goes in the slot the evicted mode gives up.
+			free := slot[modeShortlist-1]
+
 			copy(short[i+1:], short[i:len(short)-1])
 			copy(score[i+1:], score[i:len(score)-1])
-			short[i], score[i] = mode, s
+			copy(slot[i+1:], slot[i:len(slot)-1])
+			short[i], score[i], slot[i] = mode, s, free
+			copy(e.scratch.modePred[free][:], pred)
 
 			break
 		}
@@ -737,8 +761,9 @@ func (e *intraEncoder) lumaMode(x, y int, cand [3]int) int {
 
 	bestMode, bestCost := short[0], int64(-1)
 
-	for _, mode := range short {
+	for i, mode := range short {
 		b.mode = mode
+		b.pred = e.scratch.modePred[slot[i]][:]
 		coef, trial, cbf := e.blockData(b, false)
 
 		cost := e.rdCost(e.distortion(0, x, y, 16, trial, 16), e.modeRate(cand, mode, coef, cbf))
@@ -963,9 +988,13 @@ func (e *intraEncoder) blockData(b lossyBlock, rdoq bool) ([]int32, []uint8, boo
 	coef := e.scratch.coef[:count]
 	reconCoef := e.scratch.reconCoef[:count]
 
-	e.scratch.ref.copyFrom(&e.scratch.base)
-	filterRef(&e.scratch.ref, b.mode, b.cIdx, 8, &e.s)
-	intraPredict(pred, 0, n, &e.scratch.ref, b.mode, b.cIdx, 8)
+	if b.pred != nil {
+		copy(pred, b.pred)
+	} else {
+		e.scratch.ref.copyFrom(&e.scratch.base)
+		filterRef(&e.scratch.ref, b.mode, b.cIdx, 8, &e.s)
+		intraPredict(pred, 0, n, &e.scratch.ref, b.mode, b.cIdx, 8)
+	}
 
 	src := e.src[b.cIdx]
 

@@ -499,6 +499,119 @@ func TestCUTransformFlags(t *testing.T) {
 	}
 }
 
+// TestLumaModeSearch holds the mode search to a sweep written the slow way,
+// every mode filtering its own reference and predicting again to be trialled.
+// Nothing else notices when the shortlist serves a cached prediction that
+// belongs to another mode, because the picture still decodes.
+func TestLumaModeSearch(t *testing.T) {
+	pics := decodeFile(t, filepath.Join("testdata", "realworld_320x240.h265"))
+	if len(pics) == 0 {
+		t.Skip("no pictures")
+	}
+
+	p := pics[0]
+	w, h := p.CropW&^15, p.CropH&^15
+
+	y := make([]byte, w*h)
+	cb := make([]byte, w*h/4)
+	cr := make([]byte, w*h/4)
+
+	for j := range h {
+		copy(y[j*w:(j+1)*w], p.Y[(p.CropY+j)*p.StrideY+p.CropX:])
+	}
+
+	for j := range h / 2 {
+		copy(cb[j*w/2:(j+1)*w/2], p.Cb[(p.CropY/2+j)*p.StrideC+p.CropX/2:])
+		copy(cr[j*w/2:(j+1)*w/2], p.Cr[(p.CropY/2+j)*p.StrideC+p.CropX/2:])
+	}
+
+	for _, qp := range []int{14, 26, 38} {
+		var e, slow intraEncoder
+
+		e.reset(y, cb, cr, w, h, qp)
+		slow.reset(y, cb, cr, w, h, qp)
+
+		// Without a reconstruction the reference samples are all substituted
+		// and every mode scores the same, which pins nothing.
+		for _, enc := range [2]*intraEncoder{&e, &slow} {
+			copy(enc.recon[0], y)
+			copy(enc.recon[1], cb)
+			copy(enc.recon[2], cr)
+
+			for i := range enc.coded[0] {
+				enc.coded[0][i] = 1
+			}
+
+			for i := range enc.coded[1] {
+				enc.coded[1][i] = 1
+			}
+		}
+
+		for y0 := 0; y0 < h; y0 += 16 {
+			for x0 := 0; x0 < w; x0 += 16 {
+				cand := lossyMPM(e.modes, w/16, x0/16, y0/16, 4)
+
+				got := e.lumaMode(x0, y0, cand)
+				if want := slowLumaMode(&slow, x0, y0, cand); got != want {
+					t.Fatalf("qp=%d at %d,%d: mode %d, want %d", qp, x0, y0, got, want)
+				}
+			}
+		}
+	}
+}
+
+// slowLumaMode is lumaMode with nothing shared between modes.
+func slowLumaMode(e *intraEncoder, x, y int, cand [3]int) int {
+	b := lossyBlock{x: x, y: y, n: 16}
+	e.prepareRef(b)
+
+	var (
+		short [modeShortlist]int
+		score [modeShortlist]int64
+	)
+
+	for i := range short {
+		short[i], score[i] = intraPlanar, 1<<62
+	}
+
+	pred := make([]uint8, 16*16)
+
+	for mode := intraPlanar; mode <= 34; mode++ {
+		e.scratch.ref.copyFrom(&e.scratch.base)
+		filterRef(&e.scratch.ref, mode, 0, 8, &e.s)
+		intraPredict(pred, 0, 16, &e.scratch.ref, mode, 0, 8)
+
+		s := e.satd(x, y, pred, 16, 1<<62)
+
+		for i := range short {
+			if s >= score[i] {
+				continue
+			}
+
+			copy(short[i+1:], short[i:len(short)-1])
+			copy(score[i+1:], score[i:len(score)-1])
+			short[i], score[i] = mode, s
+
+			break
+		}
+	}
+
+	bestMode, bestCost := short[0], int64(-1)
+
+	for _, mode := range short {
+		b.mode, b.pred = mode, nil
+
+		coef, trial, cbf := e.blockData(b, false)
+
+		cost := e.rdCost(e.distortion(0, x, y, 16, trial, 16), e.modeRate(cand, mode, coef, cbf))
+		if bestCost < 0 || cost < bestCost {
+			bestMode, bestCost = mode, cost
+		}
+	}
+
+	return bestMode
+}
+
 func TestLossyTU8Rate(t *testing.T) {
 	e := new(intraEncoder)
 	e.reset(make([]byte, 16*16), make([]byte, 8*8), make([]byte, 8*8), 16, 16, 26)
