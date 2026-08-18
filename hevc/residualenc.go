@@ -227,6 +227,10 @@ func encodeSubBlockLevels(w *cabacWriter, s *sps, p *pps, coef []int32, b residu
 			npos++
 		}
 	}
+	if npos == 0 {
+		return
+	}
+
 	firstSig, lastSig := pos[npos-1], pos[0]
 	signHidden := lastSig-firstSig > 3 && !b.transquantBypass
 

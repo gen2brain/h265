@@ -480,6 +480,59 @@ func TestEncodeResidualRoundTrip(t *testing.T) {
 	}
 }
 
+// TestEncodeResidualEmptyDCSubBlock covers a block whose first sub-block holds
+// no level at all. 7.3.8.11 codes it anyway, with its coded_sub_block_flag
+// inferred, so the encoder has to write sixteen zero significance flags and
+// nothing else.
+func TestEncodeResidualEmptyDCSubBlock(t *testing.T) {
+	for _, b := range []residualBlock{
+		{log2Size: 3},
+		{log2Size: 3, cIdx: 1, predModeIntra: 22, intra: true},
+		{log2Size: 4, predModeIntra: 6, intra: true},
+		{log2Size: 5},
+	} {
+		n := 1 << b.log2Size
+		want := make([]int32, n*n)
+		want[(n/2+1)*n+n/2+1] = 3
+		want[(n/2+2)*n+n/2+2] = -2
+
+		s := sps{chromaFormatIDC: 1}
+		p := pps{}
+
+		var (
+			bits putBits
+			w    cabacWriter
+			stat [4]uint8
+		)
+
+		w.init(&bits, 26, sliceI, false)
+
+		if err := encodeResidual(&w, &s, &p, &sliceHeader{sliceType: sliceI}, want, b, &stat); err != nil {
+			t.Fatalf("size %d cIdx %d: encode: %v", n, b.cIdx, err)
+		}
+
+		w.encodeTerminate(1)
+
+		var c cabac
+		if err := c.init(w.bytes(), 0); err != nil {
+			t.Fatal(err)
+		}
+
+		c.initContexts(26, sliceI, false)
+
+		got := make([]int32, len(want))
+		if _, err := decodeResidual(&c, &s, &p, &sliceHeader{sliceType: sliceI}, got, b, &stat); err != nil {
+			t.Fatalf("size %d cIdx %d: decode: %v", n, b.cIdx, err)
+		}
+
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("size %d cIdx %d level %d: got %d, want %d", n, b.cIdx, i, got[i], want[i])
+			}
+		}
+	}
+}
+
 func TestEncodeResidualIntraModesRoundTrip(t *testing.T) {
 	for mode := intraPlanar; mode <= 34; mode++ {
 		for _, log2Size := range []int{3, 4} {
