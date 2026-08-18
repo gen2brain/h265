@@ -179,7 +179,7 @@ func TestTerminalRDOQ(t *testing.T) {
 		level[index(scan[13])] = 2
 		level[index(scan[14])] = -1
 		raw[index(scan[14])] = 1
-		terminalRDOQ(raw, level, n, mode, 0, 0)
+		terminalRDOQ(raw, level, n, mode, 0, 26)
 		if level[index(scan[14])] != 0 {
 			t.Fatal("terminal level was not removed")
 		}
@@ -195,7 +195,7 @@ func TestTerminalRDOQ(t *testing.T) {
 			last int32
 		}{
 			{"level", 1, 2},
-			{"distortion", 100, 1},
+			{"distortion", 1000, 1},
 		} {
 			t.Run(test.name, func(t *testing.T) {
 				raw := make([]int32, n*n)
@@ -203,7 +203,7 @@ func TestTerminalRDOQ(t *testing.T) {
 				level[index(scan[13])] = 2
 				level[index(scan[14])] = test.last
 				raw[index(scan[14])] = test.raw
-				terminalRDOQ(raw, level, n, mode, 0, 0)
+				terminalRDOQ(raw, level, n, mode, 0, 26)
 				if level[index(scan[14])] != test.last {
 					t.Fatalf("got %d, want %d", level[index(scan[14])], test.last)
 				}

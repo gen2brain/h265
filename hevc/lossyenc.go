@@ -1,5 +1,7 @@
 package hevc
 
+import "math"
+
 func encodeIntraLossyQP(y, cb, cr []uint8, width, height, qp int) ([]NALUnit, error) {
 	if !validFrame(width, height, len(y), len(cb), len(cr)) || qp < 0 || qp > 51 {
 		return nil, ErrInvalid
@@ -695,9 +697,12 @@ func (e *intraEncoder) tu8Rate(plan *lossyTU8Plan, mode int) int64 {
 	return w.rate
 }
 
+// lambdaShift is the fraction lossyLambda carries.
+const lambdaShift = 8
+
 // rdCost weighs squared error against bits, both at rateShift.
 func (e *intraEncoder) rdCost(dist, rate int64) int64 {
-	return dist<<rateShift + e.lambda*rate
+	return dist<<(rateShift+lambdaShift) + e.lambda*rate
 }
 
 func (e *intraEncoder) rateResidual(w *cabacWriter, coef []int32, log2Size, mode int) {
@@ -826,11 +831,15 @@ func (e *intraEncoder) prepareRef(b lossyBlock) {
 	e.scratch.base.substitute(avail, 8)
 }
 
-// lossyLambda weights bits against squared error, doubling every three QP.
-func lossyLambda(qp int) int64 {
-	shift := max(qp-12, 0) / 3
+// lambdaScale is the constant in front of the quantiser's own curve, at Q8.
+// A sweep from a quarter of it to one and a half moved the rate by less than
+// the measurement noise, so it is the usual 0.57.
+const lambdaScale = 146
 
-	return max(int64(1), int64(9<<shift)/16)
+// lossyLambda weights bits against squared error at Q8, doubling every three
+// QP the way the quantiser's step does.
+func lossyLambda(qp int) int64 {
+	return max(1, int64(math.Round(float64(lambdaScale)*math.Exp2(float64(qp-12)/3))))
 }
 
 // terminalRDOQ drops a lone trailing coefficient whose error costs less than
@@ -870,7 +879,7 @@ func terminalRDOQ(raw, level []int32, n, mode, cIdx, qp int) {
 	}
 
 	v := int64(raw[index])
-	if distortion := (v*v + 511) >> 9; distortion <= lossyLambda(qp)*2 {
+	if distortion := (v*v + 511) >> 9; distortion<<lambdaShift <= lossyLambda(qp)*2 {
 		level[index] = 0
 	}
 }
