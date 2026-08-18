@@ -58,8 +58,7 @@ func BenchmarkDecode1080p(b *testing.B) { benchStream(b, "1080p.h265") }
 func BenchmarkDecodeTiles(b *testing.B) { benchStream(b, "tiles.h265") }
 func BenchmarkDecode10Bit(b *testing.B) { benchStream(b, "10bit_128x128.h265") }
 
-// benchFrame decodes the first picture of a stream into the planes an encoder
-// takes, cropped to an even size.
+// benchFrame decodes the first picture of a stream into an encoder's planes.
 func benchFrame(b *testing.B, name string) (Frame, int, int) {
 	b.Helper()
 
@@ -109,9 +108,8 @@ func benchFrame(b *testing.B, name string) (Frame, int, int) {
 	return f, w, h
 }
 
-// BenchmarkEncodeReal encodes real pictures. The synthetic patterns of
-// BenchmarkEncodeLossy never leave a block without residual and never let a
-// mode search settle, so they hide what the coding decisions cost.
+// BenchmarkEncodeReal encodes real pictures, which BenchmarkEncodeLossy's
+// synthetic ones stand in for badly. See SPEED.md.
 func BenchmarkEncodeReal(b *testing.B) {
 	for _, name := range []string{"realworld_320x240.h265", "realworld_720p.h265"} {
 		frame, width, height := benchFrame(b, name)
@@ -297,6 +295,40 @@ func TestWideSpeedup(t *testing.T) {
 		})
 
 		t.Logf("%-24s wide %v narrow %v  %.3fx", name, on, off, float64(off)/float64(on))
+	}
+}
+
+func BenchmarkSATD(b *testing.B) {
+	const srcStride, predStride = 40, 16
+
+	src := make([]uint8, srcStride*8)
+	pred := make([]uint8, predStride*8)
+
+	for i := range src {
+		src[i] = uint8(i*7919%251 + 3)
+	}
+
+	for i := range pred {
+		pred[i] = uint8(i*104729%241 + 7)
+	}
+
+	b.Run("go/16x8", func(b *testing.B) {
+		for b.Loop() {
+			satd8x8Go(src, srcStride, pred, predStride)
+			satd8x8Go(src[8:], srcStride, pred[8:], predStride)
+		}
+
+		b.ReportMetric(128*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
+	})
+
+	if k := satd16x8Asm; k != nil {
+		b.Run("asm/16x8", func(b *testing.B) {
+			for b.Loop() {
+				k(src, srcStride, pred, predStride)
+			}
+
+			b.ReportMetric(128*float64(b.N)/b.Elapsed().Seconds()/1e6, "Msample/s")
+		})
 	}
 }
 

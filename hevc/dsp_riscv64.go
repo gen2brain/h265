@@ -33,6 +33,9 @@ func predBi8RVV(dst *uint8, dstStride int, a, b *int16, srcStride, w, h, shift i
 func idctColsRVV(dst, src, m *int32, n, mstride, shift int, rnd, lo, hi int32)
 
 //go:noescape
+func satd16x8RVV(src *uint8, srcStride int, pred *uint8, predStride int) int64
+
+//go:noescape
 func transposeRVV(dst, src *int32, n int)
 
 //go:noescape
@@ -73,6 +76,10 @@ func dspInit(d *dspContext) {
 
 	transposeAsm = func(dst, src []int32, n int) {
 		transposeRVV(&dst[0], &src[0], n)
+	}
+
+	satd16x8Asm = func(src []uint8, srcStride int, pred []uint8, predStride int) int64 {
+		return satd16x8RVV(&src[0], srcStride, &pred[0], predStride)
 	}
 
 	forwardTransform8Asm = func(dst, src []int32, n int) {

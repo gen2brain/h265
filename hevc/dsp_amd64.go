@@ -57,6 +57,9 @@ func predBi8AVX512(dst *uint8, dstStride int, a, b *int16, srcStride, w, h, shif
 func idctCols8AVX2(dst, src, m *int32, n, mstride, shift int, rnd, lo, hi int32)
 
 //go:noescape
+func satd16x8AVX2(src *uint8, srcStride int, pred *uint8, predStride int) int64
+
+//go:noescape
 func transpose8AVX2(dst, src *int32, n int)
 
 //go:noescape
@@ -107,6 +110,10 @@ func dspInit(d *dspContext) {
 
 	transposeAsm = func(dst, src []int32, n int) {
 		transpose8AVX2(&dst[0], &src[0], n)
+	}
+
+	satd16x8Asm = func(src []uint8, srcStride int, pred []uint8, predStride int) int64 {
+		return satd16x8AVX2(&src[0], srcStride, &pred[0], predStride)
 	}
 
 	forwardTransform8Asm = func(dst, src []int32, n int) {

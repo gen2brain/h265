@@ -85,8 +85,7 @@ type cuTransform struct {
 	cbfCb, cbfCr bool
 }
 
-// flat reports whether the coding unit took one transform of its own size and
-// left no residual in it.
+// flat reports whether the unit took one transform and left no residual in it.
 func (t *cuTransform) flat() bool {
 	return !t.split && !hasCoefficients(t.y32[:]) &&
 		!hasCoefficients(t.cb32[:]) && !hasCoefficients(t.cr32[:])
@@ -260,8 +259,6 @@ func (e *intraEncoder) cuSize(x0, y0, d int) error {
 		return err
 	}
 
-	// Four coding units cost more syntax than one and cannot predict better than
-	// a block one transform already codes without residual.
 	if e.tu.flat() {
 		return nil
 	}
@@ -717,7 +714,7 @@ func (e *intraEncoder) lumaMode(x, y int, cand [3]int) int {
 // satd is the Hadamard transformed absolute difference between the source and a
 // prediction, over 8x8 at a time. It stands in for what the residual will cost
 // far better than the plain difference does, and for a fraction of coding it.
-// The sum only grows, so one that has already reached limit is returned short.
+// The sum only grows, so one that has reached limit is returned short.
 func (e *intraEncoder) satd(x, y int, pred []uint8, n int, limit int64) int64 {
 	src := e.src[0]
 	stride := e.width
@@ -730,34 +727,53 @@ func (e *intraEncoder) satd(x, y int, pred []uint8, n int, limit int64) int64 {
 				return sum
 			}
 
-			var d [64]int32
+			s := src[(y+by)*stride+x+bx:]
+			p := pred[by*n+bx:]
 
-			for j := range 8 {
-				row := src[(y+by+j)*stride+x+bx:]
-				p := pred[(by+j)*n+bx:]
+			if k := satd16x8Asm; k != nil && bx+16 <= n {
+				sum += k(s, stride, p, n)
+				bx += 8
 
-				for i := range 8 {
-					d[j*8+i] = int32(row[i]) - int32(p[i])
-				}
+				continue
 			}
 
-			for j := range 8 {
-				hadamard8((*[8]int32)(d[j*8 : j*8+8]))
-			}
+			sum += satd8x8Go(s, stride, p, n)
+		}
+	}
 
-			var col [8]int32
+	return sum
+}
 
-			for i := range 8 {
-				for j := range 8 {
-					col[j] = d[j*8+i]
-				}
+// satd8x8Go is one 8x8 of satd, the rows transformed and then the columns.
+func satd8x8Go(src []uint8, srcStride int, pred []uint8, predStride int) int64 {
+	var d [64]int32
 
-				hadamard8(&col)
+	for j := range 8 {
+		row := src[j*srcStride:]
+		p := pred[j*predStride:]
 
-				for j := range 8 {
-					sum += int64(absLevel(col[j]))
-				}
-			}
+		for i := range 8 {
+			d[j*8+i] = int32(row[i]) - int32(p[i])
+		}
+	}
+
+	for j := range 8 {
+		hadamard8((*[8]int32)(d[j*8 : j*8+8]))
+	}
+
+	var sum int64
+
+	var col [8]int32
+
+	for i := range 8 {
+		for j := range 8 {
+			col[j] = d[j*8+i]
+		}
+
+		hadamard8(&col)
+
+		for j := range 8 {
+			sum += int64(absLevel(col[j]))
 		}
 	}
 
@@ -925,7 +941,6 @@ func (e *intraEncoder) blockData(b lossyBlock, rdoq bool) ([]int32, []uint8) {
 		quantize(coef, reconCoef, n, qp, 8)
 	}
 
-	// A block that quantised to nothing reconstructs as its own prediction.
 	if !hasCoefficients(coef) {
 		return coef, pred
 	}

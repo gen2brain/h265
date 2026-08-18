@@ -39,6 +39,9 @@ func predBi8NEON(dst *uint8, dstStride int, a, b *int16, srcStride, w, h, shift 
 func idctCols4NEON(dst, src, m *int32, n, mstride, shift int, rnd, lo, hi int32)
 
 //go:noescape
+func satd16x8NEON(src *uint8, srcStride int, pred *uint8, predStride int) int64
+
+//go:noescape
 func transpose4NEON(dst, src *int32, n int)
 
 //go:noescape
@@ -79,6 +82,10 @@ func dspInit(d *dspContext) {
 
 	transposeAsm = func(dst, src []int32, n int) {
 		transpose4NEON(&dst[0], &src[0], n)
+	}
+
+	satd16x8Asm = func(src []uint8, srcStride int, pred []uint8, predStride int) int64 {
+		return satd16x8NEON(&src[0], srcStride, &pred[0], predStride)
 	}
 
 	forwardTransform8Asm = func(dst, src []int32, n int) {

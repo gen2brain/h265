@@ -55,6 +55,10 @@ var dequant32Asm func(coef []int32, m []uint8, ls, rnd int32, sh int, lo, hi int
 // an implementation is compiled in. n is at least eight.
 var idctColsAsm func(dst, src []int32, n int, rnd int32, shift int, lo, hi int32)
 
+// satd16x8Asm is satd over a sixteen wide and eight tall strip, which is two
+// 8x8 blocks, nil unless an implementation is compiled in.
+var satd16x8Asm func(src []uint8, srcStride int, pred []uint8, predStride int) int64
+
 // transposeAsm transposes an n by n block of int32, nil unless an
 // implementation is compiled in. n is a multiple of eight.
 var transposeAsm func(dst, src []int32, n int)

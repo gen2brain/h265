@@ -396,8 +396,8 @@ func TestEncodeCUSize(t *testing.T) {
 	}
 }
 
-// TestCUTransformFlat pins both halves of the test the size decision skips the
-// split arm on: no residual, and one transform rather than four.
+// TestCUTransformFlat pins both halves of the test: no residual, and one
+// transform rather than four.
 func TestCUTransformFlat(t *testing.T) {
 	var tu cuTransform
 

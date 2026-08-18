@@ -1,0 +1,236 @@
+//go:build riscv64 && riscv64.rva23u64 && !noasm
+
+#include "textflag.h"
+
+// func satd16x8RVV(src *uint8, srcStride int, pred *uint8, predStride int) int64
+//
+// satd over a sixteen wide and eight tall strip, one 8x8 at a time. There is no
+// shuffle network: the rows go back out with the strided store and come in
+// again contiguously, which is the transpose. Differences reach 255 and each
+// pass scales by eight, which int16 holds.
+TEXT ·satd16x8RVV(SB), NOSPLIT, $128-40
+	MOV src+0(FP), X10
+	MOV srcStride+8(FP), X11
+	MOV pred+16(FP), X12
+	MOV predStride+24(FP), X13
+
+	MOV $buf-128(SP), X14
+	MOV $16, X15
+
+	VSETIVLI $8, E32, M1, TA, MA, X0
+	VMVVI    $0, V20
+
+	MOV $2, X16
+
+half:
+	MOV X10, X5
+	MOV X12, X6
+
+	VSETIVLI $8, E16, M1, TA, MA, X0
+
+	VLE8V    (X5), V16
+	VLE8V    (X6), V17
+	VZEXTVF2 V16, V18
+	VZEXTVF2 V17, V19
+	VSUBVV   V19, V18, V0
+	ADD      X11, X5
+	ADD      X13, X6
+
+	VLE8V    (X5), V16
+	VLE8V    (X6), V17
+	VZEXTVF2 V16, V18
+	VZEXTVF2 V17, V19
+	VSUBVV   V19, V18, V1
+	ADD      X11, X5
+	ADD      X13, X6
+
+	VLE8V    (X5), V16
+	VLE8V    (X6), V17
+	VZEXTVF2 V16, V18
+	VZEXTVF2 V17, V19
+	VSUBVV   V19, V18, V2
+	ADD      X11, X5
+	ADD      X13, X6
+
+	VLE8V    (X5), V16
+	VLE8V    (X6), V17
+	VZEXTVF2 V16, V18
+	VZEXTVF2 V17, V19
+	VSUBVV   V19, V18, V3
+	ADD      X11, X5
+	ADD      X13, X6
+
+	VLE8V    (X5), V16
+	VLE8V    (X6), V17
+	VZEXTVF2 V16, V18
+	VZEXTVF2 V17, V19
+	VSUBVV   V19, V18, V4
+	ADD      X11, X5
+	ADD      X13, X6
+
+	VLE8V    (X5), V16
+	VLE8V    (X6), V17
+	VZEXTVF2 V16, V18
+	VZEXTVF2 V17, V19
+	VSUBVV   V19, V18, V5
+	ADD      X11, X5
+	ADD      X13, X6
+
+	VLE8V    (X5), V16
+	VLE8V    (X6), V17
+	VZEXTVF2 V16, V18
+	VZEXTVF2 V17, V19
+	VSUBVV   V19, V18, V6
+	ADD      X11, X5
+	ADD      X13, X6
+
+	VLE8V    (X5), V16
+	VLE8V    (X6), V17
+	VZEXTVF2 V16, V18
+	VZEXTVF2 V17, V19
+	VSUBVV   V19, V18, V7
+
+	VADDVV V4, V0, V8
+	VSUBVV V4, V0, V12
+	VADDVV V5, V1, V9
+	VSUBVV V5, V1, V13
+	VADDVV V6, V2, V10
+	VSUBVV V6, V2, V14
+	VADDVV V7, V3, V11
+	VSUBVV V7, V3, V15
+
+	VADDVV V10, V8, V0
+	VADDVV V11, V9, V1
+	VSUBVV V10, V8, V2
+	VSUBVV V11, V9, V3
+	VADDVV V14, V12, V4
+	VADDVV V15, V13, V5
+	VSUBVV V14, V12, V6
+	VSUBVV V15, V13, V7
+
+	VADDVV V1, V0, V8
+	VSUBVV V1, V0, V9
+	VADDVV V3, V2, V10
+	VSUBVV V3, V2, V11
+	VADDVV V5, V4, V12
+	VSUBVV V5, V4, V13
+	VADDVV V7, V6, V14
+	VSUBVV V7, V6, V15
+
+	// Scatter down the buffer's columns, then read the rows back.
+	MOV     X14, X18
+	VSSE16V V8, X15, (X18)
+	ADD     $2, X18
+	VSSE16V V9, X15, (X18)
+	ADD     $2, X18
+	VSSE16V V10, X15, (X18)
+	ADD     $2, X18
+	VSSE16V V11, X15, (X18)
+	ADD     $2, X18
+	VSSE16V V12, X15, (X18)
+	ADD     $2, X18
+	VSSE16V V13, X15, (X18)
+	ADD     $2, X18
+	VSSE16V V14, X15, (X18)
+	ADD     $2, X18
+	VSSE16V V15, X15, (X18)
+
+	MOV    X14, X18
+	VLE16V (X18), V0
+	ADD    $16, X18
+	VLE16V (X18), V1
+	ADD    $16, X18
+	VLE16V (X18), V2
+	ADD    $16, X18
+	VLE16V (X18), V3
+	ADD    $16, X18
+	VLE16V (X18), V4
+	ADD    $16, X18
+	VLE16V (X18), V5
+	ADD    $16, X18
+	VLE16V (X18), V6
+	ADD    $16, X18
+	VLE16V (X18), V7
+
+	VADDVV V4, V0, V8
+	VSUBVV V4, V0, V12
+	VADDVV V5, V1, V9
+	VSUBVV V5, V1, V13
+	VADDVV V6, V2, V10
+	VSUBVV V6, V2, V14
+	VADDVV V7, V3, V11
+	VSUBVV V7, V3, V15
+
+	VADDVV V10, V8, V0
+	VADDVV V11, V9, V1
+	VSUBVV V10, V8, V2
+	VSUBVV V11, V9, V3
+	VADDVV V14, V12, V4
+	VADDVV V15, V13, V5
+	VSUBVV V14, V12, V6
+	VSUBVV V15, V13, V7
+
+	VADDVV V1, V0, V8
+	VSUBVV V1, V0, V9
+	VADDVV V3, V2, V10
+	VSUBVV V3, V2, V11
+	VADDVV V5, V4, V12
+	VSUBVV V5, V4, V13
+	VADDVV V7, V6, V14
+	VSUBVV V7, V6, V15
+
+	// The widening comes before the absolute value: the sums leave int16.
+	VSETIVLI $8, E32, M1, TA, MA, X0
+
+	VSEXTVF2 V8, V18
+	VRSUBVX  X0, V18, V19
+	VMAXVV   V18, V19, V19
+	VADDVV   V19, V20, V20
+
+	VSEXTVF2 V9, V18
+	VRSUBVX  X0, V18, V19
+	VMAXVV   V18, V19, V19
+	VADDVV   V19, V20, V20
+
+	VSEXTVF2 V10, V18
+	VRSUBVX  X0, V18, V19
+	VMAXVV   V18, V19, V19
+	VADDVV   V19, V20, V20
+
+	VSEXTVF2 V11, V18
+	VRSUBVX  X0, V18, V19
+	VMAXVV   V18, V19, V19
+	VADDVV   V19, V20, V20
+
+	VSEXTVF2 V12, V18
+	VRSUBVX  X0, V18, V19
+	VMAXVV   V18, V19, V19
+	VADDVV   V19, V20, V20
+
+	VSEXTVF2 V13, V18
+	VRSUBVX  X0, V18, V19
+	VMAXVV   V18, V19, V19
+	VADDVV   V19, V20, V20
+
+	VSEXTVF2 V14, V18
+	VRSUBVX  X0, V18, V19
+	VMAXVV   V18, V19, V19
+	VADDVV   V19, V20, V20
+
+	VSEXTVF2 V15, V18
+	VRSUBVX  X0, V18, V19
+	VMAXVV   V18, V19, V19
+	VADDVV   V19, V20, V20
+
+	ADD $8, X10
+	ADD $8, X12
+
+	ADD  $-1, X16
+	BNEZ X16, half
+
+	VMVVI     $0, V21
+	VREDSUMVS V21, V20, V22
+	VMVXS     V22, X17
+
+	MOV X17, ret+32(FP)
+	RET

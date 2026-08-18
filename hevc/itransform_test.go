@@ -717,7 +717,6 @@ func TestSATD(t *testing.T) {
 			t.Fatalf("flat difference of %d: %d, want %d", c, got, want)
 		}
 
-		// A limit may only cut the sum short once it has been reached.
 		if got := e.satd(0, 0, pred, n, want+1); got != want {
 			t.Fatalf("limit above the sum of %d: %d, want %d", c, got, want)
 		}
@@ -847,6 +846,67 @@ func TestAddResidual(t *testing.T) {
 // TestAddResidualAsm checks any compiled-in kernel against the Go path, over
 // every block size and both shifts, with the block placed at an offset so a
 // stride error shows up.
+// TestSATDAsm holds the strip kernel to the two 8x8 blocks it stands for. The
+// extremes reach 16320, where int16 would give out.
+func TestSATDAsm(t *testing.T) {
+	k := satd16x8Asm
+	if k == nil {
+		t.Skip("no assembly for this target")
+	}
+
+	r := rand.New(rand.NewPCG(21, 22))
+
+	const srcStride, predStride = 37, 16
+
+	src := make([]uint8, srcStride*11)
+	pred := make([]uint8, predStride*11)
+
+	for _, c := range []struct {
+		name        string
+		srcF, predF func(i int) uint8
+	}{
+		{"noise",
+			func(int) uint8 { return uint8(r.IntN(256)) },
+			func(int) uint8 { return uint8(r.IntN(256)) }},
+		{"white on black",
+			func(int) uint8 { return 255 },
+			func(int) uint8 { return 0 }},
+		{"black on white",
+			func(int) uint8 { return 0 },
+			func(int) uint8 { return 255 }},
+		{"extremes",
+			func(i int) uint8 { return uint8((i & 1) * 255) },
+			func(i int) uint8 { return uint8((^i & 1) * 255) }},
+		{"checker",
+			func(i int) uint8 { return uint8(((i ^ i/16) & 1) * 255) },
+			func(i int) uint8 { return uint8(((i ^ i/8) & 1) * 255) }},
+		{"ramp",
+			func(i int) uint8 { return uint8(i * 7) },
+			func(i int) uint8 { return uint8(i * 3) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for i := range src {
+				src[i] = c.srcF(i)
+			}
+
+			for i := range pred {
+				pred[i] = c.predF(i)
+			}
+
+			for _, off := range []int{0, 1, 2*srcStride + 3} {
+				s, p := src[off:], pred[off%predStride:]
+
+				want := satd8x8Go(s, srcStride, p, predStride) +
+					satd8x8Go(s[8:], srcStride, p[8:], predStride)
+
+				if got := k(s, srcStride, p, predStride); got != want {
+					t.Fatalf("offset %d: %d, want %d", off, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestAddResidualAsm(t *testing.T) {
 	k := dsp.addResidual8
 	if k == nil {
