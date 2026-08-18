@@ -371,49 +371,93 @@ func encodeRecon(t *testing.T, y, cb, cr []uint8, width, height, qp int) ([]byte
 	return rbsp, e.recon
 }
 
-func TestEncodeLossyIntraExternal(t *testing.T) {
-	const width, height = 48, 48
-
-	y, cb, cr := lossyTestFrame(width, height)
-	_, recon := encodeRecon(t, y, cb, cr, width, height, 26)
-	nals, err := encodeIntraLossyQP(y, cb, cr, width, height, 26)
-	if err != nil {
-		t.Fatal(err)
+// TestEncodeExternal holds the written bitstream to decoders that were not
+// written here. Both arms are exact: the lossy one against the reconstruction
+// the encoder built, the PCM one against the source itself.
+func TestEncodeExternal(t *testing.T) {
+	tools := map[string]func(in, out string) *exec.Cmd{
+		"dec265": func(in, out string) *exec.Cmd {
+			return exec.Command("dec265", "-q", "-o", out, in)
+		},
+		"ffmpeg": func(in, out string) *exec.Cmd {
+			return exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+				"-i", in, "-f", "rawvideo", "-y", out)
+		},
 	}
 
-	stream := filepath.Join(t.TempDir(), "encoded.h265")
-	if err := os.WriteFile(stream, MarshalAnnexB(nals), 0o644); err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		width, height int
+		qp            int
+		pcm           bool
+	}{
+		{48, 48, 26, false},
+		{64, 64, 1, false},
+		{80, 48, 51, false},
+		{176, 144, 34, false},
+		{32, 32, 0, true},
+		{80, 48, 0, true},
 	}
-	want := append(append(append([]byte{}, recon[0]...), recon[1]...), recon[2]...)
 
-	for _, tool := range []string{"dec265", "ffmpeg"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			t.Logf("%s not installed", tool)
-			continue
+	for _, c := range cases {
+		r := rand.New(rand.NewPCG(uint64(c.width), uint64(c.qp)))
+		y, cb, cr := lossyPattern(r, c.width, c.height, 3)
+
+		var (
+			nals []NALUnit
+			want []byte
+			err  error
+		)
+
+		if c.pcm {
+			nals, err = encodePCM(y, cb, cr, c.width, c.height)
+			want = append(append(append([]byte{}, y...), cb...), cr...)
+		} else {
+			var recon [3][]uint8
+
+			_, recon = encodeRecon(t, y, cb, cr, c.width, c.height, c.qp)
+			nals, err = encodeIntraLossyQP(y, cb, cr, c.width, c.height, c.qp)
+			want = append(append(append([]byte{}, recon[0]...), recon[1]...), recon[2]...)
 		}
 
-		t.Run(tool, func(t *testing.T) {
-			out := filepath.Join(t.TempDir(), "decoded.yuv")
-			var cmd *exec.Cmd
-			if tool == "dec265" {
-				cmd = exec.Command(tool, "-q", "-o", out, stream)
-			} else {
-				cmd = exec.Command(tool, "-hide_banner", "-loglevel", "error", "-i", stream,
-					"-f", "rawvideo", "-y", out)
-			}
-			if b, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("%s: %v: %s", tool, err, b)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		dir := t.TempDir()
+
+		stream := filepath.Join(dir, "encoded.h265")
+		if err := os.WriteFile(stream, MarshalAnnexB(nals), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, tool := range []string{"dec265", "ffmpeg"} {
+			if _, err := exec.LookPath(tool); err != nil {
+				t.Logf("%s not installed", tool)
+
+				continue
 			}
 
-			got, err := os.ReadFile(out)
-			if err != nil {
-				t.Fatal(err)
+			name := fmt.Sprintf("%s/%dx%d/qp%d", tool, c.width, c.height, c.qp)
+			if c.pcm {
+				name = fmt.Sprintf("%s/%dx%d/pcm", tool, c.width, c.height)
 			}
-			if !bytes.Equal(got, want) {
-				t.Fatalf("decoded %d bytes, want %d", len(got), len(want))
-			}
-		})
+
+			t.Run(name, func(t *testing.T) {
+				out := filepath.Join(t.TempDir(), "decoded.yuv")
+				if b, err := tools[tool](stream, out).CombinedOutput(); err != nil {
+					t.Fatalf("%s: %v: %s", tool, err, b)
+				}
+
+				got, err := os.ReadFile(out)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if !bytes.Equal(got, want) {
+					t.Fatalf("decoded %d bytes, want %d", len(got), len(want))
+				}
+			})
+		}
 	}
 }
 
@@ -484,6 +528,192 @@ func TestEncodeLossyIntraQualityBaseline(t *testing.T) {
 		t.Logf("QP %d: %d bytes, %.2f dB", qp, bytes, 10*math.Log10(255*255/mse))
 		lastBytes, lastMSE = bytes, mse
 	}
+}
+
+// lossyPattern builds a frame of one kind: noise stresses the residual coder,
+// the flat and bilevel ones the mode decision, and the gradients the angular
+// predictions.
+func lossyPattern(r *rand.Rand, width, height, kind int) ([]byte, []byte, []byte) {
+	y := make([]byte, width*height)
+	cb := make([]byte, width*height/4)
+	cr := make([]byte, width*height/4)
+
+	fill := func(p []byte, stride int) {
+		for i := range p {
+			x, j := i%stride, i/stride
+
+			switch kind {
+			case 0:
+				p[i] = byte(r.UintN(256))
+			case 1:
+				p[i] = byte(3 * x)
+			case 2:
+				p[i] = byte(128 + 100*((x/4+j/4)&1))
+			case 3:
+				p[i] = byte(int(r.UintN(24)) + x + j)
+			case 4:
+				p[i] = 0
+			case 5:
+				p[i] = 255
+			default:
+				p[i] = byte(r.UintN(2) * 255)
+			}
+		}
+	}
+
+	fill(y, width)
+	fill(cb, width/2)
+	fill(cr, width/2)
+
+	return y, cb, cr
+}
+
+// TestEncodeLossyRoundTrip decodes what the encoder writes and holds it to the
+// reconstruction the encoder built, over every picture shape the coding tree
+// takes: whole coding tree blocks, ones cut short on either edge, and the whole
+// range of QP.
+func TestEncodeLossyRoundTrip(t *testing.T) {
+	sizes := [][2]int{{16, 16}, {48, 32}, {64, 64}, {80, 48}, {128, 64}}
+
+	for _, size := range sizes {
+		width, height := size[0], size[1]
+
+		for kind := range 7 {
+			r := rand.New(rand.NewPCG(uint64(kind), uint64(width*height)))
+			y, cb, cr := lossyPattern(r, width, height, kind)
+
+			for _, qp := range []int{1, 20, 34, 51} {
+				name := fmt.Sprintf("%dx%d/kind%d/qp%d", width, height, kind, qp)
+
+				t.Run(name, func(t *testing.T) {
+					_, recon := encodeRecon(t, y, cb, cr, width, height, qp)
+
+					nals, err := encodeIntraLossyQP(y, cb, cr, width, height, qp)
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					var (
+						d    Decoder
+						pics []*Picture
+					)
+
+					for _, nal := range nals {
+						out, err := d.DecodeNAL(nal)
+						if err != nil {
+							t.Fatalf("DecodeNAL %d: %v", nal.Type, err)
+						}
+
+						pics = append(pics, out...)
+					}
+
+					pics = append(pics, d.Flush()...)
+
+					if len(pics) != 1 {
+						t.Fatalf("pictures = %d", len(pics))
+					}
+
+					want := append(append(append([]byte{}, recon[0]...), recon[1]...), recon[2]...)
+
+					got := planarYUV(pics[0])
+					if bytes.Equal(got, want) {
+						return
+					}
+
+					for i := range want {
+						if got[i] != want[i] {
+							t.Fatalf("sample %d = %d, want %d", i, got[i], want[i])
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+// FuzzEncode holds the encoder to the same contract on arbitrary input: it must
+// not panic, and a decoder must reproduce the reconstruction it built, sample
+// for sample. The PCM arm must reproduce the source itself.
+func FuzzEncode(f *testing.F) {
+	f.Add(uint8(0), uint8(0), uint8(26), true, []byte{0})
+	f.Add(uint8(3), uint8(1), uint8(51), false, []byte{7, 200, 13, 255, 0, 91})
+	f.Add(uint8(7), uint8(4), uint8(1), false, []byte{128, 129, 130})
+
+	f.Fuzz(func(t *testing.T, w, h, q uint8, lossless bool, data []byte) {
+		if len(data) == 0 {
+			return
+		}
+
+		width, height := int(w%8+1)*16, int(h%4+1)*16
+		qp := int(q%51) + 1
+
+		y := make([]byte, width*height)
+		cb := make([]byte, width*height/4)
+		cr := make([]byte, width*height/4)
+
+		for i := range y {
+			y[i] = data[i%len(data)]
+		}
+
+		for i := range cb {
+			cb[i] = data[(i*3+1)%len(data)]
+			cr[i] = data[(i*5+2)%len(data)]
+		}
+
+		var (
+			nals []NALUnit
+			want []byte
+			err  error
+		)
+
+		if lossless {
+			nals, err = encodePCM(y, cb, cr, width, height)
+			want = append(append(append([]byte{}, y...), cb...), cr...)
+		} else {
+			var e intraEncoder
+
+			var rbsp []byte
+
+			rbsp, err = e.slice(y, cb, cr, width, height, qp)
+			if err == nil {
+				nals = lossyNALs(width, height, rbsp)
+				want = append(append(append([]byte{}, e.recon[0]...), e.recon[1]...), e.recon[2]...)
+			}
+		}
+
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+
+		var (
+			d    Decoder
+			pics []*Picture
+		)
+
+		for _, nal := range nals {
+			out, err := d.DecodeNAL(nal)
+			if err != nil {
+				t.Fatalf("DecodeNAL %d: %v", nal.Type, err)
+			}
+
+			pics = append(pics, out...)
+		}
+
+		pics = append(pics, d.Flush()...)
+
+		if len(pics) != 1 {
+			t.Fatalf("pictures = %d", len(pics))
+		}
+
+		if got := planarYUV(pics[0]); !bytes.Equal(got, want) {
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("%dx%d qp %d lossless %v: sample %d = %d, want %d",
+						width, height, qp, lossless, i, got[i], want[i])
+				}
+			}
+		}
+	})
 }
 
 func lossyTestFrame(width, height int) ([]byte, []byte, []byte) {

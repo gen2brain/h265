@@ -46,6 +46,8 @@ jobs:
         include:
         - pkg: ./hevc/
           target: FuzzDecodeNAL
+        - pkg: ./hevc/
+          target: FuzzEncode
         - pkg: ./heic/
           target: FuzzDecode
     runs-on: ubuntu-latest
