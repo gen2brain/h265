@@ -591,24 +591,9 @@ func (e *intraEncoder) residual(w *cabacWriter, coef []int32, log2Size, cIdx, mo
 func (e *intraEncoder) tu8(x, y, mode int) lossyTU8Plan {
 	w := e.width
 
-	var (
-		base  [8 * 8]uint8
-		baseY [4]uint8
-	)
+	var before, kept tu8State
 
-	for j := range 8 {
-		copy(base[j*8:], e.recon[0][(y+j)*w+x:][:8])
-	}
-
-	saveRect(baseY[:], e.coded[0], w/4, x/4, y/4, 2, 2)
-
-	restore := func() {
-		for j := range 8 {
-			copy(e.recon[0][(y+j)*w+x:][:8], base[j*8:])
-		}
-
-		loadRect(e.coded[0], baseY[:], w/4, x/4, y/4, 2, 2)
-	}
+	e.saveTU8(&before, x, y)
 
 	quarters := [4]lossyBlock{}
 	for j := range 4 {
@@ -620,33 +605,25 @@ func (e *intraEncoder) tu8(x, y, mode int) lossyTU8Plan {
 	split := lossyTU8Plan{split: true}
 
 	for j := range 4 {
-		copy(split.y[j][:], e.codeBlock(quarters[j], false))
+		copy(split.y[j][:], e.codeBlock(quarters[j], true))
 	}
 
-	splitDist := e.distortion(0, x, y, 8, e.recon[0][y*w+x:], w)
+	splitCost := e.rdCost(e.distortion(0, x, y, 8, e.recon[0][y*w+x:], w),
+		e.tu8Rate(&split, mode))
 
-	restore()
+	e.saveTU8(&kept, x, y)
+	e.loadTU8(&before, x, y)
 
 	var unsplit lossyTU8Plan
 
-	copy(unsplit.y8[:], e.codeBlock(whole, false))
+	copy(unsplit.y8[:], e.codeBlock(whole, true))
 
-	unsplitDist := e.distortion(0, x, y, 8, e.recon[0][y*w+x:], w)
+	chosen := unsplit
+	if splitCost < e.rdCost(e.distortion(0, x, y, 8, e.recon[0][y*w+x:], w),
+		e.tu8Rate(&unsplit, mode)) {
+		chosen = split
 
-	chosen := split
-	if e.rdCost(unsplitDist, e.tu8Rate(&unsplit, mode)) <=
-		e.rdCost(splitDist, e.tu8Rate(&split, mode)) {
-		chosen = unsplit
-	}
-
-	restore()
-
-	if chosen.split {
-		for j := range 4 {
-			copy(chosen.y[j][:], e.codeBlock(quarters[j], true))
-		}
-	} else {
-		copy(chosen.y8[:], e.codeBlock(whole, true))
+		e.loadTU8(&kept, x, y)
 	}
 
 	copy(chosen.cb[:], e.codeBlock(lossyBlock{cIdx: 1, x: x / 2, y: y / 2, n: 4, mode: mode}, true))
@@ -657,9 +634,23 @@ func (e *intraEncoder) tu8(x, y, mode int) lossyTU8Plan {
 	return chosen
 }
 
-// lumaMode picks the intra mode of a 16x16 block. Every mode is tried on the
-// prediction alone, which is cheap, and only the closest few are coded for what
-// they really cost.
+// tu8State is the reconstruction one 8x8 transform unit leaves behind, so the
+// arm that wins does not have to be coded a second time.
+type tu8State struct {
+	y     [8 * 8]uint8
+	coded [4]uint8
+}
+
+func (e *intraEncoder) saveTU8(s *tu8State, x, y int) {
+	saveRect(s.y[:], e.recon[0], e.width, x, y, 8, 8)
+	saveRect(s.coded[:], e.coded[0], e.width/4, x/4, y/4, 2, 2)
+}
+
+func (e *intraEncoder) loadTU8(s *tu8State, x, y int) {
+	loadRect(e.recon[0], s.y[:], e.width, x, y, 8, 8)
+	loadRect(e.coded[0], s.coded[:], e.width/4, x/4, y/4, 2, 2)
+}
+
 func (e *intraEncoder) lumaMode(x, y int, cand [3]int) int {
 	b := lossyBlock{x: x, y: y, n: 16}
 	e.prepareRef(b)
