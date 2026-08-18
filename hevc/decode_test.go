@@ -413,26 +413,89 @@ func TestCUTransformFlat(t *testing.T) {
 
 	tu.split = false
 
-	for _, c := range []struct {
-		name  string
-		coef  []int32
-		index int
-	}{
-		{"luma", tu.y32[:], 1023},
-		{"cb", tu.cb32[:], 255},
-		{"cr", tu.cr32[:], 0},
-	} {
-		c.coef[c.index] = 1
+	for i, name := range [3]string{"luma", "cb", "cr"} {
+		tu.whole[i] = true
 
 		if tu.flat() {
-			t.Fatalf("a %s coefficient is flat", c.name)
+			t.Fatalf("a coded %s block is flat", name)
 		}
 
-		c.coef[c.index] = 0
+		tu.whole[i] = false
 	}
 
 	if !tu.flat() {
 		t.Fatal("cleared again and not flat")
+	}
+}
+
+// TestCUTransformFlags holds the stored coded block flags to the levels they
+// stand for, which nothing else checks now the tree takes them on trust.
+func TestCUTransformFlags(t *testing.T) {
+	const size = 64
+
+	y := make([]byte, size*size)
+	cb := make([]byte, size*size/4)
+	cr := make([]byte, size*size/4)
+
+	dirs := [4][2]int{{8, 0}, {0, 8}, {6, 6}, {6, -6}}
+
+	for j := range size {
+		for i := range size {
+			d := dirs[(j/16&1)*2+i/16&1]
+			y[j*size+i] = byte(68 + d[0]*(i%16) + d[1]*(j%16))
+		}
+	}
+
+	for i := range cb {
+		cb[i] = byte(120 + i%9)
+		cr[i] = byte(130 + i%7)
+	}
+
+	for _, qp := range []int{12, 26, 40} {
+		var e intraEncoder
+
+		e.reset(y, cb, cr, size, size, qp)
+
+		if err := e.cu32(0, 0, 1, intraDC); err != nil {
+			t.Fatal(err)
+		}
+
+		tu := &e.tu
+
+		for i, coef := range [3][]int32{tu.y32[:], tu.cb32[:], tu.cr32[:]} {
+			if want := hasCoefficients(coef); tu.whole[i] != want {
+				t.Fatalf("qp=%d whole[%d] = %v, want %v", qp, i, tu.whole[i], want)
+			}
+		}
+
+		for i := range 4 {
+			for c, coef := range [3][]int32{tu.y[i][:], tu.cb[i][:], tu.cr[i][:]} {
+				if want := hasCoefficients(coef); tu.quad[c][i] != want {
+					t.Fatalf("qp=%d quad[%d][%d] = %v, want %v",
+						qp, c, i, tu.quad[c][i], want)
+				}
+			}
+		}
+
+		plan := e.tu8(0, 0, intraDC)
+
+		if want := hasCoefficients(plan.y8[:]); !plan.split && plan.cbfY8 != want {
+			t.Fatalf("qp=%d cbfY8 = %v, want %v", qp, plan.cbfY8, want)
+		}
+
+		for i := range 4 {
+			if want := hasCoefficients(plan.y[i][:]); plan.split && plan.cbfY[i] != want {
+				t.Fatalf("qp=%d cbfY[%d] = %v, want %v", qp, i, plan.cbfY[i], want)
+			}
+		}
+
+		if want := hasCoefficients(plan.cb[:]); plan.cbfCb != want {
+			t.Fatalf("qp=%d cbfCb = %v, want %v", qp, plan.cbfCb, want)
+		}
+
+		if want := hasCoefficients(plan.cr[:]); plan.cbfCr != want {
+			t.Fatalf("qp=%d cbfCr = %v, want %v", qp, plan.cbfCr, want)
+		}
 	}
 }
 

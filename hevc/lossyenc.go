@@ -81,18 +81,21 @@ type intraEncoder struct {
 // cuTransform holds both ways of coding a 32x32 coding unit's transform tree:
 // one unit of its own size, or four 16x16 ones.
 type cuTransform struct {
-	split        bool
-	y32          [32 * 32]int32
-	cb32, cr32   [16 * 16]int32
-	y            [4][16 * 16]int32
-	cb, cr       [4][8 * 8]int32
+	split      bool
+	y32        [32 * 32]int32
+	cb32, cr32 [16 * 16]int32
+	y          [4][16 * 16]int32
+	cb, cr     [4][8 * 8]int32
+
+	// whole and quad are the coded block flags, taken where the levels are made.
+	whole        [3]bool
+	quad         [3][4]bool
 	cbfCb, cbfCr bool
 }
 
 // flat reports whether the unit took one transform and left no residual in it.
 func (t *cuTransform) flat() bool {
-	return !t.split && !hasCoefficients(t.y32[:]) &&
-		!hasCoefficients(t.cb32[:]) && !hasCoefficients(t.cr32[:])
+	return !t.split && !t.whole[0] && !t.whole[1] && !t.whole[2]
 }
 
 // cuState is everything coding one 32x32 block changes, so that an arm of the
@@ -138,6 +141,8 @@ type lossyTU8Plan struct {
 	y            [4][4 * 4]int32
 	y8           [8 * 8]int32
 	cb, cr       [4 * 4]int32
+	cbfY         [4]bool
+	cbfY8        bool
 	cbfCb, cbfCr bool
 }
 
@@ -423,11 +428,13 @@ func (e *intraEncoder) leaf(x0, y0, d, mode int) error {
 
 		if tus[i].split {
 			for j := range 4 {
-				if err := e.codedResidual(&e.cabac, tus[i].y[j][:], 2, 0, mode, 2); err != nil {
+				if err := e.codedResidual(&e.cabac, tus[i].y[j][:], tus[i].cbfY[j],
+					2, 0, mode, 2); err != nil {
 					return err
 				}
 			}
-		} else if err := e.codedResidual(&e.cabac, tus[i].y8[:], 3, 0, mode, 1); err != nil {
+		} else if err := e.codedResidual(&e.cabac, tus[i].y8[:], tus[i].cbfY8,
+			3, 0, mode, 1); err != nil {
 			return err
 		}
 
@@ -466,9 +473,17 @@ func (e *intraEncoder) cu32(x0, y0, d, mode int) error {
 
 	e.save(&e.tuBase, x0, y0, base)
 
-	copy(t.y32[:], e.codeBlock(lossyBlock{x: x0, y: y0, n: 32, mode: mode}, true))
-	copy(t.cb32[:], e.codeBlock(lossyBlock{cIdx: 1, x: x0 / 2, y: y0 / 2, n: 16, mode: mode}, true))
-	copy(t.cr32[:], e.codeBlock(lossyBlock{cIdx: 2, x: x0 / 2, y: y0 / 2, n: 16, mode: mode}, true))
+	coef, cbf := e.codeBlock(lossyBlock{x: x0, y: y0, n: 32, mode: mode}, true)
+	copy(t.y32[:], coef)
+	t.whole[0] = cbf
+
+	coef, cbf = e.codeBlock(lossyBlock{cIdx: 1, x: x0 / 2, y: y0 / 2, n: 16, mode: mode}, true)
+	copy(t.cb32[:], coef)
+	t.whole[1] = cbf
+
+	coef, cbf = e.codeBlock(lossyBlock{cIdx: 2, x: x0 / 2, y: y0 / 2, n: 16, mode: mode}, true)
+	copy(t.cr32[:], coef)
+	t.whole[2] = cbf
 
 	t.split = false
 	whole := e.rdCost(e.cuDistortion(x0, y0, 32), e.tu32Rate(mode))
@@ -478,9 +493,18 @@ func (e *intraEncoder) cu32(x0, y0, d, mode int) error {
 
 	for i := range 4 {
 		x, y := x0+i&1*16, y0+i>>1*16
-		copy(t.y[i][:], e.codeBlock(lossyBlock{x: x, y: y, n: 16, mode: mode}, true))
-		copy(t.cb[i][:], e.codeBlock(lossyBlock{cIdx: 1, x: x / 2, y: y / 2, n: 8, mode: mode}, true))
-		copy(t.cr[i][:], e.codeBlock(lossyBlock{cIdx: 2, x: x / 2, y: y / 2, n: 8, mode: mode}, true))
+
+		coef, cbf = e.codeBlock(lossyBlock{x: x, y: y, n: 16, mode: mode}, true)
+		copy(t.y[i][:], coef)
+		t.quad[0][i] = cbf
+
+		coef, cbf = e.codeBlock(lossyBlock{cIdx: 1, x: x / 2, y: y / 2, n: 8, mode: mode}, true)
+		copy(t.cb[i][:], coef)
+		t.quad[1][i] = cbf
+
+		coef, cbf = e.codeBlock(lossyBlock{cIdx: 2, x: x / 2, y: y / 2, n: 8, mode: mode}, true)
+		copy(t.cr[i][:], coef)
+		t.quad[2][i] = cbf
 	}
 
 	t.split = true
@@ -521,13 +545,13 @@ func (e *intraEncoder) tu32Rate(mode int) int64 {
 func (e *intraEncoder) tu32Tree(w *cabacWriter, mode int) error {
 	t := &e.tu
 
-	t.cbfCb, t.cbfCr = hasCoefficients(t.cb32[:]), hasCoefficients(t.cr32[:])
+	t.cbfCb, t.cbfCr = t.whole[1], t.whole[2]
 	if t.split {
 		t.cbfCb, t.cbfCr = false, false
 
 		for i := range 4 {
-			t.cbfCb = t.cbfCb || hasCoefficients(t.cb[i][:])
-			t.cbfCr = t.cbfCr || hasCoefficients(t.cr[i][:])
+			t.cbfCb = t.cbfCb || t.quad[1][i]
+			t.cbfCr = t.cbfCr || t.quad[2][i]
 		}
 	}
 
@@ -536,7 +560,7 @@ func (e *intraEncoder) tu32Tree(w *cabacWriter, mode int) error {
 	w.encodeBin(ctxCBFCBCR, boolToBit(t.cbfCr))
 
 	if !t.split {
-		if err := e.codedResidual(w, t.y32[:], 5, 0, mode, 0); err != nil {
+		if err := e.codedResidual(w, t.y32[:], t.whole[0], 5, 0, mode, 0); err != nil {
 			return err
 		}
 
@@ -554,7 +578,7 @@ func (e *intraEncoder) tu32Tree(w *cabacWriter, mode int) error {
 	}
 
 	for i := range 4 {
-		cbfCb, cbfCr := hasCoefficients(t.cb[i][:]), hasCoefficients(t.cr[i][:])
+		cbfCb, cbfCr := t.quad[1][i], t.quad[2][i]
 		w.encodeBin(ctxSplitTransformFlag+1, 0)
 
 		if t.cbfCb {
@@ -565,7 +589,7 @@ func (e *intraEncoder) tu32Tree(w *cabacWriter, mode int) error {
 			w.encodeBin(ctxCBFCBCR+1, boolToBit(cbfCr))
 		}
 
-		if err := e.codedResidual(w, t.y[i][:], 4, 0, mode, 1); err != nil {
+		if err := e.codedResidual(w, t.y[i][:], t.quad[0][i], 4, 0, mode, 1); err != nil {
 			return err
 		}
 
@@ -587,8 +611,9 @@ func (e *intraEncoder) tu32Tree(w *cabacWriter, mode int) error {
 
 // codedResidual writes cbf_luma and the levels behind it. Table 9-49 gives the
 // flag its own context at the root of a transform tree.
-func (e *intraEncoder) codedResidual(w *cabacWriter, coef []int32, log2Size, cIdx, mode, trafoDepth int) error {
-	cbf := hasCoefficients(coef)
+func (e *intraEncoder) codedResidual(w *cabacWriter, coef []int32, cbf bool,
+	log2Size, cIdx, mode, trafoDepth int,
+) error {
 	w.encodeBin(ctxCBFLuma+boolToInt(trafoDepth == 0), boolToBit(cbf))
 
 	if !cbf {
@@ -622,7 +647,9 @@ func (e *intraEncoder) tu8(x, y, mode int) lossyTU8Plan {
 	split := lossyTU8Plan{split: true}
 
 	for j := range 4 {
-		copy(split.y[j][:], e.codeBlock(quarters[j], true))
+		coef, cbf := e.codeBlock(quarters[j], true)
+		copy(split.y[j][:], coef)
+		split.cbfY[j] = cbf
 	}
 
 	splitCost := e.rdCost(e.distortion(0, x, y, 8, e.recon[0][y*w+x:], w),
@@ -633,7 +660,9 @@ func (e *intraEncoder) tu8(x, y, mode int) lossyTU8Plan {
 
 	var unsplit lossyTU8Plan
 
-	copy(unsplit.y8[:], e.codeBlock(whole, true))
+	coef, cbf := e.codeBlock(whole, true)
+	copy(unsplit.y8[:], coef)
+	unsplit.cbfY8 = cbf
 
 	chosen := unsplit
 	if splitCost < e.rdCost(e.distortion(0, x, y, 8, e.recon[0][y*w+x:], w),
@@ -643,10 +672,13 @@ func (e *intraEncoder) tu8(x, y, mode int) lossyTU8Plan {
 		e.loadTU8(&kept, x, y)
 	}
 
-	copy(chosen.cb[:], e.codeBlock(lossyBlock{cIdx: 1, x: x / 2, y: y / 2, n: 4, mode: mode}, true))
-	copy(chosen.cr[:], e.codeBlock(lossyBlock{cIdx: 2, x: x / 2, y: y / 2, n: 4, mode: mode}, true))
-	chosen.cbfCb = hasCoefficients(chosen.cb[:])
-	chosen.cbfCr = hasCoefficients(chosen.cr[:])
+	coef, cbf = e.codeBlock(lossyBlock{cIdx: 1, x: x / 2, y: y / 2, n: 4, mode: mode}, true)
+	copy(chosen.cb[:], coef)
+	chosen.cbfCb = cbf
+
+	coef, cbf = e.codeBlock(lossyBlock{cIdx: 2, x: x / 2, y: y / 2, n: 4, mode: mode}, true)
+	copy(chosen.cr[:], coef)
+	chosen.cbfCr = cbf
 
 	return chosen
 }
@@ -707,9 +739,9 @@ func (e *intraEncoder) lumaMode(x, y int, cand [3]int) int {
 
 	for _, mode := range short {
 		b.mode = mode
-		coef, trial := e.blockData(b, false)
+		coef, trial, cbf := e.blockData(b, false)
 
-		cost := e.rdCost(e.distortion(0, x, y, 16, trial, 16), e.modeRate(cand, mode, coef))
+		cost := e.rdCost(e.distortion(0, x, y, 16, trial, 16), e.modeRate(cand, mode, coef, cbf))
 		if bestCost < 0 || cost < bestCost {
 			bestMode, bestCost = mode, cost
 		}
@@ -811,12 +843,11 @@ func hadamard8(v *[8]int32) {
 }
 
 // modeRate is what one mode costs, at rateShift.
-func (e *intraEncoder) modeRate(cand [3]int, mode int, coef []int32) int64 {
+func (e *intraEncoder) modeRate(cand [3]int, mode int, coef []int32, cbf bool) int64 {
 	w := e.cabac.counter()
 
 	lossyIntraLumaMode(&w, mode, cand)
 
-	cbf := hasCoefficients(coef)
 	w.encodeBin(ctxCBFLuma, boolToBit(cbf))
 
 	if cbf {
@@ -834,10 +865,10 @@ func (e *intraEncoder) tu8Rate(plan *lossyTU8Plan, mode int) int64 {
 
 	if plan.split {
 		for i := range plan.y {
-			e.rateResidual(&w, plan.y[i][:], 2, mode)
+			e.rateResidual(&w, plan.y[i][:], plan.cbfY[i], 2, mode)
 		}
 	} else {
-		e.rateResidual(&w, plan.y8[:], 3, mode)
+		e.rateResidual(&w, plan.y8[:], plan.cbfY8, 3, mode)
 	}
 
 	return w.rate
@@ -855,8 +886,7 @@ func (e *intraEncoder) rdCost(dist, rate int64) int64 {
 	return dist<<(rateShift+lambdaShift) + e.lambda*rate
 }
 
-func (e *intraEncoder) rateResidual(w *cabacWriter, coef []int32, log2Size, mode int) {
-	cbf := hasCoefficients(coef)
+func (e *intraEncoder) rateResidual(w *cabacWriter, coef []int32, cbf bool, log2Size, mode int) {
 	w.encodeBin(ctxCBFLuma, boolToBit(cbf))
 
 	if cbf {
@@ -893,9 +923,9 @@ func sse8Go(src []uint8, srcStride int, block []uint8, blockStride, n int) int64
 }
 
 // codeBlock codes one transform block and writes its reconstruction back.
-func (e *intraEncoder) codeBlock(b lossyBlock, rdoq bool) []int32 {
+func (e *intraEncoder) codeBlock(b lossyBlock, rdoq bool) ([]int32, bool) {
 	e.prepareRef(b)
-	coef, block := e.blockData(b, rdoq)
+	coef, block, cbf := e.blockData(b, rdoq)
 
 	stride := e.stride(b.cIdx)
 	for j := range b.n {
@@ -904,7 +934,7 @@ func (e *intraEncoder) codeBlock(b lossyBlock, rdoq bool) []int32 {
 
 	e.markCoded(b.cIdx, b.x, b.y, b.n)
 
-	return coef
+	return coef, cbf
 }
 
 // markCoded records that a block of the plane has been reconstructed, at the
@@ -922,7 +952,7 @@ func (e *intraEncoder) markCoded(cIdx, x, y, n int) {
 
 // blockData predicts, transforms, quantises and reconstructs one block against
 // the reference samples prepareRef has already built.
-func (e *intraEncoder) blockData(b lossyBlock, rdoq bool) ([]int32, []uint8) {
+func (e *intraEncoder) blockData(b lossyBlock, rdoq bool) ([]int32, []uint8, bool) {
 	n := b.n
 	count := n * n
 	stride := e.stride(b.cIdx)
@@ -958,7 +988,7 @@ func (e *intraEncoder) blockData(b lossyBlock, rdoq bool) ([]int32, []uint8) {
 	}
 
 	if !hasCoefficients(coef) {
-		return coef, pred
+		return coef, pred, false
 	}
 
 	copy(reconCoef, coef)
@@ -966,7 +996,7 @@ func (e *intraEncoder) blockData(b lossyBlock, rdoq bool) ([]int32, []uint8) {
 	inverseTransform(reconCoef, n, b.dst, 8, false, &e.scratch.transform)
 	addResidual(pred, n, 0, 0, n, residualShiftBits(8, false), reconCoef, 8)
 
-	return coef, pred
+	return coef, pred, true
 }
 
 // prepareRef builds the reference samples of 8.4.4.2.2, which do not depend on
