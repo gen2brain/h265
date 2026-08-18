@@ -481,6 +481,34 @@ func TestInvalid(t *testing.T) {
 	}
 }
 
+// TestErrorPrefix pins the package name every error names itself with. The Exif
+// reader was ported from Projects/gav1d and said "avif" for a long time.
+func TestErrorPrefix(t *testing.T) {
+	errs := []error{ErrInvalid, ErrUnsupported, ErrNoExif, ErrNoXMP}
+
+	for _, data := range [][]byte{
+		{},
+		{'X', 'X', 0, 42, 0, 0, 0, 8},
+		{'I', 'I', 43, 0, 8, 0, 0, 0},
+		{'I', 'I', 42, 0, 1, 0, 0, 0},
+	} {
+		var exif Exif
+
+		err := parseExifData(data, &exif)
+		if err == nil {
+			t.Fatalf("%x: no error", data)
+		}
+
+		errs = append(errs, err)
+	}
+
+	for _, err := range errs {
+		if !strings.HasPrefix(err.Error(), "heic: ") {
+			t.Errorf("error %q does not name the package", err)
+		}
+	}
+}
+
 func FuzzDecode(f *testing.F) {
 	for _, name := range []string{"basic.heic", "alpha.heic", "chroma444.heic"} {
 		b, err := os.ReadFile(filepath.Join("testdata", name))

@@ -8,10 +8,10 @@ import (
 )
 
 // ErrNoExif is returned when the file carries no Exif item.
-var ErrNoExif = errors.New("avif: no exif data")
+var ErrNoExif = errors.New("heic: no exif data")
 
 // ErrNoXMP is returned when the file carries no XMP item.
-var ErrNoXMP = errors.New("avif: no xmp data")
+var ErrNoXMP = errors.New("heic: no xmp data")
 
 const xmpContentType = "application/rdf+xml"
 
@@ -270,7 +270,7 @@ func (r *exifReader) readRational(offset int) float64 {
 
 func parseExifData(data []byte, exif *Exif) error {
 	if len(data) < 8 {
-		return errors.New("avif: exif data too short")
+		return errors.New("heic: exif data too short")
 	}
 
 	r := &exifReader{data: data}
@@ -279,16 +279,16 @@ func parseExifData(data []byte, exif *Exif) error {
 		r.littleEndian = true
 	case data[0] == 'M' && data[1] == 'M':
 	default:
-		return errors.New("avif: invalid exif byte order marker")
+		return errors.New("heic: invalid exif byte order marker")
 	}
 
 	if r.uint16(2) != 42 {
-		return errors.New("avif: invalid exif magic number")
+		return errors.New("heic: invalid exif magic number")
 	}
 
 	ifdOffset := r.uint32(4)
 	if ifdOffset < 8 || int(ifdOffset) >= len(data) {
-		return errors.New("avif: invalid exif ifd offset")
+		return errors.New("heic: invalid exif ifd offset")
 	}
 
 	exifIFDOffset, gpsIFDOffset := parseIFD(r, int(ifdOffset), exif)
