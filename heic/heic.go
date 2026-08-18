@@ -23,11 +23,15 @@ stays in the file's own color space.
 
 # Encoding
 
-[Encode] writes an 8-bit 4:2:0 *[image.YCbCr] whose dimensions are non-zero
-multiples of 16 as a HEIC still, with an nclx description of what
-[image.YCbCr] holds: full-range BT.601 carrying sRGB primaries and transfer.
-[EncodeOptions.Quality] selects the quantiser and [EncodeOptions.Lossless]
-codes the samples as PCM instead.
+[Encode] writes any image as a HEIC still. One that is not already an 8-bit
+4:2:0 *[image.YCbCr] is converted, dropping alpha, and the file carries an nclx
+description of what [image.YCbCr] holds: full-range BT.601 carrying sRGB
+primaries and transfer. [EncodeOptions.Quality] selects the quantiser and
+[EncodeOptions.Lossless] codes the samples as PCM instead.
+
+4:2:0 chroma cannot resolve an odd dimension, so a picture with one is stored
+with its edge repeated and carries a clean aperture that takes the repetition
+back off.
 
 # Metadata
 

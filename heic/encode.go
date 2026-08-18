@@ -32,8 +32,8 @@ type EncodeOptions struct {
 	Lossless bool
 }
 
-// Encode writes img to w as a HEIC still. It takes an 8-bit 4:2:0
-// *image.YCbCr whose dimensions are non-zero multiples of 16.
+// Encode writes img to w as a HEIC still. Any image will do; one that is not
+// already 8-bit 4:2:0 *image.YCbCr is converted, and alpha is dropped.
 func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
 	quality, lossless := DefaultQuality, false
 
@@ -47,15 +47,13 @@ func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
 		}
 	}
 
-	ycc, ok := img.(*image.YCbCr)
-	if !ok || ycc.SubsampleRatio != image.YCbCrSubsampleRatio420 || ycc.Rect.Min.X != 0 || ycc.Rect.Min.Y != 0 {
-		return ErrUnsupported
-	}
+	width, height := img.Bounds().Dx(), img.Bounds().Dy()
+	ycc := toYCbCr420(img)
 
-	width, height := ycc.Rect.Dx(), ycc.Rect.Dy()
-
-	enc, err := hevc.NewEncoder(hevc.EncoderOptions{Width: width, Height: height,
-		QP: 51 - quality*50/100, Lossless: lossless})
+	enc, err := hevc.NewEncoder(hevc.EncoderOptions{
+		Width: ycc.Rect.Dx(), Height: ycc.Rect.Dy(),
+		QP: 51 - quality*50/100, Lossless: lossless,
+	})
 	if err != nil {
 		return ErrUnsupported
 	}
@@ -71,6 +69,8 @@ func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
 		return ErrInvalid
 	}
 
+	stored := image.Point{X: ycc.Rect.Dx(), Y: ycc.Rect.Dy()}
+
 	sample := hevc.MarshalNAL(nals[3])
 	if uint64(len(sample))+maxBoxOverhead > math.MaxUint32 {
 		return ErrUnsupported
@@ -80,7 +80,7 @@ func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
 	binary.BigEndian.PutUint32(data, uint32(len(sample)))
 	data = append(data, sample...)
 
-	file, err := makeHEIC(width, height, nals[:3], data)
+	file, err := makeHEIC(image.Point{X: width, Y: height}, stored, nals[:3], data)
 	if err != nil {
 		return err
 	}
@@ -90,17 +90,17 @@ func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
 	return err
 }
 
-func makeHEIC(width, height int, params []hevc.NALUnit, data []byte) ([]byte, error) {
+func makeHEIC(size, stored image.Point, params []hevc.NALUnit, data []byte) ([]byte, error) {
 	ftyp := box("ftyp", []byte("heic\x00\x00\x00\x00mif1heic"))
 
-	meta, err := heicMeta(width, height, params, 0, uint64(len(data)))
+	meta, err := heicMeta(size, stored, params, 0, uint64(len(data)))
 	if err != nil {
 		return nil, err
 	}
 
 	off := uint64(len(ftyp) + len(meta) + 8)
 
-	meta, err = heicMeta(width, height, params, off, uint64(len(data)))
+	meta, err = heicMeta(size, stored, params, off, uint64(len(data)))
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +108,7 @@ func makeHEIC(width, height int, params []hevc.NALUnit, data []byte) ([]byte, er
 	return append(append(ftyp, meta...), box("mdat", data)...), nil
 }
 
-func heicMeta(width, height int, params []hevc.NALUnit, offset, length uint64) ([]byte, error) {
+func heicMeta(size, stored image.Point, params []hevc.NALUnit, offset, length uint64) ([]byte, error) {
 	hdlr := fullBox("hdlr", 0, 0, append([]byte("\x00\x00\x00\x00pict"), make([]byte, 13)...))
 	pitm := fullBox("pitm", 0, 0, u16(1))
 	infe := fullBox("infe", 2, 0, append(append(append(u16(1), 0, 0), []byte("hvc1")...), []byte("image\x00")...))
@@ -122,7 +122,7 @@ func heicMeta(width, height int, params []hevc.NALUnit, offset, length uint64) (
 	ilocData = append(ilocData, u32(uint32(length))...)
 	iloc := fullBox("iloc", 0, 0, ilocData)
 
-	ispe := fullBox("ispe", 0, 0, append(u32(uint32(width)), u32(uint32(height))...))
+	ispe := fullBox("ispe", 0, 0, append(u32(uint32(size.X)), u32(uint32(size.Y))...))
 	pixi := fullBox("pixi", 0, 0, []byte{3, 8, 8, 8})
 	config, err := marshalHvcC(params)
 	if err != nil {
@@ -132,8 +132,18 @@ func heicMeta(width, height int, params []hevc.NALUnit, offset, length uint64) (
 	hvcc := box("hvcC", config)
 	colr := box("colr", append(append(append([]byte("nclx"), u16(encPrimaries)...),
 		u16(encTransfer)...), append(u16(encMatrix), 0x80)...))
-	ipco := box("ipco", append(append(append(ispe, pixi...), hvcc...), colr...))
-	ipma := fullBox("ipma", 0, 0, append(append(append(u32(1), u16(1)...), 4), 0x81, 0x82, 0x83, 0x04))
+	props := append(append(append(ispe, pixi...), hvcc...), colr...)
+	assoc := []byte{0x81, 0x82, 0x83, 0x04}
+
+	// An odd dimension cannot be coded in 4:2:0, so the stored picture keeps a
+	// repeated edge and a clean aperture takes it back off.
+	if stored.X != size.X || stored.Y != size.Y {
+		props = append(props, box("clap", clapData(size))...)
+		assoc = append(assoc, 0x05)
+	}
+
+	ipco := box("ipco", props)
+	ipma := fullBox("ipma", 0, 0, append(append(append(u32(1), u16(1)...), byte(len(assoc))), assoc...))
 	iprp := box("iprp", append(ipco, ipma...))
 
 	meta := append(hdlr, pitm...)
@@ -146,6 +156,19 @@ func heicMeta(width, height int, params []hevc.NALUnit, offset, length uint64) (
 
 // marshalHvcC writes the HEVCDecoderConfigurationRecord. ISO/IEC 14496-15
 // requires its profile, tier and level to be the sequence parameter set's own.
+// clapData is the CleanApertureBox naming the whole of the image ispe
+// describes. It is what makes a reader take the stored picture down to that
+// size rather than hand back the repeated edge with it.
+func clapData(size image.Point) []byte {
+	var out []byte
+
+	for _, v := range [8]int32{int32(size.X), 1, int32(size.Y), 1, 0, 1, 0, 1} {
+		out = append(out, u32(uint32(v))...)
+	}
+
+	return out
+}
+
 func marshalHvcC(params []hevc.NALUnit) ([]byte, error) {
 	var ptl []byte
 

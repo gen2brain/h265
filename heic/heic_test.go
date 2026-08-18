@@ -5,12 +5,14 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"image"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -69,7 +71,7 @@ func TestEncode(t *testing.T) {
 	if !ok {
 		t.Fatalf("image = %T", img)
 	}
-	if !bytes.Equal(got.Y, src.Y) || !bytes.Equal(got.Cb, src.Cb) || !bytes.Equal(got.Cr, src.Cr) {
+	if !samePlanes(got, src) {
 		t.Fatal("encoded planes differ")
 	}
 
@@ -92,6 +94,142 @@ func TestEncode(t *testing.T) {
 	if _, err := Decode(bytes.NewReader(lossy)); err != nil {
 		t.Fatal(err)
 	}
+
+	// A picture the coding tree cannot fill is padded and cropped back by the
+	// conformance window, so what comes out is the size that went in.
+	for _, size := range [][2]int{{18, 18}, {50, 34}, {130, 98}} {
+		odd := image.NewYCbCr(image.Rect(0, 0, size[0], size[1]), image.YCbCrSubsampleRatio420)
+		for i := range odd.Y {
+			odd.Y[i] = byte(i * 7)
+		}
+
+		for i := range odd.Cb {
+			odd.Cb[i] = byte(i * 11)
+			odd.Cr[i] = byte(i * 13)
+		}
+
+		b, err := encodeToBytes(odd, EncodeOptions{Lossless: true})
+		if err != nil {
+			t.Fatalf("%v: %v", size, err)
+		}
+
+		img, err := Decode(bytes.NewReader(b), Options{ToYCbCr: true})
+		if err != nil {
+			t.Fatalf("%v: %v", size, err)
+		}
+
+		got, ok := img.(*image.YCbCr)
+		if !ok {
+			t.Fatalf("%v: image = %T", size, img)
+		}
+
+		if got.Rect != odd.Rect {
+			t.Fatalf("%v: bounds = %v", size, got.Rect)
+		}
+
+		if !samePlanes(got, odd) {
+			t.Fatalf("%v: planes differ", size)
+		}
+	}
+
+}
+
+// TestEncodeConverts codes images the encoder does not take natively. An odd
+// dimension is stored with a repeated edge that a clean aperture takes back
+// off, so what comes out is still the size that went in.
+func TestEncodeConverts(t *testing.T) {
+	sizes := [][2]int{{18, 18}, {51, 35}, {33, 16}, {2, 3}}
+
+	for _, size := range sizes {
+		w, h := size[0], size[1]
+		r := image.Rect(0, 0, w, h)
+
+		rgba := image.NewRGBA(r)
+		nrgba := image.NewNRGBA(r)
+		gray := image.NewGray(r)
+		full := image.NewYCbCr(r, image.YCbCrSubsampleRatio444)
+		wide := image.NewYCbCr(r, image.YCbCrSubsampleRatio422)
+
+		for y := range h {
+			for x := range w {
+				red, green, blue := byte(x*5), byte(y*7), byte(x+y)
+				o := rgba.PixOffset(x, y)
+				rgba.Pix[o], rgba.Pix[o+1], rgba.Pix[o+2], rgba.Pix[o+3] = red, green, blue, 255
+				o = nrgba.PixOffset(x, y)
+				nrgba.Pix[o], nrgba.Pix[o+1], nrgba.Pix[o+2], nrgba.Pix[o+3] = red, green, blue, 255
+				gray.Pix[gray.PixOffset(x, y)] = red
+				full.Y[full.YOffset(x, y)] = red
+				full.Cb[full.COffset(x, y)] = green
+				full.Cr[full.COffset(x, y)] = blue
+				wide.Y[wide.YOffset(x, y)] = red
+				wide.Cb[wide.COffset(x, y)] = green
+				wide.Cr[wide.COffset(x, y)] = blue
+			}
+		}
+
+		for name, src := range map[string]image.Image{
+			"rgba": rgba, "nrgba": nrgba, "gray": gray, "444": full, "422": wide,
+		} {
+			t.Run(fmt.Sprintf("%dx%d/%s", w, h, name), func(t *testing.T) {
+				b, err := encodeToBytes(src, EncodeOptions{Lossless: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				img, err := Decode(bytes.NewReader(b), Options{ToYCbCr: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				got, ok := img.(*image.YCbCr)
+				if !ok {
+					t.Fatalf("image = %T", img)
+				}
+
+				if got.Rect != r {
+					t.Fatalf("bounds = %v, want %v", got.Rect, r)
+				}
+
+				// Lossless coding of the converted planes has to give them
+				// back, whatever the padding did around them.
+				want := toYCbCr420(src)
+				for y := range h {
+					for x := range w {
+						if got.Y[y*got.YStride+x] != want.Y[y*want.YStride+x] {
+							t.Fatalf("luma at %d,%d = %d, want %d", x, y,
+								got.Y[y*got.YStride+x], want.Y[y*want.YStride+x])
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// samePlanes compares two images row by row, since a decoded picture is a
+// window on the coded planes and carries their stride rather than its width.
+func samePlanes(a, b *image.YCbCr) bool {
+	if a.Rect != b.Rect {
+		return false
+	}
+
+	w, h := a.Rect.Dx(), a.Rect.Dy()
+	cw, ch := (w+1)/2, (h+1)/2
+
+	for y := range h {
+		if !bytes.Equal(a.Y[y*a.YStride:][:w], b.Y[y*b.YStride:][:w]) {
+			return false
+		}
+	}
+
+	for y := range ch {
+		if !bytes.Equal(a.Cb[y*a.CStride:][:cw], b.Cb[y*b.CStride:][:cw]) ||
+			!bytes.Equal(a.Cr[y*a.CStride:][:cw], b.Cr[y*b.CStride:][:cw]) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func encodeToBytes(img image.Image, opts ...EncodeOptions) ([]byte, error) {
@@ -110,7 +248,7 @@ func TestEncodeExternal(t *testing.T) {
 		t.Skip("heif-dec not installed")
 	}
 
-	for _, size := range [][2]int{{32, 32}, {176, 144}} {
+	for _, size := range [][2]int{{32, 32}, {176, 144}, {50, 34}, {51, 35}} {
 		width, height := size[0], size[1]
 
 		src := image.NewYCbCr(image.Rect(0, 0, width, height), image.YCbCrSubsampleRatio420)
@@ -142,35 +280,78 @@ func TestEncodeExternal(t *testing.T) {
 			t.Fatalf("%dx%d: heif-dec: %v: %s", width, height, err, b)
 		}
 
-		planes, err := y4mPlanes(out)
+		gotW, gotH, planes, err := y4mFrame(out)
 		if err != nil {
 			t.Fatalf("%dx%d: %v", width, height, err)
 		}
 
-		want := append(append(append([]byte{}, src.Y...), src.Cb...), src.Cr...)
+		if gotW != width || gotH != height {
+			t.Fatalf("%dx%d: libheif decoded %dx%d", width, height, gotW, gotH)
+		}
+
+		// A picture stored with a repeated edge comes back through libheif's
+		// transform path, which converts to RGB and loses the samples. The
+		// size is what this case is checking.
+		if width&1 != 0 || height&1 != 0 {
+			continue
+		}
+
+		// libheif hands back the picture the clean aperture leaves, which is
+		// the one that went in.
+		ycc := toYCbCr420(src)
+		cw, ch := (width+1)/2, (height+1)/2
+
+		var want []byte
+
+		for y := range height {
+			want = append(want, ycc.Y[y*ycc.YStride:][:width]...)
+		}
+
+		for y := range ch {
+			want = append(want, ycc.Cb[y*ycc.CStride:][:cw]...)
+		}
+
+		for y := range ch {
+			want = append(want, ycc.Cr[y*ycc.CStride:][:cw]...)
+		}
+
 		if !bytes.Equal(planes, want) {
 			t.Fatalf("%dx%d: libheif decoded %d bytes, want %d equal", width, height, len(planes), len(want))
 		}
 	}
 }
 
-// y4mPlanes returns the sample data of the one frame in a YUV4MPEG2 file.
-func y4mPlanes(path string) ([]byte, error) {
+// y4mFrame returns the size and sample data of the one frame in a YUV4MPEG2
+// file.
+func y4mFrame(path string) (int, int, []byte, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return 0, 0, nil, err
 	}
 
-	for range 2 {
+	var w, h int
+
+	for line := range 2 {
 		i := bytes.IndexByte(b, '\n')
 		if i < 0 {
-			return nil, errors.New("truncated y4m")
+			return 0, 0, nil, errors.New("truncated y4m")
+		}
+
+		if line == 0 {
+			for _, f := range strings.Fields(string(b[:i])) {
+				switch f[0] {
+				case 'W':
+					w, _ = strconv.Atoi(f[1:])
+				case 'H':
+					h, _ = strconv.Atoi(f[1:])
+				}
+			}
 		}
 
 		b = b[i+1:]
 	}
 
-	return b, nil
+	return w, h, b, nil
 }
 
 func BenchmarkEncode(b *testing.B) {

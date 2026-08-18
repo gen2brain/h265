@@ -44,9 +44,9 @@ nals, err := enc.Encode(hevc.Frame{
 stream := hevc.MarshalAnnexB(nals)
 ```
 
-`heic.Encode` writes an 8-bit 4:2:0 `*image.YCbCr` whose dimensions are non-zero
-multiples of 16 as a HEIC still. `Quality` runs from 1 to 100 and `Lossless`
-codes the samples as PCM.
+`heic.Encode` writes any image as a HEIC still, converting to 8-bit 4:2:0 and
+dropping alpha. `Quality` runs from 1 to 100 and `Lossless` codes the samples as
+PCM.
 
 ```go
 err := heic.Encode(w, img, heic.EncodeOptions{Quality: 60})
