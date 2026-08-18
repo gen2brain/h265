@@ -46,8 +46,9 @@ single block wide, is serial whatever the bound.
 # Encoding
 
 [Encoder] writes self-contained intra IDR access units from 8-bit 4:2:0 frames
-whose dimensions are non-zero multiples of 16. Every frame is coded on its own,
-so [Encoder.Flush] never has anything left to return.
+whose dimensions are non-zero and even. A picture that does not fill the coding
+grid is padded to it and cropped back by a conformance window. Every frame is
+coded on its own, so [Encoder.Flush] never has anything left to return.
 
 	enc, err := hevc.NewEncoder(hevc.EncoderOptions{Width: 1920, Height: 1080, QP: 26})
 	if err != nil {

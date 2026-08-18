@@ -1,7 +1,11 @@
 package hevc
 
 type encoderHeaders struct {
+	// width and height are the coded picture, which 7.4.3.2 requires to be a
+	// multiple of the minimum coding block size. cropRight and cropBottom are
+	// the luma samples the conformance window hides beyond the real picture.
 	width, height         int
+	cropRight, cropBottom int
 	levelIDC              uint8
 	pcm                   bool
 	deblockingDisabled    bool
@@ -12,6 +16,16 @@ type encoderHeaders struct {
 
 // writeProfileTierLevel is 7.3.3: Main profile, Main tier, progressive frames
 // only. The High tier is not defined for the levels this encoder reaches.
+// parameterSets is the video, sequence and picture parameter sets a slice
+// coded with these headers needs in front of it.
+func (h encoderHeaders) parameterSets() []NALUnit {
+	return []NALUnit{
+		{Type: NALVPS, RBSP: h.vps()},
+		{Type: NALSPS, RBSP: h.sps()},
+		{Type: NALPPS, RBSP: h.pps()},
+	}
+}
+
 func writeProfileTierLevel(w *putBits, levelIDC uint8) {
 	w.bits(0, 2)
 	w.bit(0)
@@ -58,7 +72,15 @@ func (h encoderHeaders) sps() []byte {
 	w.ue(1)
 	w.ue(uint32(h.width))
 	w.ue(uint32(h.height))
-	w.bit(0)
+	if h.cropRight|h.cropBottom != 0 {
+		w.bit(1)
+		w.ue(0)
+		w.ue(uint32(h.cropRight / 2))
+		w.ue(0)
+		w.ue(uint32(h.cropBottom / 2))
+	} else {
+		w.bit(0)
+	}
 	w.ue(0)
 	w.ue(0)
 	w.ue(4)

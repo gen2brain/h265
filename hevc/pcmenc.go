@@ -1,20 +1,22 @@
 package hevc
 
 func encodePCM(y, cb, cr []uint8, width, height int) ([]NALUnit, error) {
-	if width <= 0 || height <= 0 || width&15 != 0 || height&15 != 0 ||
-		len(y) != width*height || len(cb) != width*height/4 || len(cr) != width*height/4 {
+	if !validFrame(width, height, len(y), len(cb), len(cr)) {
 		return nil, ErrInvalid
 	}
 
-	h := encoderHeaders{width: width, height: height, levelIDC: pcmLevelIDC(width * height), pcm: true}
-	rbsp := pcmSlice(y, cb, cr, width, height)
+	cw, ch := codedSize(width), codedSize(height)
+	py, _ := padPlane(nil, y, width, width, height, cw, ch)
+	pcb, _ := padPlane(nil, cb, width/2, width/2, height/2, cw/2, ch/2)
+	pcr, _ := padPlane(nil, cr, width/2, width/2, height/2, cw/2, ch/2)
 
-	return []NALUnit{
-		{Type: NALVPS, TemporalID: 0, RBSP: h.vps()},
-		{Type: NALSPS, TemporalID: 0, RBSP: h.sps()},
-		{Type: NALPPS, TemporalID: 0, RBSP: h.pps()},
-		{Type: NALIdrNLP, TemporalID: 0, RBSP: rbsp},
-	}, nil
+	h := encoderHeaders{
+		width: cw, height: ch, cropRight: cw - width, cropBottom: ch - height,
+		levelIDC: pcmLevelIDC(cw * ch), pcm: true,
+	}
+	rbsp := pcmSlice(py, pcb, pcr, cw, ch)
+
+	return append(h.parameterSets(), NALUnit{Type: NALIdrNLP, RBSP: rbsp}), nil
 }
 
 func pcmLevelIDC(samples int) uint8 {

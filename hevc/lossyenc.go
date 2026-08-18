@@ -1,15 +1,18 @@
 package hevc
 
 func encodeIntraLossyQP(y, cb, cr []uint8, width, height, qp int) ([]NALUnit, error) {
-	if width <= 0 || height <= 0 || width&15 != 0 || height&15 != 0 ||
-		len(y) != width*height || len(cb) != width*height/4 || len(cr) != width*height/4 ||
-		qp < 0 || qp > 51 {
+	if !validFrame(width, height, len(y), len(cb), len(cr)) || qp < 0 || qp > 51 {
 		return nil, ErrInvalid
 	}
 
+	cw, ch := codedSize(width), codedSize(height)
+	py, _ := padPlane(nil, y, width, width, height, cw, ch)
+	pcb, _ := padPlane(nil, cb, width/2, width/2, height/2, cw/2, ch/2)
+	pcr, _ := padPlane(nil, cr, width/2, width/2, height/2, cw/2, ch/2)
+
 	var e intraEncoder
 
-	rbsp, err := e.slice(y, cb, cr, width, height, qp)
+	rbsp, err := e.slice(py, pcb, pcr, cw, ch, qp)
 	if err != nil {
 		return nil, err
 	}
@@ -17,18 +20,26 @@ func encodeIntraLossyQP(y, cb, cr []uint8, width, height, qp int) ([]NALUnit, er
 	return lossyNALs(width, height, rbsp), nil
 }
 
+// codedSize rounds a picture dimension up to the minimum coding block size,
+// which 7.4.3.2 requires the coded picture to be a multiple of.
+func codedSize(n int) int {
+	return (n + 15) &^ 15
+}
+
+func validFrame(width, height, ny, ncb, ncr int) bool {
+	return width > 0 && height > 0 && width&1 == 0 && height&1 == 0 &&
+		ny == width*height && ncb == width*height/4 && ncr == width*height/4
+}
+
 func lossyNALs(width, height int, rbsp []byte) []NALUnit {
+	cw, ch := codedSize(width), codedSize(height)
 	h := encoderHeaders{
-		width: width, height: height, levelIDC: pcmLevelIDC(width * height),
+		width: cw, height: ch, cropRight: cw - width, cropBottom: ch - height,
+		levelIDC:           pcmLevelIDC(cw * ch),
 		deblockingDisabled: true, signDataHidingEnabled: true, ctbLog2: 6, maxTrHierIntra: 2,
 	}
 
-	return []NALUnit{
-		{Type: NALVPS, RBSP: h.vps()},
-		{Type: NALSPS, RBSP: h.sps()},
-		{Type: NALPPS, RBSP: h.pps()},
-		{Type: NALIdrNLP, RBSP: rbsp},
-	}
+	return append(h.parameterSets(), NALUnit{Type: NALIdrNLP, RBSP: rbsp})
 }
 
 // intraEncoder codes one 8 bit 4:2:0 picture as a single intra slice of 64x64
@@ -86,6 +97,8 @@ type lossyTU8Plan struct {
 	cbfCb, cbfCr bool
 }
 
+// slice codes the whole picture. The planes are the coded picture, so a caller
+// with one that does not fill the coding grid pads it first.
 func (e *intraEncoder) slice(y, cb, cr []uint8, width, height, qp int) ([]byte, error) {
 	e.reset(y, cb, cr, width, height, qp)
 

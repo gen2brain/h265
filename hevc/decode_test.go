@@ -357,18 +357,37 @@ func TestLossyTU8Rate(t *testing.T) {
 }
 
 // encodeRecon codes a picture and hands back the reconstruction the encoder
-// built, which is what a decoder must reproduce sample for sample.
+// built, cropped to the picture the conformance window leaves, which is what a
+// decoder must reproduce sample for sample.
 func encodeRecon(t *testing.T, y, cb, cr []uint8, width, height, qp int) ([]byte, [3][]uint8) {
 	t.Helper()
 
+	cw, ch := codedSize(width), codedSize(height)
+	py, _ := padPlane(nil, y, width, width, height, cw, ch)
+	pcb, _ := padPlane(nil, cb, width/2, width/2, height/2, cw/2, ch/2)
+	pcr, _ := padPlane(nil, cr, width/2, width/2, height/2, cw/2, ch/2)
+
 	var e intraEncoder
 
-	rbsp, err := e.slice(y, cb, cr, width, height, qp)
+	rbsp, err := e.slice(py, pcb, pcr, cw, ch, qp)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	return rbsp, e.recon
+	return rbsp, [3][]uint8{
+		cropPlane(e.recon[0], cw, width, height),
+		cropPlane(e.recon[1], cw/2, width/2, height/2),
+		cropPlane(e.recon[2], cw/2, width/2, height/2),
+	}
+}
+
+func cropPlane(src []uint8, stride, width, height int) []uint8 {
+	out := make([]uint8, 0, width*height)
+	for y := range height {
+		out = append(out, src[y*stride:y*stride+width]...)
+	}
+
+	return out
 }
 
 // TestEncodeExternal holds the written bitstream to decoders that were not
@@ -394,8 +413,11 @@ func TestEncodeExternal(t *testing.T) {
 		{64, 64, 1, false},
 		{80, 48, 51, false},
 		{176, 144, 34, false},
+		{50, 34, 26, false},
+		{130, 98, 30, false},
 		{32, 32, 0, true},
 		{80, 48, 0, true},
+		{66, 18, 0, true},
 	}
 
 	for _, c := range cases {
@@ -573,7 +595,8 @@ func lossyPattern(r *rand.Rand, width, height, kind int) ([]byte, []byte, []byte
 // takes: whole coding tree blocks, ones cut short on either edge, and the whole
 // range of QP.
 func TestEncodeLossyRoundTrip(t *testing.T) {
-	sizes := [][2]int{{16, 16}, {48, 32}, {64, 64}, {80, 48}, {128, 64}}
+	sizes := [][2]int{{16, 16}, {48, 32}, {64, 64}, {80, 48}, {128, 64},
+		{2, 2}, {18, 18}, {50, 34}, {66, 18}, {130, 98}}
 
 	for _, size := range sizes {
 		width, height := size[0], size[1]
@@ -644,7 +667,7 @@ func FuzzEncode(f *testing.F) {
 			return
 		}
 
-		width, height := int(w%8+1)*16, int(h%4+1)*16
+		width, height := (int(w)%64+1)*2, (int(h)%32+1)*2
 		qp := int(q%51) + 1
 
 		y := make([]byte, width*height)
@@ -670,15 +693,9 @@ func FuzzEncode(f *testing.F) {
 			nals, err = encodePCM(y, cb, cr, width, height)
 			want = append(append(append([]byte{}, y...), cb...), cr...)
 		} else {
-			var e intraEncoder
-
-			var rbsp []byte
-
-			rbsp, err = e.slice(y, cb, cr, width, height, qp)
-			if err == nil {
-				nals = lossyNALs(width, height, rbsp)
-				want = append(append(append([]byte{}, e.recon[0]...), e.recon[1]...), e.recon[2]...)
-			}
+			_, recon := encodeRecon(t, y, cb, cr, width, height, qp)
+			nals, err = encodeIntraLossyQP(y, cb, cr, width, height, qp)
+			want = append(append(append([]byte{}, recon[0]...), recon[1]...), recon[2]...)
 		}
 
 		if err != nil {
@@ -778,9 +795,9 @@ func TestEncoder(t *testing.T) {
 	if len(nals) != 4 || nals[3].Type != NALIdrNLP {
 		t.Fatalf("NALs = %+v", nals)
 	}
-	y, _ := packPlane(nil, frame.Y, frame.StrideY, 16, 16)
-	cb, _ := packPlane(nil, frame.Cb, frame.StrideC, 8, 8)
-	cr, _ := packPlane(nil, frame.Cr, frame.StrideC, 8, 8)
+	y, _ := padPlane(nil, frame.Y, frame.StrideY, 16, 16, 16, 16)
+	cb, _ := padPlane(nil, frame.Cb, frame.StrideC, 8, 8, 8, 8)
+	cr, _ := padPlane(nil, frame.Cr, frame.StrideC, 8, 8, 8, 8)
 	want, err := encodeIntraLossyQP(y, cb, cr, 16, 16, 34)
 	if err != nil {
 		t.Fatal(err)
@@ -797,7 +814,13 @@ func TestEncoder(t *testing.T) {
 	}
 
 	if _, err := NewEncoder(EncoderOptions{Width: 15, Height: 16}); !errors.Is(err, ErrInvalidEncodeInput) {
-		t.Fatalf("invalid dimensions: %v", err)
+		t.Fatalf("odd width: %v", err)
+	}
+	if _, err := NewEncoder(EncoderOptions{Width: 16, Height: 15}); !errors.Is(err, ErrInvalidEncodeInput) {
+		t.Fatalf("odd height: %v", err)
+	}
+	if _, err := NewEncoder(EncoderOptions{Width: 18, Height: 6}); err != nil {
+		t.Fatalf("size off the coding grid: %v", err)
 	}
 	if _, err := NewEncoder(EncoderOptions{Width: 16, Height: 16, QP: 52}); !errors.Is(err, ErrInvalidEncodeInput) {
 		t.Fatalf("invalid QP: %v", err)

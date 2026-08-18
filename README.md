@@ -31,7 +31,8 @@ for _, nal := range nals {
 ### Encoding
 
 `hevc.Encoder` writes self-contained intra IDR access units from 8-bit 4:2:0
-planar frames. Dimensions must be non-zero multiples of 16. `QP` ranges from 1
+planar frames. Dimensions must be non-zero and even; anything the coding grid
+cannot fill is padded away behind a conformance window. `QP` ranges from 1
 through 51; its zero value selects QP 26. `Lossless` selects PCM coding.
 
 ```go

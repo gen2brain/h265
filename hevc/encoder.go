@@ -13,9 +13,11 @@ type Frame struct {
 	StrideY, StrideC int
 }
 
-// EncoderOptions configures an [Encoder]. Width and Height must be non-zero
-// multiples of 16. QP runs from 1 through 51 and selects 26 when left at zero;
-// Lossless codes the samples as PCM instead and ignores QP.
+// EncoderOptions configures an [Encoder]. Width and Height must be non-zero and
+// even, which is as fine as 4:2:0 chroma resolves; anything the coding tree
+// cannot fill is padded away behind a conformance window. QP runs from 1
+// through 51 and selects 26 when left at zero; Lossless codes the samples as
+// PCM instead and ignores QP.
 type EncoderOptions struct {
 	Width, Height int
 	QP            int
@@ -35,7 +37,7 @@ type Encoder struct {
 }
 
 func NewEncoder(opts EncoderOptions) (*Encoder, error) {
-	if opts.Width <= 0 || opts.Height <= 0 || opts.Width&15 != 0 || opts.Height&15 != 0 ||
+	if opts.Width <= 0 || opts.Height <= 0 || opts.Width&1 != 0 || opts.Height&1 != 0 ||
 		opts.QP < 0 || opts.QP > 51 {
 		return nil, ErrInvalidEncodeInput
 	}
@@ -55,13 +57,16 @@ func (e *Encoder) Encode(frame Frame) ([]NALUnit, error) {
 		return nil, ErrInvalidEncodeInput
 	}
 
+	cw, ch := codedSize(e.width), codedSize(e.height)
 	src := [3][]uint8{frame.Y, frame.Cb, frame.Cr}
 	stride := [3]int{frame.StrideY, frame.StrideC, frame.StrideC}
 	width := [3]int{e.width, e.width / 2, e.width / 2}
 	height := [3]int{e.height, e.height / 2, e.height / 2}
+	padded := [3][2]int{{cw, ch}, {cw / 2, ch / 2}, {cw / 2, ch / 2}}
 
 	for i := range src {
-		plane, ok := packPlane(e.planes[i], src[i], stride[i], width[i], height[i])
+		plane, ok := padPlane(e.planes[i], src[i], stride[i], width[i], height[i],
+			padded[i][0], padded[i][1])
 		if !ok {
 			return nil, ErrInvalidEncodeInput
 		}
@@ -70,15 +75,26 @@ func (e *Encoder) Encode(frame Frame) ([]NALUnit, error) {
 	}
 
 	if e.lossless {
-		return encodePCM(e.planes[0], e.planes[1], e.planes[2], e.width, e.height)
+		return e.pcm()
 	}
 
-	rbsp, err := e.intra.slice(e.planes[0], e.planes[1], e.planes[2], e.width, e.height, e.qp)
+	rbsp, err := e.intra.slice(e.planes[0], e.planes[1], e.planes[2], cw, ch, e.qp)
 	if err != nil {
 		return nil, err
 	}
 
 	return lossyNALs(e.width, e.height, rbsp), nil
+}
+
+func (e *Encoder) pcm() ([]NALUnit, error) {
+	cw, ch := codedSize(e.width), codedSize(e.height)
+	h := encoderHeaders{
+		width: cw, height: ch, cropRight: cw - e.width, cropBottom: ch - e.height,
+		levelIDC: pcmLevelIDC(cw * ch), pcm: true,
+	}
+
+	return append(h.parameterSets(), NALUnit{Type: NALIdrNLP,
+		RBSP: pcmSlice(e.planes[0], e.planes[1], e.planes[2], cw, ch)}), nil
 }
 
 // Flush ends the sequence. Every frame is coded on its own, so there is never
@@ -91,20 +107,33 @@ func (e *Encoder) Flush() ([]NALUnit, error) {
 	return nil, nil
 }
 
-// packPlane gathers a strided plane into dst, growing it only when what it
-// already holds is too small.
-func packPlane(dst, src []uint8, stride, width, height int) ([]uint8, bool) {
-	if stride <= 0 || stride < width || len(src)/stride < height {
+// padPlane gathers a strided plane into dst at paddedW by paddedH, repeating the
+// last column and row to fill what the picture does not reach. dst grows only
+// when what it already holds is too small.
+func padPlane(dst, src []uint8, stride, width, height, paddedW, paddedH int) ([]uint8, bool) {
+	if stride <= 0 || width <= 0 || height <= 0 || stride < width ||
+		paddedW < width || paddedH < height || len(src)/stride < height {
 		return nil, false
 	}
 
-	if cap(dst) < width*height {
-		dst = make([]uint8, 0, width*height)
+	if cap(dst) < paddedW*paddedH {
+		dst = make([]uint8, 0, paddedW*paddedH)
 	}
 
 	out := dst[:0]
+
 	for y := range height {
-		out = append(out, src[y*stride:y*stride+width]...)
+		row := src[y*stride : y*stride+width]
+		out = append(out, row...)
+
+		for range paddedW - width {
+			out = append(out, row[width-1])
+		}
+	}
+
+	last := out[(height-1)*paddedW : height*paddedW]
+	for y := height; y < paddedH; y++ {
+		out = append(out, last...)
 	}
 
 	return out, true
