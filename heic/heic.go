@@ -1,6 +1,6 @@
 /*
 Package heic decodes HEIF images that carry HEVC-coded item data, the format
-commonly called HEIC.
+commonly called HEIC, and writes them.
 
 # Color
 
@@ -20,6 +20,14 @@ actually are, so ToYCbCr is for reaching the samples rather than for display:
 profile when the file has one. Matrix and FullRange are what the conversion to
 RGB uses. Primaries and Transfer are reported but not applied, so RGB output
 stays in the file's own color space.
+
+# Encoding
+
+[Encode] writes an 8-bit 4:2:0 *[image.YCbCr] whose dimensions are non-zero
+multiples of 16 as a HEIC still, with an nclx description of what
+[image.YCbCr] holds: full-range BT.601 carrying sRGB primaries and transfer.
+[EncodeOptions.Quality] selects the quantiser and [EncodeOptions.Lossless]
+codes the samples as PCM instead.
 
 # Metadata
 

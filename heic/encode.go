@@ -1,7 +1,6 @@
 package heic
 
 import (
-	"bytes"
 	"encoding/binary"
 	"image"
 	"io"
@@ -9,6 +8,9 @@ import (
 
 	"github.com/gen2brain/h265/hevc"
 )
+
+// DefaultQuality is the quality Encode uses when none is given.
+const DefaultQuality = 60
 
 // The written planes are what image.YCbCr holds, which is full range BT.601
 // carrying sRGB primaries and transfer.
@@ -22,9 +24,29 @@ const (
 // needing 64 bit box sizes is refused rather than truncated.
 const maxBoxOverhead = 1 << 16
 
-type EncodeOptions struct{}
+// EncodeOptions are the encoding parameters.
+type EncodeOptions struct {
+	// Quality in the range [0,100]. Default is DefaultQuality.
+	Quality int
+	// Lossless codes the samples as PCM and ignores Quality.
+	Lossless bool
+}
 
+// Encode writes img to w as a HEIC still. It takes an 8-bit 4:2:0
+// *image.YCbCr whose dimensions are non-zero multiples of 16.
 func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
+	quality, lossless := DefaultQuality, false
+
+	if len(opts) > 0 {
+		quality, lossless = opts[0].Quality, opts[0].Lossless
+
+		if quality <= 0 {
+			quality = DefaultQuality
+		} else if quality > 100 {
+			quality = 100
+		}
+	}
+
 	ycc, ok := img.(*image.YCbCr)
 	if !ok || ycc.SubsampleRatio != image.YCbCrSubsampleRatio420 || ycc.Rect.Min.X != 0 || ycc.Rect.Min.Y != 0 {
 		return ErrUnsupported
@@ -32,7 +54,8 @@ func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
 
 	width, height := ycc.Rect.Dx(), ycc.Rect.Dy()
 
-	enc, err := hevc.NewEncoder(hevc.EncoderOptions{Width: width, Height: height, Lossless: true})
+	enc, err := hevc.NewEncoder(hevc.EncoderOptions{Width: width, Height: height,
+		QP: 51 - quality*50/100, Lossless: lossless})
 	if err != nil {
 		return ErrUnsupported
 	}
@@ -184,11 +207,4 @@ func u32(v uint32) []byte {
 	binary.BigEndian.PutUint32(out, v)
 
 	return out
-}
-
-func encodeToBytes(img image.Image) ([]byte, error) {
-	var b bytes.Buffer
-	err := Encode(&b, img)
-
-	return b.Bytes(), err
 }

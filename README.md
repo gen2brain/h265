@@ -30,9 +30,9 @@ for _, nal := range nals {
 
 ### Encoding
 
-`hevc.Encoder` writes self-contained lossy intra IDR access units from 8-bit
-4:2:0 planar frames. Dimensions must be non-zero multiples of 16. `QP` ranges
-from 1 through 51; its zero value selects QP 26. `Lossless` selects PCM coding.
+`hevc.Encoder` writes self-contained intra IDR access units from 8-bit 4:2:0
+planar frames. Dimensions must be non-zero multiples of 16. `QP` ranges from 1
+through 51; its zero value selects QP 26. `Lossless` selects PCM coding.
 
 ```go
 enc, err := hevc.NewEncoder(hevc.EncoderOptions{Width: 1920, Height: 1080, QP: 26})
@@ -43,8 +43,13 @@ nals, err := enc.Encode(hevc.Frame{
 stream := hevc.MarshalAnnexB(nals)
 ```
 
-`heic.Encode` currently accepts an 8-bit 4:2:0 `*image.YCbCr` whose dimensions
-are non-zero multiples of 16 and writes a lossless PCM HEIC still.
+`heic.Encode` writes an 8-bit 4:2:0 `*image.YCbCr` whose dimensions are non-zero
+multiples of 16 as a HEIC still. `Quality` runs from 1 to 100 and `Lossless`
+codes the samples as PCM.
+
+```go
+err := heic.Encode(w, img, heic.EncodeOptions{Quality: 60})
+```
 
 ### Supported
 

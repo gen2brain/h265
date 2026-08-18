@@ -55,7 +55,7 @@ func TestEncode(t *testing.T) {
 		src.Cr[i] = byte(i*43 + 11)
 	}
 
-	data, err := encodeToBytes(src)
+	data, err := encodeToBytes(src, EncodeOptions{Lossless: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +72,33 @@ func TestEncode(t *testing.T) {
 	if !bytes.Equal(got.Y, src.Y) || !bytes.Equal(got.Cb, src.Cb) || !bytes.Equal(got.Cr, src.Cr) {
 		t.Fatal("encoded planes differ")
 	}
+
+	lossy, err := encodeToBytes(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lossy) >= len(data) {
+		t.Fatalf("lossy = %d bytes, lossless = %d", len(lossy), len(data))
+	}
+
+	worse, err := encodeToBytes(src, EncodeOptions{Quality: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(worse) >= len(lossy) {
+		t.Fatalf("quality 10 = %d bytes, quality %d = %d", len(worse), DefaultQuality, len(lossy))
+	}
+
+	if _, err := Decode(bytes.NewReader(lossy)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func encodeToBytes(img image.Image, opts ...EncodeOptions) ([]byte, error) {
+	var b bytes.Buffer
+	err := Encode(&b, img, opts...)
+
+	return b.Bytes(), err
 }
 
 // TestEncodeExternal holds the written container to libheif rather than to our
@@ -96,7 +123,7 @@ func TestEncodeExternal(t *testing.T) {
 			src.Cr[i] = byte(i*43 + 11)
 		}
 
-		data, err := encodeToBytes(src)
+		data, err := encodeToBytes(src, EncodeOptions{Lossless: true})
 		if err != nil {
 			t.Fatal(err)
 		}
