@@ -23,6 +23,14 @@ func clip3(v, lo, hi int32) int32 {
 	return v
 }
 
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+
+	return 0
+}
+
 func log2(n int) int {
 	k := 0
 	for n > 1 {

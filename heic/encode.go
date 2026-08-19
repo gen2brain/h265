@@ -248,7 +248,8 @@ func (f *heicFile) shared() {
 		return
 	}
 
-	f.ispe = f.prop(fullBox("ispe", 0, 0, append(u32(uint32(f.size.X)), u32(uint32(f.size.Y))...)), true)
+	size := append(u32(uint32(f.size.X)), u32(uint32(f.size.Y))...)
+	f.ispe = f.prop(fullBox("ispe", 0, 0, size), true)
 
 	if f.stored != f.size {
 		f.clap = f.prop(box("clap", clapData(f.size)), false)
@@ -377,7 +378,8 @@ func (f *heicFile) metaBox(offset uint64) ([]byte, error) {
 	}
 
 	iinf := fullBox("iinf", 0, 0, append(u16(uint16(len(f.items))), infes...))
-	iloc := fullBox("iloc", 0, 0, append([]byte{0x44, 0}, append(u16(uint16(len(f.items))), ilocs...)...))
+	locs := append(u16(uint16(len(f.items))), ilocs...)
+	iloc := fullBox("iloc", 0, 0, append([]byte{0x44, 0}, locs...))
 	iprp := box("iprp", append(box("ipco", f.props),
 		fullBox("ipma", 0, 0, append(u32(uint32(assoc)), ipmas...))...))
 

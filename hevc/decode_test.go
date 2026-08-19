@@ -43,6 +43,26 @@ func decodeFile(t *testing.T, path string) []*Picture {
 	return pics
 }
 
+// encodeIntraLossyQP and encodePCM code one 8-bit 4:2:0 picture the way a
+// caller does, so the tests and the shipped path are the same code.
+func encodeIntraLossyQP(y, cb, cr []uint8, width, height, qp int) ([]NALUnit, error) {
+	return encodeFrame(EncoderOptions{Width: width, Height: height, QP: qp}, y, cb, cr)
+}
+
+func encodePCM(y, cb, cr []uint8, width, height int) ([]NALUnit, error) {
+	return encodeFrame(EncoderOptions{Width: width, Height: height, Lossless: true}, y, cb, cr)
+}
+
+func encodeFrame(opts EncoderOptions, y, cb, cr []uint8) ([]NALUnit, error) {
+	enc, err := NewEncoder(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	return enc.Encode(Frame{Y: y, Cb: cb, Cr: cr,
+		StrideY: opts.Width, StrideC: opts.Width / 2})
+}
+
 func planarYUV(p *Picture) []byte {
 	out := make([]byte, 0, p.CropW*p.CropH*3)
 
@@ -1465,11 +1485,10 @@ func TestEncodeLossyIntraQP(t *testing.T) {
 		})
 	}
 
-	if _, err := encodeIntraLossyQP(y, cb, cr, width, height, -1); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("negative QP: %v", err)
-	}
-	if _, err := encodeIntraLossyQP(y, cb, cr, width, height, 52); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("high QP: %v", err)
+	for _, qp := range []int{-1, 52} {
+		if _, err := encodeIntraLossyQP(y, cb, cr, width, height, qp); !errors.Is(err, ErrInvalidEncodeInput) {
+			t.Fatalf("QP %d: %v", qp, err)
+		}
 	}
 }
 

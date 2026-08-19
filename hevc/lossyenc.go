@@ -5,35 +5,10 @@ import (
 	"slices"
 )
 
-func encodeIntraLossyQP(y, cb, cr []uint8, width, height, qp int) ([]NALUnit, error) {
-	if !validFrame(width, height, len(y), len(cb), len(cr)) || qp < 0 || qp > 51 {
-		return nil, ErrInvalid
-	}
-
-	cw, ch := codedSize(width), codedSize(height)
-	py, _ := padPlane(nil, y, width, width, height, cw, ch)
-	pcb, _ := padPlane(nil, cb, width/2, width/2, height/2, cw/2, ch/2)
-	pcr, _ := padPlane(nil, cr, width/2, width/2, height/2, cw/2, ch/2)
-
-	var e intraEncoder[uint8]
-
-	rbsp, err := e.slice(py, pcb, pcr, cw, ch, qp)
-	if err != nil {
-		return nil, err
-	}
-
-	return e.nals(width, height, rbsp), nil
-}
-
 // codedSize rounds a picture dimension up to the minimum coding block size,
 // which 7.4.3.2 requires the coded picture to be a multiple of.
 func codedSize(n int) int {
 	return (n + 15) &^ 15
-}
-
-func validFrame(width, height, ny, ncb, ncr int) bool {
-	return width > 0 && height > 0 && width&1 == 0 && height&1 == 0 &&
-		ny == width*height && ncb == width*height/4 && ncr == width*height/4
 }
 
 // nals is the parameter sets a slice coded by this encoder needs, and the
@@ -42,7 +17,8 @@ func (e *intraEncoder[P]) nals(width, height int, rbsp []byte) []NALUnit {
 	cw, ch := codedSize(width), codedSize(height)
 	h := encoderHeaders{
 		width: cw, height: ch, cropRight: cw - width, cropBottom: ch - height,
-		chromaFormat: e.s.chromaFormatIDC, subWidthC: e.subW, subHeightC: e.subH,
+		chromaFormat: e.s.chromaFormatIDC,
+		subWidthC:    int(e.s.subWidthC), subHeightC: int(e.s.subHeightC),
 		bitDepth: e.bitDepth,
 		levelIDC: pcmLevelIDC(cw * ch),
 		ctbLog2:  6, maxTrHierIntra: 2,
@@ -52,8 +28,9 @@ func (e *intraEncoder[P]) nals(width, height int, rbsp []byte) []NALUnit {
 	return append(h.parameterSets(), NALUnit{Type: NALIdrNLP, RBSP: rbsp})
 }
 
-// intraEncoder codes one 8 bit 4:2:0 picture as a single intra slice of 64x64
-// coding tree blocks. A picture allocates only the bitstream it returns.
+// intraEncoder codes one picture as a single intra slice of 64x64 coding tree
+// blocks, at any sampling of 6.2 and any sample size the transforms reach. A
+// picture allocates only the bitstream it returns.
 type intraEncoder[P pixel] struct {
 	width, height int
 
@@ -69,9 +46,8 @@ type intraEncoder[P pixel] struct {
 	src   [3][]P
 	recon [3][]P
 
-	// subW and subH are SubWidthC and SubHeightC of 6.2, with the shifts they
-	// only ever are, and the chroma stride they leave.
-	subW, subH     int
+	// shiftW and shiftH are SubWidthC and SubHeightC of 6.2 as the shifts they
+	// only ever are, and strideC the chroma stride they leave.
 	shiftW, shiftH int
 	strideC        int
 
@@ -122,7 +98,6 @@ type cuTransform struct {
 	quad   [4]bool
 	wholeC [2][2]bool
 	quadC  [4][2][2]bool
-	rootC  [2][2]bool
 }
 
 // flat reports whether the unit took one transform and left no residual in it.
@@ -373,8 +348,7 @@ func (e *intraEncoder[P]) ctbRow(k, rows, cols int, sync *[nContexts]uint8) erro
 func (e *intraEncoder[P]) reset(y, cb, cr []P, width, height, qp int) {
 	e.width, e.height = width, height
 	e.s = chromaSPS(len(cb), width*height)
-	e.subW, e.subH = int(e.s.subWidthC), int(e.s.subHeightC)
-	e.shiftW, e.shiftH = e.subW-1, e.subH-1
+	e.shiftW, e.shiftH = int(e.s.subWidthC)-1, int(e.s.subHeightC)-1
 	e.strideC = width >> e.shiftW
 
 	e.bitDepth = max(e.bitDepth, 8)
@@ -891,19 +865,19 @@ func (e *intraEncoder[P]) tu32Rate(mode int) int64 {
 func (e *intraEncoder[P]) tu32Tree(w *cabacWriter, mode int) error {
 	t := &e.tu
 
-	t.rootC = t.wholeC
+	root := t.wholeC
 	if t.split {
-		t.rootC = [2][2]bool{}
+		root = [2][2]bool{}
 
 		for i := range 4 {
 			for c := range 2 {
-				t.rootC[c][0] = t.rootC[c][0] || t.quadC[i][c][0] || t.quadC[i][c][1]
+				root[c][0] = root[c][0] || t.quadC[i][c][0] || t.quadC[i][c][1]
 			}
 		}
 	}
 
 	w.encodeBin(ctxSplitTransformFlag, boolToBit(t.split))
-	e.chromaCBF(w, 0, t.rootC, t.rootC, e.chromaSecond(32, t.split))
+	e.chromaCBF(w, 0, root, root, e.chromaSecond(32, t.split))
 
 	if !t.split {
 		if err := e.codedResidual(w, t.y32[:], t.whole, 5, 0, mode, 0); err != nil {
@@ -915,7 +889,7 @@ func (e *intraEncoder[P]) tu32Tree(w *cabacWriter, mode int) error {
 
 	for i := range 4 {
 		w.encodeBin(ctxSplitTransformFlag+1, 0)
-		e.chromaCBF(w, 1, t.quadC[i], t.rootC, e.chromaSecond(16, false))
+		e.chromaCBF(w, 1, t.quadC[i], root, e.chromaSecond(16, false))
 
 		if err := e.codedResidual(w, t.y[i][:], t.quad[i], 4, 0, mode, 1); err != nil {
 			return err
@@ -1451,9 +1425,8 @@ func (e *intraEncoder[P]) prepareRef(b lossyBlock[P]) {
 	e.scratch.base.substitute(avail, e.bitDepth)
 }
 
-// lambdaScale is the constant in front of the quantiser's own curve, at Q8.
-// A sweep from a quarter of it to one and a half moved the rate by less than
-// the measurement noise, so it is the usual 0.57.
+// lambdaScale is the constant in front of the quantiser's own curve, at Q8,
+// which is the usual 0.57.
 const lambdaScale = 146
 
 // lossyLambda weights bits against squared error at Q8, doubling every three
@@ -1527,14 +1500,6 @@ func lossyIntraLumaMode(w *cabacWriter, mode int, cand [3]int) {
 	}
 
 	w.encodeBypassBits(uint32(rem), 5)
-}
-
-func boolToInt(v bool) int {
-	if v {
-		return 1
-	}
-
-	return 0
 }
 
 func hasCoefficients(coef []int32) bool {

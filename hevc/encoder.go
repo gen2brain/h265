@@ -89,8 +89,10 @@ type Encoder struct {
 	planes16 [3][]uint16
 }
 
-// Threads bounds the goroutines coding one picture's rows. Zero and one code
-// serially, and only they leave 9.3.1's synchronisation out of the stream.
+// Threads bounds the goroutines coding one picture's rows. More than one turns
+// on the entropy coder synchronisation of 9.3.1, which restarts every row from
+// the contexts of the row above and costs about 2% of bitrate. Zero and one
+// code serially and leave it out of the stream.
 func (e *Encoder) Threads(n int) {
 	if e != nil {
 		e.threads = n

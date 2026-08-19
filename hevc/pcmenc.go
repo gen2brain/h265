@@ -1,25 +1,5 @@
 package hevc
 
-func encodePCM(y, cb, cr []uint8, width, height int) ([]NALUnit, error) {
-	if !validFrame(width, height, len(y), len(cb), len(cr)) {
-		return nil, ErrInvalid
-	}
-
-	cw, ch := codedSize(width), codedSize(height)
-	py, _ := padPlane(nil, y, width, width, height, cw, ch)
-	pcb, _ := padPlane(nil, cb, width/2, width/2, height/2, cw/2, ch/2)
-	pcr, _ := padPlane(nil, cr, width/2, width/2, height/2, cw/2, ch/2)
-
-	h := encoderHeaders{
-		width: cw, height: ch, cropRight: cw - width, cropBottom: ch - height,
-		chromaFormat: 1, subWidthC: 2, subHeightC: 2, bitDepth: 8,
-		levelIDC: pcmLevelIDC(cw * ch), pcm: true,
-	}
-	rbsp := pcmSlice(py, pcb, pcr, cw, ch, 2, 2, 8)
-
-	return append(h.parameterSets(), NALUnit{Type: NALIdrNLP, RBSP: rbsp}), nil
-}
-
 func pcmLevelIDC(samples int) uint8 {
 	for _, level := range []struct {
 		samples int

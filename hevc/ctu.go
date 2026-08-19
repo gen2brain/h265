@@ -790,7 +790,7 @@ func (d *ctuDecoder) transformTree(x, y, xBase, yBase, log2Size, depth, blkIdx i
 	// luma residual.
 	cbfLuma := true
 	if depth != 0 || cbfCb[0] || cbfCb[1] || cbfCr[0] || cbfCr[1] || d.curIntra {
-		cbfLuma = d.c.decodeBin(ctxCBFLuma+boolInt(depth == 0)) != 0
+		cbfLuma = d.c.decodeBin(ctxCBFLuma+boolToInt(depth == 0)) != 0
 	}
 
 	return d.transformUnit(x, y, xBase, yBase, log2Size, depth, blkIdx,
@@ -801,14 +801,6 @@ func (d *ctuDecoder) setQP(x, y, size int) {
 	fill(d, d.qpY, x, y, size, int8(d.qpYCur))
 
 	d.qpYPrev = d.qpYCur
-}
-
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-
-	return 0
 }
 
 func (d *ctuDecoder) transformUnit(x, y, xBase, yBase, log2Size, depth, blkIdx int,

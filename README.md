@@ -3,9 +3,11 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/gen2brain/h265.svg)](https://pkg.go.dev/github.com/gen2brain/h265)
 
 [HEVC](https://en.wikipedia.org/wiki/High_Efficiency_Video_Coding) video and
-[HEIC](https://en.wikipedia.org/wiki/High_Efficiency_Image_File_Format) image decoder in pure Go.
+[HEIC](https://en.wikipedia.org/wiki/High_Efficiency_Image_File_Format) image codec in pure Go,
+decoding and encoding. No CGo, no dependencies.
 
-Byte-exact on the JCT-VC HEVC v1 conformance suite. No CGo, no dependencies.
+The decoder is byte-exact on the JCT-VC HEVC v1 conformance suite. What the encoder writes is
+held to libde265, FFmpeg and libheif sample for sample.
 
 SIMD support for amd64 (AVX2, AVX-512), arm64 (NEON) and riscv64 (RVV, with `GORISCV64=rva23u64`).
 Build with `-tags noasm` for pure Go everywhere.
@@ -30,10 +32,14 @@ for _, nal := range nals {
 
 ### Encoding
 
-`hevc.Encoder` writes self-contained intra IDR access units from 8-bit 4:2:0
-planar frames. Dimensions must be non-zero and even; anything the coding grid
-cannot fill is padded away behind a conformance window. `QP` ranges from 1
-through 51; its zero value selects QP 26. `Lossless` selects PCM coding.
+`heic.Encode` writes any image as a HEIC still, keeping alpha as the auxiliary item of
+ISO/IEC 23008-12 Annex F.
+
+```go
+err := heic.Encode(w, img, heic.EncodeOptions{Quality: 60})
+```
+
+`hevc.Encoder` writes the bitstream on its own, as self-contained intra IDR access units:
 
 ```go
 enc, err := hevc.NewEncoder(hevc.EncoderOptions{Width: 1920, Height: 1080, QP: 26})
@@ -44,20 +50,15 @@ nals, err := enc.Encode(hevc.Frame{
 stream := hevc.MarshalAnnexB(nals)
 ```
 
-`heic.Encode` writes any image as a HEIC still, converting to 8-bit 4:2:0 and
-dropping alpha. `Quality` runs from 1 to 100 and `Lossless` codes the samples as
-PCM.
-
-```go
-err := heic.Encode(w, img, heic.EncodeOptions{Quality: 60})
-```
-
 ### Supported
 
-8-16 bit, 4:2:0/4:2:2/4:4:4/monochrome, tiles, wavefronts, dependent slice segments, PCM, lossless,
-scaling lists, and the range extensions other than cross-component prediction, RDPCM and CABAC bypass
-alignment, which are refused rather than decoded wrongly. In the container alpha, `grid`,
-`clap`/`irot`/`imir`, `colr`, image sequences, Exif and XMP.
+Decoding: 8-16 bit, 4:2:0/4:2:2/4:4:4/monochrome, tiles, wavefronts, dependent slice segments,
+PCM, lossless, scaling lists, and the range extensions other than cross-component prediction,
+RDPCM and CABAC bypass alignment, which are refused rather than decoded wrongly. In the container
+alpha, `grid`, `clap`/`irot`/`imir`, `colr`, image sequences, Exif and XMP.
+
+Encoding: 8-12 bit, 4:2:0/4:2:2/4:4:4/monochrome, intra only, deblocking, wavefronts, PCM
+lossless, and alpha, Exif and XMP in the container.
 
 Decoding is threaded over grid tiles and wavefront rows; `heic.Options.Threads` and
 `hevc.Decoder.Threads` bound it.
@@ -68,6 +69,6 @@ MIT, in [LICENSE](LICENSE). The decoder is a port of the pure-Rust
 [rust_h265](https://github.com/roticv/rust_h265) and
 [oxideav-h265](https://github.com/OxideAV/oxideav-h265) decoders and carries their notices.
 
-This project is an implementation of a decoder. It gives you no special rights on the HEVC patents.
-HEVC is covered by patents held by several pools and by unpooled holders; if you distribute or use
-this software you may need a licence from them.
+This software implements a decoder and an encoder. It gives you no special rights on the HEVC
+patents. HEVC is covered by patents held by several pools and by unpooled holders; if you
+distribute or use this software you may need a licence from them.

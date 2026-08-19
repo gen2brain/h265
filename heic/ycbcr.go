@@ -2,12 +2,10 @@ package heic
 
 import "image"
 
-// toYCbCr converts img to the 8-bit planes the encoder codes at the given
-// chroma sampling, at a size that sampling resolves: a dimension the chroma
-// cannot divide gains a column or row that repeats its edge, which the ispe
-// property then hides. Chroma is the average of each group. Alpha is
-// composited over black unless keepAlpha, which leaves the colour for an
-// auxiliary item to be read against.
+// toYCbCr converts img to the 8-bit planes the encoder codes, at a size the
+// sampling resolves: a dimension the chroma cannot divide gains a column or row
+// repeating its edge, which the ispe property then hides. keepAlpha leaves the
+// colour un-composited for an auxiliary item to be read against.
 func toYCbCr(img image.Image, sub image.YCbCrSubsampleRatio, keepAlpha bool) *image.YCbCr {
 	b := img.Bounds()
 	sw, sh := ratioSub(sub)
@@ -326,9 +324,9 @@ func fillEdge(row []byte, w int) {
 	}
 }
 
-// readRow returns row y of img as RGB samples with a four byte pixel stride. Composited over black, unless keepAlpha
-// asks for the colour an alpha item will be read against, which is what a
-// non-premultiplied source already holds.
+// readRow returns row y of img as RGB samples with a four byte pixel stride,
+// composited over black unless keepAlpha asks for the colour an alpha item
+// will be read against, which a non-premultiplied source already holds.
 func readRow(img image.Image, b image.Rectangle, y int, dst []byte, keepAlpha bool) []byte {
 	w := b.Dx()
 
