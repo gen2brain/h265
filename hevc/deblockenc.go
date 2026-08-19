@@ -101,10 +101,10 @@ func (e *intraEncoder[P]) deblockEdge(x, y int, vertical bool, hdr *sliceHeader)
 			n = 4 >> sw
 		}
 
-		for c := 1; c <= 2; c++ {
-			deblockChroma(e.recon[c], e.strideC, qx>>sw, qy>>sh, n, vertical,
-				int32(e.qpDeblockC), hdr, e.bitDepth, false, false)
-		}
+		_, tc := betaTc(int32(e.qpDeblockC), 2, hdr, e.bitDepth)
+
+		deblockChromaPair(e.recon[1], e.recon[2], e.strideC, qx>>sw, qy>>sh, n, vertical,
+			tc, tc, e.bitDepth, false, false)
 	}
 
 	deblockLumaEdge(e.recon[0], base, line, step, plan, e.bitDepth,

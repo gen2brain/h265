@@ -248,6 +248,8 @@ func (d *ctuDecoder) deblockEdge(x, y int, vertical bool) {
 	var (
 		plan     [2]lumaPlan
 		noP, noQ [2]bool
+		onC      [2]bool
+		qpC      [2]int32
 	)
 
 	for k := 0; k < 8; k += 4 {
@@ -294,43 +296,88 @@ func (d *ctuDecoder) deblockEdge(x, y int, vertical bool) {
 			continue
 		}
 
-		sw, sh := d.s.subWidthC, d.s.subHeightC
-
-		if (vertical && x%(8*sw) != 0) || (!vertical && y%(8*sh) != 0) {
+		if (vertical && x%(8*d.s.subWidthC) != 0) || (!vertical && y%(8*d.s.subHeightC) != 0) {
 			continue
 		}
 
-		// The four-sample luma segment spans 4/subHeightC chroma rows on a
-		// vertical edge, and 4/subWidthC columns on a horizontal one.
-		n := 4 / sh
-		if !vertical {
-			n = 4 / sw
-		}
-
-		for cIdx := 1; cIdx <= 2; cIdx++ {
-			off := d.p.cbQPOffset
-			if cIdx == 2 {
-				off = d.p.crQPOffset
-			}
-
-			cqp := chromaQP(clip3(qp+off, 0, 57), d.s.chromaArrayType())
-
-			if deep {
-				plane, cs := d.pic.plane16(cIdx)
-				deblockChroma(plane, cs, qx/sw, qy/sh, n, vertical, cqp, sl, d.pic.BitDepthC,
-					noP[k>>2], noQ[k>>2])
-			} else {
-				plane, cs := d.pic.plane8(cIdx)
-				deblockChroma(plane, cs, qx/sw, qy/sh, n, vertical, cqp, sl, d.pic.BitDepthC,
-					noP[k>>2], noQ[k>>2])
-			}
-		}
+		onC[k>>2], qpC[k>>2] = true, qp
 	}
+
+	d.deblockChromaEdge(x, y, vertical, sl, &onC, &qpC, &noP, &noQ)
 
 	if deep {
 		deblockLumaEdge(luma16, base, line, step, plan, d.pic.BitDepth, noP, noQ)
 	} else {
 		deblockLumaEdge(luma8, base, line, step, plan, d.pic.BitDepth, noP, noQ)
+	}
+}
+
+// deblockChromaEdge is 8.7.2.5.5 over one edge. The two groups of four luma
+// lines are adjacent in the chroma planes, so they share a call when their
+// coding units agree.
+func (d *ctuDecoder) deblockChromaEdge(x, y int, vertical bool, sl *sliceHeader,
+	on *[2]bool, qp *[2]int32, noP, noQ *[2]bool,
+) {
+	if !on[0] && !on[1] {
+		return
+	}
+
+	sw, sh := d.s.subWidthC, d.s.subHeightC
+
+	// The four-sample luma segment spans 4/subHeightC chroma rows on a
+	// vertical edge, and 4/subWidthC columns on a horizontal one.
+	n := 4 / sh
+	if !vertical {
+		n = 4 / sw
+	}
+
+	both := on[0] && on[1] && qp[0] == qp[1] && noP[0] == noP[1] && noQ[0] == noQ[1]
+
+	deep := d.pic.deep()
+	cb8, cs := d.pic.plane8(1)
+	cr8, _ := d.pic.plane8(2)
+	cb16, cs16 := d.pic.plane16(1)
+	cr16, _ := d.pic.plane16(2)
+
+	if deep {
+		cs = cs16
+	}
+
+	for g := range 2 {
+		if !on[g] {
+			continue
+		}
+
+		cx, cy := x, y+4*g
+		if !vertical {
+			cx, cy = x+4*g, y
+		}
+
+		lines := n
+		if both {
+			if g != 0 {
+				continue
+			}
+
+			lines = 2 * n
+		}
+
+		_, tcCb := betaTc(chromaQP(clip3(qp[g]+d.p.cbQPOffset, 0, 57), d.s.chromaArrayType()),
+			2, sl, d.pic.BitDepthC)
+		_, tcCr := betaTc(chromaQP(clip3(qp[g]+d.p.crQPOffset, 0, 57), d.s.chromaArrayType()),
+			2, sl, d.pic.BitDepthC)
+
+		if tcCb == 0 && tcCr == 0 {
+			continue
+		}
+
+		if deep {
+			deblockChromaPair(cb16, cr16, cs, cx/sw, cy/sh, lines, vertical,
+				tcCb, tcCr, d.pic.BitDepthC, noP[g], noQ[g])
+		} else {
+			deblockChromaPair(cb8, cr8, cs, cx/sw, cy/sh, lines, vertical,
+				tcCb, tcCr, d.pic.BitDepthC, noP[g], noQ[g])
+		}
 	}
 }
 
@@ -549,37 +596,44 @@ func deblockLuma8(p []uint8, base, line, step int, mode uint8, pl [2]lumaPlan, f
 	return true
 }
 
-// deblockChroma is 8.7.2.5.5, which only runs where the strength is two.
-func deblockChroma[P pixel](plane []P, stride, x, y, n int, vertical bool, qp int32,
-	sh *sliceHeader, bitDepth int, noP, noQ bool,
+// deblockChromaPair is 8.7.2.5.5 over both components at once, which is what
+// the edge derivation of 8.7.2.4 gives them in common.
+func deblockChromaPair[P pixel](cb, cr []P, stride, x, y, n int, vertical bool,
+	tcCb, tcCr int32, bitDepth int, noP, noQ bool,
 ) {
-	_, tc := betaTc(qp, 2, sh, bitDepth)
-	if tc == 0 {
-		return
-	}
-
 	step, line := 1, stride
 	if !vertical {
 		step, line = stride, 1
 	}
 
 	base := y*stride + x
+	maxV := int32(1<<bitDepth - 1)
 
 	for l := range n {
 		off := base + l*line
 
-		p0, p1 := int32(plane[off-step]), int32(plane[off-2*step])
-		q0, q1 := int32(plane[off]), int32(plane[off+step])
-
-		delta := clip3((((q0-p0)<<2)+p1-q1+4)>>3, -tc, tc)
-
-		if !noP {
-			plane[off-step] = P(clip3(p0+delta, 0, 1<<bitDepth-1))
+		if tcCb != 0 {
+			chromaLine(cb, off, step, tcCb, maxV, noP, noQ)
 		}
 
-		if !noQ {
-			plane[off] = P(clip3(q0-delta, 0, 1<<bitDepth-1))
+		if tcCr != 0 {
+			chromaLine(cr, off, step, tcCr, maxV, noP, noQ)
 		}
+	}
+}
+
+func chromaLine[P pixel](plane []P, off, step int, tc, maxV int32, noP, noQ bool) {
+	p0, p1 := int32(plane[off-step]), int32(plane[off-2*step])
+	q0, q1 := int32(plane[off]), int32(plane[off+step])
+
+	delta := clip3((((q0-p0)<<2)+p1-q1+4)>>3, -tc, tc)
+
+	if !noP {
+		plane[off-step] = P(clip3(p0+delta, 0, maxV))
+	}
+
+	if !noQ {
+		plane[off] = P(clip3(q0-delta, 0, maxV))
 	}
 }
 
