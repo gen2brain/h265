@@ -77,7 +77,7 @@ type sps struct {
 
 	bitDepthLuma, bitDepthChroma uint8
 
-	// E.3.1: the colour description of the sequence, unspecified unless the
+	// E.3.1: the color description of the sequence, unspecified unless the
 	// video usability information says otherwise.
 	colourPrimaries uint16
 	transferChar    uint16
@@ -322,7 +322,7 @@ func parseVUI(c *getBits, s *sps, maxSubLayersMinus1 uint8) error {
 		c.bit()
 	}
 
-	// E.2.1 video_signal_type. The colour description defaults to unspecified,
+	// E.2.1 video_signal_type. The color description defaults to unspecified,
 	// which newPicture carries so a container with no description of its own
 	// can fall back to what the sequence declares.
 	if c.bit() != 0 {

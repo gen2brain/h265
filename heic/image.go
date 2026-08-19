@@ -30,23 +30,33 @@ func (f *file) colorInfo(it *item, pic *hevc.Picture) ColorInfo {
 		}
 	}
 
-	if f.meta == nil {
+	if f.meta == nil || it == nil {
 		return ci
 	}
 
-	p := f.meta.prop(it, "colr")
-	if p == nil || p.colr == nil {
-		return ci
-	}
+	// 23008-12 lets a picture carry an nclx description and an ICC profile at
+	// once, in a colr box each, so both are read rather than the first.
+	for _, ip := range it.props {
+		if ip.idx >= len(f.meta.props) {
+			continue
+		}
 
-	if p.colr.hasNCLX {
-		ci.Primaries = p.colr.primaries
-		ci.Transfer = p.colr.transfer
-		ci.Matrix = p.colr.matrix
-		ci.FullRange = p.colr.fullRange
-	}
+		c := f.meta.props[ip.idx].colr
+		if c == nil {
+			continue
+		}
 
-	ci.ICCP = p.colr.icc
+		if c.hasNCLX {
+			ci.Primaries = c.primaries
+			ci.Transfer = c.transfer
+			ci.Matrix = c.matrix
+			ci.FullRange = c.fullRange
+		}
+
+		if c.icc != nil {
+			ci.ICCP = c.icc
+		}
+	}
 
 	return ci
 }

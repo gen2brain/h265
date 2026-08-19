@@ -57,8 +57,8 @@ PCM, lossless, scaling lists, and the range extensions other than cross-componen
 RDPCM and CABAC bypass alignment, which are refused rather than decoded wrongly. In the container
 alpha, `grid`, `clap`/`irot`/`imir`, `colr`, image sequences, Exif and XMP.
 
-Encoding: 8-12 bit, 4:2:0/4:2:2/4:4:4/monochrome, intra only, deblocking, wavefronts, PCM
-lossless, and alpha, Exif and XMP in the container.
+Encoding: 8-12 bit, 4:2:0/4:2:2/4:4:4/monochrome, intra only, deblocking, sample adaptive
+offset, wavefronts, PCM lossless, and alpha, `colr`, Exif and XMP in the container.
 
 Decoding is threaded over grid tiles and wavefront rows; `heic.Options.Threads` and
 `hevc.Decoder.Threads` bound it.

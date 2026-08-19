@@ -48,6 +48,12 @@ type EncodeOptions struct {
 	Chroma ChromaFormat
 	// BitDepth is the sample size, 8 through 12. The zero value is 8.
 	BitDepth int
+	// SAO fits the offsets of 8.7.3 to each coding tree block, for about 2.2x
+	// the time and 3.5% of the bitrate.
+	SAO bool
+	// ICC is a color profile, written alongside the nclx description that
+	// says how the samples are coded. It aliases the input.
+	ICC []byte
 	// Exif is a TIFF payload, written as an Exif item describing the picture.
 	Exif []byte
 	// XMP is an XMP packet, written as a metadata item describing the picture.
@@ -134,14 +140,14 @@ func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
 
 	sample, params, err := codeItem(hevc.EncoderOptions{
 		Width: stored.X, Height: stored.Y, Chroma: o.Chroma, BitDepth: o.BitDepth,
-		QP: qp, Lossless: o.Lossless,
+		QP: qp, Lossless: o.Lossless, SAO: o.SAO,
 	}, frame)
 	if err != nil {
 		return err
 	}
 
 	f := heicFile{size: image.Point{X: width, Y: height}, stored: stored,
-		gray: o.Chroma == ChromaGray, depth: o.BitDepth}
+		gray: o.Chroma == ChromaGray, depth: o.BitDepth, icc: o.ICC}
 	f.add(encItem{id: 1, typ: "hvc1", name: "image", data: sample}, params)
 
 	if alpha != nil || alpha6 != nil {
@@ -149,7 +155,7 @@ func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
 
 		aSample, aParams, err := codeItem(hevc.EncoderOptions{
 			Width: stored.X, Height: stored.Y, Chroma: hevc.ChromaMono,
-			BitDepth: o.BitDepth, QP: qp, Lossless: o.Lossless,
+			BitDepth: o.BitDepth, QP: qp, Lossless: o.Lossless, SAO: o.SAO,
 		}, aFrame)
 		if err != nil {
 			return err
@@ -221,6 +227,7 @@ type heicFile struct {
 	size, stored image.Point
 	gray         bool
 	depth        int
+	icc          []byte
 	items        []encItem
 	props        []byte
 	nProps       byte
@@ -282,6 +289,11 @@ func (f *heicFile) add(it encItem, params []hevc.NALUnit) {
 		it.assoc = append(it.assoc, f.prop(box("colr",
 			append(append(append([]byte("nclx"), u16(encPrimaries)...),
 				u16(encTransfer)...), append(u16(encMatrix), 0x80)...)), false))
+
+		if len(f.icc) > 0 {
+			it.assoc = append(it.assoc,
+				f.prop(box("colr", append([]byte("prof"), f.icc...)), false))
+		}
 	}
 
 	if f.clap != 0 {

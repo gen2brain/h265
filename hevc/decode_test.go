@@ -299,21 +299,20 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 
 	y, cb, cr := lossyTestFrame(width, height)
 
-	rbsp, recon := encodeRecon(t, y, cb, cr, width, height, 26)
+	enc, rbsp, recon := encodeRecon(t, y, cb, cr, width, height, 26)
 
-	h := encoderHeaders{
-		width: width, height: height, levelIDC: pcmLevelIDC(width * height),
-		chromaFormat: 1, subWidthC: 2, subHeightC: 2,
-		ctbLog2: 6, maxTrHierIntra: 2,
-	}
-	s, err := parseSPS(h.sps())
+	// The headers are the encoder's own, so that a flag added to one of them
+	// cannot drift from the slice that has to agree with it.
+	nals := enc.nals(width, height, rbsp)
+
+	s, err := parseSPS(nals[1].RBSP)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if s.ctbSizeY != 64 {
 		t.Fatalf("CTB size = %d", s.ctbSizeY)
 	}
-	p, err := parsePPS(h.pps())
+	p, err := parsePPS(nals[2].RBSP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,13 +326,6 @@ func TestEncodeLossyIntraClosedLoop(t *testing.T) {
 		sh.betaOffsetDiv2 != 0 || sh.tcOffsetDiv2 != 0 || len(sh.entryPointOffsets) != 0 {
 		t.Fatalf("slice header = %+v", sh)
 	}
-	nals := []NALUnit{
-		{Type: NALVPS, RBSP: h.vps()},
-		{Type: NALSPS, RBSP: h.sps()},
-		{Type: NALPPS, RBSP: h.pps()},
-		{Type: NALIdrNLP, RBSP: rbsp},
-	}
-
 	var d Decoder
 	var pics []*Picture
 	for _, nal := range nals {
@@ -804,7 +796,10 @@ func TestEncodeBitDepthQuality(t *testing.T) {
 					continue
 				}
 
-				if psnr < base-1 || psnr > base+1 {
+				// Sample adaptive offset corrects more finely at ten and twelve
+				// bits, where its offsets are a quarter and a sixteenth of an
+				// eight bit step, so the deeper arms come out slightly ahead.
+				if psnr < base-1.5 || psnr > base+1.5 {
 					t.Fatalf("depth %d psnr %.2f, eight bit %.2f", depth, psnr, base)
 				}
 
@@ -823,6 +818,140 @@ func narrow(v []uint16) []uint8 {
 	}
 
 	return out
+}
+
+// TestEncodeSAO codes with the sample adaptive offset of 8.7.3, whose
+// parameters sit in front of every coding tree block. The decoded picture has
+// to be what the encoder holds, and the offsets have to take the error down
+// over the sweep.
+//
+// They are not guaranteed to on every picture: they are fitted to the pass that
+// reconstructs it and written on the pass that follows, whose rate estimates
+// carry the offsets' own bins and can settle a decision differently. The gap
+// that leaves is under a percent, so a picture may come out marginally worse
+// while the sweep as a whole comes out well ahead.
+func TestEncodeSAO(t *testing.T) {
+	sizes := [][2]int{{16, 16}, {64, 64}, {80, 48}, {50, 34}, {130, 98}, {192, 128}}
+
+	var total, totalSAO int64
+
+	var cases, used int
+
+	for _, chroma := range []ChromaFormat{Chroma420, Chroma422, Chroma444, ChromaMono} {
+		sw, sh := chroma.sub()
+
+		for _, size := range sizes {
+			width, height := size[0], size[1]
+
+			for kind := range 4 {
+				r := rand.New(rand.NewPCG(uint64(kind), uint64(width*height)))
+				y, cb, cr := lossyPlanes(r, width, height, kind, sw, sh)
+
+				for _, qp := range []int{20, 34, 51} {
+					name := fmt.Sprintf("%d/%dx%d/kind%d/qp%d", chroma, width, height, kind, qp)
+
+					t.Run(name, func(t *testing.T) {
+						plain := encodeSAO(t, y, cb, cr, width, height, qp, chroma, false)
+						sao := encodeSAO(t, y, cb, cr, width, height, qp, chroma, true)
+
+						total += plain.err
+						totalSAO += sao.err
+						cases++
+
+						if sao.used {
+							used++
+						}
+
+						if sao.err > plain.err+plain.err/100 {
+							t.Fatalf("error %d with the offsets, %d without", sao.err, plain.err)
+						}
+					})
+				}
+			}
+		}
+	}
+
+	if totalSAO >= total-total/100 {
+		t.Fatalf("the offsets took the error from %d to %d, which is not worth writing",
+			total, totalSAO)
+	}
+
+	// A decision that always says no would pass everything above.
+	if used*3 < cases {
+		t.Fatalf("only %d of %d pictures carried any offsets", used, cases)
+	}
+}
+
+// saoResult is what one encode of a picture came to.
+type saoResult struct {
+	err  int64
+	used bool
+}
+
+// encodeSAO codes a picture and holds the decoded luma to the reconstruction
+// the encoder kept, returning the squared error against the source.
+func encodeSAO(t *testing.T, y, cb, cr []uint8, width, height, qp int,
+	chroma ChromaFormat, sao bool,
+) saoResult {
+	t.Helper()
+
+	sw, _ := chroma.sub()
+
+	enc, err := NewEncoder(EncoderOptions{Width: width, Height: height, QP: qp,
+		Chroma: chroma, SAO: sao})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	frame := Frame{Y: y, StrideY: width}
+	if chroma != ChromaMono {
+		frame.Cb, frame.Cr, frame.StrideC = cb, cr, width/sw
+	}
+
+	nals, err := enc.Encode(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		d    Decoder
+		pics []*Picture
+	)
+
+	for _, nal := range nals {
+		out, err := d.DecodeNAL(nal)
+		if err != nil {
+			t.Fatalf("DecodeNAL %d: %v", nal.Type, err)
+		}
+
+		pics = append(pics, out...)
+	}
+
+	pics = append(pics, d.Flush()...)
+
+	if len(pics) != 1 {
+		t.Fatalf("pictures = %d", len(pics))
+	}
+
+	p := pics[0]
+	cw := codedSize(width)
+
+	var sse int64
+
+	for j := range height {
+		for i := range width {
+			got := p.Y[(p.CropY+j)*p.StrideY+p.CropX+i]
+
+			if want := enc.intra.recon[0][j*cw+i]; got != want {
+				t.Fatalf("sample %d,%d = %d, want %d", i, j, got, want)
+			}
+
+			d := int64(y[j*width+i]) - int64(got)
+			sse += d * d
+		}
+	}
+
+	return saoResult{err: sse, used: enc.intra.saoOn}
 }
 
 // TestEncodeCUSize covers the choice between one 32x32 coding unit and four
@@ -1174,7 +1303,7 @@ func TestLossyTU8Rate(t *testing.T) {
 // encodeRecon codes a picture and hands back the reconstruction the encoder
 // built, cropped to the picture the conformance window leaves, which is what a
 // decoder must reproduce sample for sample.
-func encodeRecon(t *testing.T, y, cb, cr []uint8, width, height, qp int) ([]byte, [3][]uint8) {
+func encodeRecon(t *testing.T, y, cb, cr []uint8, width, height, qp int) (*intraEncoder[uint8], []byte, [3][]uint8) {
 	t.Helper()
 
 	cw, ch := codedSize(width), codedSize(height)
@@ -1182,14 +1311,14 @@ func encodeRecon(t *testing.T, y, cb, cr []uint8, width, height, qp int) ([]byte
 	pcb, _ := padPlane(nil, cb, width/2, width/2, height/2, cw/2, ch/2)
 	pcr, _ := padPlane(nil, cr, width/2, width/2, height/2, cw/2, ch/2)
 
-	var e intraEncoder[uint8]
+	e := new(intraEncoder[uint8])
 
 	rbsp, err := e.slice(py, pcb, pcr, cw, ch, qp)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	return rbsp, [3][]uint8{
+	return e, rbsp, [3][]uint8{
 		cropPlane(e.recon[0], cw, width, height),
 		cropPlane(e.recon[1], cw/2, width/2, height/2),
 		cropPlane(e.recon[2], cw/2, width/2, height/2),
@@ -1225,40 +1354,51 @@ func TestEncodeExternal(t *testing.T) {
 		pcm           bool
 		threads       int
 		chroma        ChromaFormat
+		sao           bool
 	}{
-		{48, 48, 26, false, 0, Chroma420},
-		{64, 64, 1, false, 0, Chroma420},
-		{80, 48, 51, false, 0, Chroma420},
-		{176, 144, 34, false, 0, Chroma420},
-		{50, 34, 26, false, 0, Chroma420},
-		{130, 98, 30, false, 0, Chroma420},
-		{32, 32, 0, true, 0, Chroma420},
-		{80, 48, 0, true, 0, Chroma420},
-		{66, 18, 0, true, 0, Chroma420},
+		{48, 48, 26, false, 0, Chroma420, false},
+		{64, 64, 1, false, 0, Chroma420, false},
+		{80, 48, 51, false, 0, Chroma420, false},
+		{176, 144, 34, false, 0, Chroma420, false},
+		{50, 34, 26, false, 0, Chroma420, false},
+		{130, 98, 30, false, 0, Chroma420, false},
+		{32, 32, 0, true, 0, Chroma420, false},
+		{80, 48, 0, true, 0, Chroma420, false},
+		{66, 18, 0, true, 0, Chroma420, false},
 
 		// The wavefront needs two rows and two columns of coding tree blocks
 		// before it changes anything, and its entry points are what another
 		// decoder is most likely to disagree with.
-		{192, 192, 26, false, 3, Chroma420},
-		{320, 144, 34, false, 2, Chroma420},
-		{144, 320, 18, false, 4, Chroma420},
+		{192, 192, 26, false, 3, Chroma420, false},
+		{320, 144, 34, false, 2, Chroma420, false},
+		{144, 320, 18, false, 4, Chroma420, false},
 
 		// Monochrome leaves the chroma out of the tree and the planes out of
 		// the picture. 4:2:2 stacks two chroma blocks per luma one and 4:4:4
 		// splits chroma down with the luma, which another decoder has to agree
 		// about all the way to the 4x4 blocks.
-		{64, 64, 26, false, 0, ChromaMono},
-		{176, 144, 40, false, 0, ChromaMono},
-		{130, 98, 20, false, 0, ChromaMono},
-		{192, 192, 30, false, 3, ChromaMono},
-		{64, 64, 26, false, 0, Chroma422},
-		{176, 144, 12, false, 0, Chroma422},
-		{130, 98, 40, false, 0, Chroma422},
-		{192, 192, 30, false, 3, Chroma422},
-		{64, 64, 26, false, 0, Chroma444},
-		{176, 144, 12, false, 0, Chroma444},
-		{130, 98, 40, false, 0, Chroma444},
-		{192, 192, 30, false, 3, Chroma444},
+		{64, 64, 26, false, 0, ChromaMono, false},
+		{176, 144, 40, false, 0, ChromaMono, false},
+		{130, 98, 20, false, 0, ChromaMono, false},
+		{192, 192, 30, false, 3, ChromaMono, false},
+		{64, 64, 26, false, 0, Chroma422, false},
+		{176, 144, 12, false, 0, Chroma422, false},
+		{130, 98, 40, false, 0, Chroma422, false},
+		{192, 192, 30, false, 3, Chroma422, false},
+		{64, 64, 26, false, 0, Chroma444, false},
+		{176, 144, 12, false, 0, Chroma444, false},
+		{130, 98, 40, false, 0, Chroma444, false},
+		{192, 192, 30, false, 3, Chroma444, false},
+
+		// Sample adaptive offset puts its parameters in front of every coding
+		// tree block, so a decoder that reads them a bit out of step loses the
+		// whole slice.
+		{64, 64, 26, false, 0, Chroma420, true},
+		{176, 144, 34, false, 0, Chroma420, true},
+		{130, 98, 20, false, 0, Chroma420, true},
+		{192, 192, 30, false, 3, Chroma420, true},
+		{176, 144, 30, false, 0, Chroma444, true},
+		{176, 144, 30, false, 0, ChromaMono, true},
 	}
 
 	for _, c := range cases {
@@ -1273,9 +1413,9 @@ func TestEncodeExternal(t *testing.T) {
 		)
 
 		switch {
-		case c.chroma != Chroma420:
+		case c.chroma != Chroma420 || c.sao:
 			enc, e := NewEncoder(EncoderOptions{Width: c.width, Height: c.height,
-				QP: c.qp, Chroma: c.chroma})
+				QP: c.qp, Chroma: c.chroma, SAO: c.sao})
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -1332,7 +1472,7 @@ func TestEncodeExternal(t *testing.T) {
 		default:
 			var recon [3][]uint8
 
-			_, recon = encodeRecon(t, y, cb, cr, c.width, c.height, c.qp)
+			_, _, recon = encodeRecon(t, y, cb, cr, c.width, c.height, c.qp)
 			nals, err = encodeIntraLossyQP(y, cb, cr, c.width, c.height, c.qp)
 			want = append(append(append([]byte{}, recon[0]...), recon[1]...), recon[2]...)
 		}
@@ -1366,6 +1506,10 @@ func TestEncodeExternal(t *testing.T) {
 
 			if c.chroma != Chroma420 {
 				name = fmt.Sprintf("%s/%s", name, [4]string{"420", "422", "444", "mono"}[c.chroma])
+			}
+
+			if c.sao {
+				name += "/sao"
 			}
 
 			t.Run(name, func(t *testing.T) {
@@ -1466,7 +1610,7 @@ func TestEncodeLossyIntraQP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, recon := encodeRecon(t, y, cb, cr, width, height, qp)
+			_, _, recon := encodeRecon(t, y, cb, cr, width, height, qp)
 
 			var d Decoder
 			for _, nal := range nals {
@@ -1503,7 +1647,7 @@ func TestEncodeLossyIntraQualityBaseline(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, recon := encodeRecon(t, y, cb, cr, width, height, qp)
+		_, _, recon := encodeRecon(t, y, cb, cr, width, height, qp)
 		reconY := recon[0]
 
 		var sse uint64
@@ -1586,7 +1730,7 @@ func TestEncodeLossyRoundTrip(t *testing.T) {
 				name := fmt.Sprintf("%dx%d/kind%d/qp%d", width, height, kind, qp)
 
 				t.Run(name, func(t *testing.T) {
-					_, recon := encodeRecon(t, y, cb, cr, width, height, qp)
+					_, _, recon := encodeRecon(t, y, cb, cr, width, height, qp)
 
 					nals, err := encodeIntraLossyQP(y, cb, cr, width, height, qp)
 					if err != nil {
@@ -1670,7 +1814,7 @@ func FuzzEncode(f *testing.F) {
 			nals, err = encodePCM(y, cb, cr, width, height)
 			want = append(append(append([]byte{}, y...), cb...), cr...)
 		} else {
-			_, recon := encodeRecon(t, y, cb, cr, width, height, qp)
+			_, _, recon := encodeRecon(t, y, cb, cr, width, height, qp)
 			nals, err = encodeIntraLossyQP(y, cb, cr, width, height, qp)
 			want = append(append(append([]byte{}, recon[0]...), recon[1]...), recon[2]...)
 		}

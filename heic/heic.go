@@ -34,7 +34,10 @@ An image that carries alpha keeps it. The channel becomes a monochrome
 auxiliary item coded at the same quality, and the colour is written
 un-composited so that a reader gets both back. An opaque image writes no such
 item. [EncodeOptions.Exif] and [EncodeOptions.XMP] add metadata items
-describing the picture.
+describing the picture, and [EncodeOptions.ICC] a colour profile beside the
+nclx description rather than instead of it. [EncodeOptions.SAO] fits an
+offset per coding tree block to the error left in it, which costs about 2.2x
+the encoding time.
 
 Chroma that cannot resolve a dimension leaves a picture with one stored with
 its edge repeated, carrying a clean aperture that takes the repetition back

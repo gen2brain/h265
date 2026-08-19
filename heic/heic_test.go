@@ -3,6 +3,7 @@ package heic
 import (
 	"bytes"
 	"crypto/md5"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -460,7 +461,7 @@ func TestEncodeExternalChroma(t *testing.T) {
 }
 
 // alphaSource is a picture whose alpha runs the whole way from clear to opaque
-// and whose colour does not follow it, so compositing shows up.
+// and whose color does not follow it, so compositing shows up.
 func alphaSource(w, h int) *image.NRGBA {
 	src := image.NewNRGBA(image.Rect(0, 0, w, h))
 
@@ -528,7 +529,7 @@ func TestEncodeAlpha(t *testing.T) {
 				}
 			}
 
-			// The colour has to survive where the alpha did not hide it, which
+			// The color has to survive where the alpha did not hide it, which
 			// compositing over black would have taken away.
 			o, go_ := nrgba.PixOffset(w-1, h-1), got.PixOffset(w-1, h-1)
 			for c := range 3 {
@@ -595,6 +596,90 @@ func TestEncodeOpaqueNoAlpha(t *testing.T) {
 				t.Fatalf("image = %T", img)
 			}
 		})
+	}
+}
+
+// fakeICC is a syntactically well-formed ICC v4 profile header, which is as
+// much as a container needs to carry one.
+func fakeICC() []byte {
+	icc := make([]byte, 132)
+	binary.BigEndian.PutUint32(icc, uint32(len(icc)))
+	copy(icc[4:], "none")
+	binary.BigEndian.PutUint32(icc[8:], 0x04300000)
+	copy(icc[12:], "mntr")
+	copy(icc[16:], "RGB ")
+	copy(icc[20:], "XYZ ")
+	copy(icc[36:], "acsp")
+
+	return icc
+}
+
+// TestEncodeICC writes a color profile beside the nclx description rather than
+// instead of it, so a reader gets the matrix the samples are coded with and the
+// profile the color means.
+func TestEncodeICC(t *testing.T) {
+	icc := fakeICC()
+
+	src := image.NewRGBA(image.Rect(0, 0, 32, 32))
+	for i := range src.Pix {
+		src.Pix[i] = byte(i * 13)
+	}
+
+	for i := 3; i < len(src.Pix); i += 4 {
+		src.Pix[i] = 255
+	}
+
+	data, err := encodeToBytes(src, EncodeOptions{ICC: icc})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, ci, err := DecodeColor(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(ci.ICCP, icc) {
+		t.Fatalf("ICCP = %d bytes, want %d", len(ci.ICCP), len(icc))
+	}
+
+	// The nclx description has to survive next to it, or the samples cannot be
+	// turned into color at all.
+	if ci.Matrix != encMatrix || ci.Primaries != encPrimaries ||
+		ci.Transfer != encTransfer || !ci.FullRange {
+		t.Fatalf("colour = %+v", ci)
+	}
+
+	// An image with no profile carries no colr of that kind.
+	plain, err := encodeToBytes(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ci, err = DecodeColor(bytes.NewReader(plain)); err != nil {
+		t.Fatal(err)
+	}
+
+	if ci.ICCP != nil {
+		t.Fatalf("unasked profile of %d bytes", len(ci.ICCP))
+	}
+
+	if _, err := exec.LookPath("heif-info"); err != nil {
+		return
+	}
+
+	in := filepath.Join(t.TempDir(), "icc.heic")
+	if err := os.WriteFile(in, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := exec.Command("heif-info", in).CombinedOutput()
+	if err != nil {
+		t.Fatalf("heif-info: %v: %s", err, b)
+	}
+
+	if !strings.Contains(string(b), "color profile: prof") {
+		t.Fatalf("heif-info found no profile:\n%s", b)
 	}
 }
 
@@ -757,7 +842,7 @@ func TestEncodeExternalMetadata(t *testing.T) {
 // TestEncodeExternal holds the written container to libheif rather than to our
 // own reader, which is lenient about things a file should not do: a zero extent
 // length reads as the rest of the file here and as nothing there, and a file
-// with no colour description at all is anyone's guess.
+// with no color description at all is anyone's guess.
 func TestEncodeExternal(t *testing.T) {
 	if _, err := exec.LookPath("heif-dec"); err != nil {
 		t.Skip("heif-dec not installed")

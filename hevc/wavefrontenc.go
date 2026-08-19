@@ -66,6 +66,8 @@ func (e *intraEncoder[P]) waveRow(v *wave, k, rows, cols int) ([]byte, error) {
 			return nil, nil
 		}
 
+		e.writeSAO(&e.cabac, k*cols+x, cols)
+
 		if err := e.tree(x*64, k*64, 6, 0); err != nil {
 			return nil, err
 		}

@@ -14,6 +14,7 @@ type encoderHeaders struct {
 	levelIDC              uint8
 	pcm                   bool
 	deblockingDisabled    bool
+	sao                   bool
 	signDataHidingEnabled bool
 	ctbLog2               uint8
 	maxTrHierIntra        uint32
@@ -144,7 +145,7 @@ func (h encoderHeaders) sps() []byte {
 	w.ue(h.maxTrHierIntra)
 	w.bit(0)
 	w.bit(0)
-	w.bit(0)
+	w.bit(boolToBit(h.sao))
 	w.bit(boolToBit(h.pcm))
 	if h.pcm {
 		w.bits(uint64(max(h.bitDepth, 8)-1), 4)

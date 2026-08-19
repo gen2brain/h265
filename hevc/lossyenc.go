@@ -22,7 +22,7 @@ func (e *intraEncoder[P]) nals(width, height int, rbsp []byte) []NALUnit {
 		bitDepth: e.bitDepth,
 		levelIDC: pcmLevelIDC(cw * ch),
 		ctbLog2:  6, maxTrHierIntra: 2,
-		wavefront: e.wavefront,
+		wavefront: e.wavefront, sao: e.saoOn,
 	}
 
 	return append(h.parameterSets(), NALUnit{Type: NALIdrNLP, RBSP: rbsp})
@@ -72,6 +72,16 @@ type intraEncoder[P pixel] struct {
 	// threads is what the rows may spread over, wavefront whether they may.
 	threads   int
 	wavefront bool
+
+	// sao is 8.7.3's parameters per coding tree block, decided from the
+	// deblocked picture and written in front of each block on a second pass.
+	sao     [][3]saoParams
+	saoSrc  []P
+	saoStat saoStats
+	// wantSAO asks for the second pass; saoOn, saoLuma and saoChroma are what
+	// it found worth carrying.
+	wantSAO                   bool
+	saoOn, saoLuma, saoChroma bool
 
 	scratch lossyBlockScratch[P]
 	before  cuState[P]
@@ -169,8 +179,33 @@ type lossyTU8Plan struct {
 }
 
 // slice codes the whole picture. The planes are the coded picture, so a caller
-// with one that does not fill the coding grid pads it first.
+// with one that does not fill the coding grid pads it first. 7.3.8.2 wants the
+// offsets of 8.7.3 in front of the block they are fitted to, so asking for them
+// codes the picture twice.
 func (e *intraEncoder[P]) slice(y, cb, cr []P, width, height, qp int) ([]byte, error) {
+	e.saoOn = false
+
+	out, err := e.codeSlice(y, cb, cr, width, height, qp)
+	if err != nil || !e.wantSAO {
+		return out, err
+	}
+
+	e.decideSAO()
+
+	if !e.saoOn {
+		return out, nil
+	}
+
+	if out, err = e.codeSlice(y, cb, cr, width, height, qp); err != nil {
+		return nil, err
+	}
+
+	e.applySAO()
+
+	return out, nil
+}
+
+func (e *intraEncoder[P]) codeSlice(y, cb, cr []P, width, height, qp int) ([]byte, error) {
 	e.reset(y, cb, cr, width, height, qp)
 
 	rows, cols := ctbCount(height), ctbCount(width)
@@ -227,6 +262,15 @@ func (e *intraEncoder[P]) sliceRBSP(subs [][]byte) []byte {
 	w.bit(0)
 	w.ue(0)
 	w.ue(uint32(sliceI))
+
+	if e.saoOn {
+		w.bit(boolToBit(e.saoLuma))
+
+		if e.s.chromaArrayType() != 0 {
+			w.bit(boolToBit(e.saoChroma))
+		}
+	}
+
 	w.se(int32(e.qp - 26))
 
 	// 7.3.6.1 carries slice_loop_filter_across_slices_enabled_flag only while
@@ -326,6 +370,8 @@ func (e *intraEncoder[P]) startRow(k int, sync *[nContexts]uint8) {
 // but the last.
 func (e *intraEncoder[P]) ctbRow(k, rows, cols int, sync *[nContexts]uint8) error {
 	for x := range cols {
+		e.writeSAO(&e.cabac, k*cols+x, cols)
+
 		if err := e.tree(x*64, k*64, 6, 0); err != nil {
 			return err
 		}

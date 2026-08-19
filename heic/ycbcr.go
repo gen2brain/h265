@@ -3,9 +3,8 @@ package heic
 import "image"
 
 // toYCbCr converts img to the 8-bit planes the encoder codes, at a size the
-// sampling resolves: a dimension the chroma cannot divide gains a column or row
-// repeating its edge, which the ispe property then hides. keepAlpha leaves the
-// colour un-composited for an auxiliary item to be read against.
+// sampling resolves: a dimension the chroma cannot divide repeats its edge,
+// which ispe then hides. keepAlpha leaves the color un-composited.
 func toYCbCr(img image.Image, sub image.YCbCrSubsampleRatio, keepAlpha bool) *image.YCbCr {
 	b := img.Bounds()
 	sw, sh := ratioSub(sub)
@@ -67,7 +66,7 @@ func toGray(img image.Image, keepAlpha bool) []byte {
 }
 
 // toDeep converts img to sixteen bit planes at a sampling and a sample size,
-// the way toYCbCr does at eight. The colour comes through image.Color, which
+// the way toYCbCr does at eight. The color comes through image.Color, which
 // hands back sixteen bits whatever the source holds.
 func toDeep(img image.Image, sub image.YCbCrSubsampleRatio, depth int,
 	keepAlpha bool,
@@ -325,7 +324,7 @@ func fillEdge(row []byte, w int) {
 }
 
 // readRow returns row y of img as RGB samples with a four byte pixel stride,
-// composited over black unless keepAlpha asks for the colour an alpha item
+// composited over black unless keepAlpha asks for the color an alpha item
 // will be read against, which a non-premultiplied source already holds.
 func readRow(img image.Image, b image.Rectangle, y int, dst []byte, keepAlpha bool) []byte {
 	w := b.Dx()
@@ -382,8 +381,8 @@ func readRow(img image.Image, b image.Rectangle, y int, dst []byte, keepAlpha bo
 	return dst
 }
 
-// unpremul takes a premultiplied component back to the colour an alpha channel
-// is read against. Where nothing is left of the alpha, neither is the colour.
+// unpremul takes a premultiplied component back to the color an alpha channel
+// is read against. Where nothing is left of the alpha, neither is the color.
 func unpremul(c, a uint32) byte {
 	if a == 0 {
 		return 0
