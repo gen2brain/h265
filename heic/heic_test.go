@@ -317,6 +317,182 @@ func TestEncodeBitDepth(t *testing.T) {
 	}
 }
 
+// gridSource is a picture whose colour and alpha both vary in both directions,
+// so a tile put in the wrong place shows up.
+func gridSourceImage(w, h int) *image.NRGBA {
+	src := image.NewNRGBA(image.Rect(0, 0, w, h))
+
+	for y := range h {
+		for x := range w {
+			src.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x), G: uint8(y), B: uint8(x ^ y),
+				A: uint8(min((x+y)*255/(w+h-2), 255)),
+			})
+		}
+	}
+
+	return src
+}
+
+// TestEncodeGrid holds a tiled picture to the same picture coded as one item.
+// The coding is lossless, so the two have to agree sample for sample however
+// the tiles fall.
+func TestEncodeGrid(t *testing.T) {
+	for _, size := range [][2]int{{300, 200}, {129, 97}, {512, 512}, {1000, 700}} {
+		w, h := size[0], size[1]
+		src := gridSourceImage(w, h)
+
+		plain, err := encodeToBytes(src, EncodeOptions{Lossless: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		want, err := Decode(bytes.NewReader(plain), Options{ToYCbCr: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, tile := range []int{64, 128, 256} {
+			t.Run(fmt.Sprintf("%dx%d/tile%d", w, h, tile), func(t *testing.T) {
+				data, err := encodeToBytes(src, EncodeOptions{Tile: tile, Lossless: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				got, err := Decode(bytes.NewReader(data), Options{ToYCbCr: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if got.Bounds() != src.Rect {
+					t.Fatalf("bounds = %v, want %v", got.Bounds(), src.Rect)
+				}
+
+				a, b := &want.(*image.NYCbCrA).YCbCr, &got.(*image.NYCbCrA).YCbCr
+
+				for y := range h {
+					for x := range w {
+						if b.Y[b.YOffset(x, y)] != a.Y[a.YOffset(x, y)] {
+							t.Fatalf("luma at %d,%d = %d, want %d",
+								x, y, b.Y[b.YOffset(x, y)], a.Y[a.YOffset(x, y)])
+						}
+
+						if b.Cb[b.COffset(x, y)] != a.Cb[a.COffset(x, y)] ||
+							b.Cr[b.COffset(x, y)] != a.Cr[a.COffset(x, y)] {
+							t.Fatalf("chroma at %d,%d", x, y)
+						}
+					}
+				}
+
+				// The alpha is tied to each tile rather than to the grid.
+				rgb, err := Decode(bytes.NewReader(data))
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				out := rgb.(*image.NRGBA)
+
+				for y := range h {
+					for x := range w {
+						if got, want := out.Pix[out.PixOffset(x, y)+3],
+							src.Pix[src.PixOffset(x, y)+3]; got != want {
+							t.Fatalf("alpha at %d,%d = %d, want %d", x, y, got, want)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestEncodeGridLarge codes a picture larger than any level admits, which
+// A.4.1 caps at hevc.MaxLumaSamples and the format answers with a grid.
+func TestEncodeGridLarge(t *testing.T) {
+	const w, h = 6000, 6000
+
+	if w*h <= hevc.MaxLumaSamples {
+		t.Fatalf("%d samples is not over the cap", w*h)
+	}
+
+	if _, err := hevc.NewEncoder(hevc.EncoderOptions{Width: w, Height: h,
+		Chroma: hevc.ChromaMono}); err == nil {
+		t.Fatal("a picture no level admits was accepted")
+	}
+
+	src := image.NewGray(image.Rect(0, 0, w, h))
+	for y := range h {
+		for x := range w {
+			src.Pix[y*w+x] = uint8((x >> 4) ^ (y >> 4))
+		}
+	}
+
+	data, err := encodeToBytes(src, EncodeOptions{Chroma: ChromaGray, Quality: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := parse(memSource(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	it, err := f.primary()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if it.typ != "grid" {
+		t.Fatalf("primary is %q, want grid", it.typ)
+	}
+
+	// A picture this large is past DefaultFrameSizeLimit on a 32 bit build,
+	// which is the point of the limit rather than something to work around.
+	if DefaultFrameSizeLimit < w*h {
+		return
+	}
+
+	img, err := Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := img.Bounds(); got != src.Rect {
+		t.Fatalf("bounds = %v, want %v", got, src.Rect)
+	}
+}
+
+// TestEncodeExternalGrid holds a grid to libheif, which assembles it from the
+// item references rather than from anything our own reader agrees with.
+func TestEncodeExternalGrid(t *testing.T) {
+	if _, err := exec.LookPath("heif-info"); err != nil {
+		t.Skip("heif-info not installed")
+	}
+
+	data, err := encodeToBytes(gridSourceImage(300, 200),
+		EncodeOptions{Tile: 64, Lossless: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	in := filepath.Join(t.TempDir(), "grid.heic")
+	if err := os.WriteFile(in, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := exec.Command("heif-info", in).CombinedOutput()
+	if err != nil {
+		t.Fatalf("heif-info: %v: %s", err, b)
+	}
+
+	for _, want := range []string{
+		"image: 300x200", "tiles: 5x4, tile size: 64x64", "alpha channel: yes",
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("heif-info has no %q:\n%s", want, b)
+		}
+	}
+}
+
 // TestEncodeChroma writes each chroma sampling and reads the planes back. The
 // coding is lossless, so a converted picture has to come back exactly.
 func TestEncodeChroma(t *testing.T) {

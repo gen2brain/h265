@@ -28,6 +28,9 @@ const alphaURN = "urn:mpeg:hevc:2015:auxid:1"
 // needing 64 bit box sizes is refused rather than truncated.
 const maxBoxOverhead = 1 << 16
 
+// defaultTile is what a picture too large for any level is split into.
+const defaultTile = 512
+
 // ChromaFormat is the chroma sampling [Encode] writes. The zero value is 4:2:0.
 type ChromaFormat = hevc.ChromaFormat
 
@@ -51,6 +54,9 @@ type EncodeOptions struct {
 	// SAO fits the offsets of 8.7.3 to each coding tree block, for about 2.2x
 	// the time and 3.5% of the bitrate.
 	SAO bool
+	// Tile splits the picture over a grid of items of this many samples each
+	// way. Zero tiles only a picture too large to code as one.
+	Tile int
 	// ICC is a color profile, written alongside the nclx description that
 	// says how the samples are coded. It aliases the input.
 	ICC []byte
@@ -138,31 +144,27 @@ func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
 
 	stored := image.Point{X: even.Dx(), Y: even.Dy()}
 
-	sample, params, err := codeItem(hevc.EncoderOptions{
-		Width: stored.X, Height: stored.Y, Chroma: o.Chroma, BitDepth: o.BitDepth,
-		QP: qp, Lossless: o.Lossless, SAO: o.SAO,
-	}, frame)
-	if err != nil {
-		return err
+	tile := o.Tile
+	if tile == 0 && stored.X*stored.Y > hevc.MaxLumaSamples {
+		tile = defaultTile
+	}
+
+	if tile != 0 && (tile%sw != 0 || tile%sh != 0 ||
+		tile*tile > hevc.MaxLumaSamples) {
+		return ErrUnsupported
 	}
 
 	f := heicFile{size: image.Point{X: width, Y: height}, stored: stored,
 		gray: o.Chroma == ChromaGray, depth: o.BitDepth, icc: o.ICC}
-	f.add(encItem{id: 1, typ: "hvc1", name: "image", data: sample}, params)
 
-	if alpha != nil || alpha6 != nil {
-		aFrame := hevc.Frame{Y: alpha, Y16: alpha6, StrideY: stored.X}
+	src := gridSource{frame: frame, alpha: alpha, alpha6: alpha6,
+		stored: stored, sw: sw, sh: sh}
 
-		aSample, aParams, err := codeItem(hevc.EncoderOptions{
-			Width: stored.X, Height: stored.Y, Chroma: hevc.ChromaMono,
-			BitDepth: o.BitDepth, QP: qp, Lossless: o.Lossless, SAO: o.SAO,
-		}, aFrame)
-		if err != nil {
-			return err
-		}
+	base := hevc.EncoderOptions{Chroma: o.Chroma, BitDepth: o.BitDepth,
+		QP: qp, Lossless: o.Lossless, SAO: o.SAO}
 
-		f.add(encItem{id: 2, typ: "hvc1", name: "alpha", hidden: true,
-			data: aSample, ref: "auxl", to: 1}, aParams)
+	if err := f.picture(&src, base, tile); err != nil {
+		return err
 	}
 
 	if len(o.Exif) > 0 {
@@ -215,10 +217,11 @@ type encItem struct {
 	name   string
 	mime   string
 	hidden bool
+	mono   bool
 	data   []byte
 	assoc  []byte
 	ref    string
-	to     uint16
+	to     []uint16
 }
 
 // heicFile gathers the items and their properties, so that the boxes naming
@@ -228,10 +231,18 @@ type heicFile struct {
 	gray         bool
 	depth        int
 	icc          []byte
+	grid         bool
+	tile         int
 	items        []encItem
 	props        []byte
 	nProps       byte
-	ispe, clap   byte
+	colr         []byte
+	shared       map[string]byte
+	ispe         byte
+	ispeTile     byte
+	pixi         byte
+	pixiMono     byte
+	clap         byte
 }
 
 // prop appends a property to ipco and returns the one based index ipma names
@@ -248,55 +259,95 @@ func (f *heicFile) prop(b []byte, essential bool) byte {
 	return idx
 }
 
-// shared is the ispe every item carries and, for a picture stored with a
-// repeated edge, the clean aperture that takes it back off.
-func (f *heicFile) shared() {
-	if f.ispe != 0 {
-		return
+// once returns the index of a property already written with the same bytes, so
+// that the tiles of a grid share one decoder configuration record.
+func (f *heicFile) once(b []byte, essential bool) byte {
+	if f.shared == nil {
+		f.shared = map[string]byte{}
 	}
 
-	size := append(u32(uint32(f.size.X)), u32(uint32(f.size.Y))...)
-	f.ispe = f.prop(fullBox("ispe", 0, 0, size), true)
-
-	if f.stored != f.size {
-		f.clap = f.prop(box("clap", clapData(f.size)), false)
+	if idx, ok := f.shared[string(b)]; ok {
+		return idx
 	}
+
+	idx := f.prop(b, essential)
+	f.shared[string(b)] = idx
+
+	return idx
 }
 
-// add appends a coded picture item, with the properties an image needs.
-func (f *heicFile) add(it encItem, params []hevc.NALUnit) {
-	f.shared()
-
-	mono := it.ref == "auxl"
-
-	depth := byte(max(f.depth, 8))
-
-	pixi := []byte{3, depth, depth, depth}
-	if mono || f.gray {
-		pixi = []byte{1, depth}
+// sizeProp is the ispe of one size, kept so that every tile shares one.
+func (f *heicFile) sizeProp(idx *byte, w, h int) byte {
+	if *idx == 0 {
+		*idx = f.prop(fullBox("ispe", 0, 0, append(u32(uint32(w)), u32(uint32(h))...)), true)
 	}
 
-	it.assoc = []byte{f.ispe, f.prop(fullBox("pixi", 0, 0, pixi), true)}
+	return *idx
+}
 
-	if config, err := marshalHvcC(params); err == nil {
-		it.assoc = append(it.assoc, f.prop(box("hvcC", config), true))
-	}
-
-	if mono {
-		it.assoc = append(it.assoc,
-			f.prop(fullBox("auxC", 0, 0, append([]byte(alphaURN), 0)), true))
-	} else {
-		it.assoc = append(it.assoc, f.prop(box("colr",
+// colorProps is the nclx description of the samples and, beside it, whatever
+// profile says what they mean.
+func (f *heicFile) colorProps() []byte {
+	if f.colr == nil {
+		f.colr = []byte{f.prop(box("colr",
 			append(append(append([]byte("nclx"), u16(encPrimaries)...),
-				u16(encTransfer)...), append(u16(encMatrix), 0x80)...)), false))
+				u16(encTransfer)...), append(u16(encMatrix), 0x80)...)), false)}
 
 		if len(f.icc) > 0 {
-			it.assoc = append(it.assoc,
+			f.colr = append(f.colr,
 				f.prop(box("colr", append([]byte("prof"), f.icc...)), false))
 		}
 	}
 
-	if f.clap != 0 {
+	return f.colr
+}
+
+// pixiProp is the sample size of a component count, one property per count.
+func (f *heicFile) pixiProp(mono bool) byte {
+	depth := byte(max(f.depth, 8))
+
+	idx, body := &f.pixi, []byte{3, depth, depth, depth}
+	if mono || f.gray {
+		idx, body = &f.pixiMono, []byte{1, depth}
+	}
+
+	if *idx == 0 {
+		*idx = f.prop(fullBox("pixi", 0, 0, body), true)
+	}
+
+	return *idx
+}
+
+// add appends an item with the properties its part calls for: a grid describes
+// the picture, a tile describes only itself, and a lone picture does both.
+func (f *heicFile) add(it encItem, params []hevc.NALUnit) {
+	tile := it.typ == "hvc1" && f.grid
+
+	if tile {
+		it.assoc = []byte{f.sizeProp(&f.ispeTile, f.tile, f.tile), f.pixiProp(it.mono)}
+	} else {
+		it.assoc = []byte{f.sizeProp(&f.ispe, f.size.X, f.size.Y), f.pixiProp(it.mono)}
+	}
+
+	if config, err := marshalHvcC(params); err == nil {
+		it.assoc = append(it.assoc, f.once(box("hvcC", config), true))
+	}
+
+	switch {
+	case it.mono:
+		it.assoc = append(it.assoc,
+			f.once(fullBox("auxC", 0, 0, append([]byte(alphaURN), 0)), true))
+	case !tile:
+		it.assoc = append(it.assoc, f.colorProps()...)
+	}
+
+	// A grid names its own output size, so only a lone picture needs the clean
+	// aperture that takes the repeated edge back off.
+	if !f.grid && f.clap == 0 && f.stored != f.size {
+		f.clap = f.prop(box("clap", clapData(f.size)), false)
+	}
+
+	if f.clap != 0 && !tile {
 		it.assoc = append(it.assoc, f.clap)
 	}
 
@@ -307,7 +358,7 @@ func (f *heicFile) add(it encItem, params []hevc.NALUnit) {
 // properties of its own.
 func (f *heicFile) meta(it encItem) {
 	it.id = uint16(len(f.items)) + 1
-	it.ref, it.to = "cdsc", 1
+	it.ref, it.to = "cdsc", []uint16{1}
 
 	f.items = append(f.items, it)
 }
@@ -334,6 +385,12 @@ func (f *heicFile) marshal() ([]byte, error) {
 }
 
 func (f *heicFile) metaBox(offset uint64) ([]byte, error) {
+	// ipma names a property by seven bits, so a file wanting more of them than
+	// that is refused rather than written with the indices wrapped.
+	if f.nProps > 0x7f {
+		return nil, ErrUnsupported
+	}
+
 	hdlr := fullBox("hdlr", 0, 0, append([]byte("\x00\x00\x00\x00pict"), make([]byte, 13)...))
 	pitm := fullBox("pitm", 0, 0, u16(1))
 
@@ -375,8 +432,13 @@ func (f *heicFile) metaBox(offset uint64) ([]byte, error) {
 		offset += uint64(len(it.data))
 
 		if it.ref != "" {
-			irefs = append(irefs, box(it.ref,
-				append(append(u16(it.id), u16(1)...), u16(it.to)...))...)
+			body := append(u16(it.id), u16(uint16(len(it.to)))...)
+
+			for _, to := range it.to {
+				body = append(body, u16(to)...)
+			}
+
+			irefs = append(irefs, box(it.ref, body)...)
 		}
 
 		if len(it.assoc) == 0 {

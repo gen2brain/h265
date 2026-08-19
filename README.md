@@ -58,7 +58,8 @@ RDPCM and CABAC bypass alignment, which are refused rather than decoded wrongly.
 alpha, `grid`, `clap`/`irot`/`imir`, `colr`, image sequences, Exif and XMP.
 
 Encoding: 8-12 bit, 4:2:0/4:2:2/4:4:4/monochrome, intra only, deblocking, sample adaptive
-offset, wavefronts, PCM lossless, and alpha, `colr`, Exif and XMP in the container.
+offset, wavefronts, PCM lossless, and alpha, `grid`, `colr`, Exif and XMP in the container. A picture too large for
+any HEVC level is written as a grid of tiles.
 
 Decoding is threaded over grid tiles and wavefront rows; `heic.Options.Threads` and
 `hevc.Decoder.Threads` bound it.

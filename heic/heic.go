@@ -43,6 +43,12 @@ Chroma that cannot resolve a dimension leaves a picture with one stored with
 its edge repeated, carrying a clean aperture that takes the repetition back
 off. 4:4:4 and monochrome resolve any size and never need it.
 
+# Grids
+
+A picture larger than [hevc.MaxLumaSamples] has no level to be coded at, so it
+is written as a grid of items instead and reassembled on the way out.
+[EncodeOptions.Tile] asks for one at any size.
+
 # Metadata
 
 [DecodeExif] reads the Exif item a file describes its image with, and

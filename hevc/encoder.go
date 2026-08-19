@@ -9,6 +9,11 @@ import (
 // something this encoder can code.
 var ErrInvalidEncodeInput = errors.New("hevc: invalid encode input")
 
+// MaxLumaSamples is MaxLumaPs of Table A.8, which every level from 6.0 up
+// shares. A picture larger than this has no level to be coded at, so a caller
+// with one splits it over a grid of items instead.
+const MaxLumaSamples = 35651584
+
 // Frame is one picture in the [EncoderOptions.Chroma] sampling. StrideY and
 // StrideC are in samples and may exceed the width, so a frame can be a window
 // on a larger buffer. A monochrome frame leaves the chroma planes nil. Above
@@ -55,9 +60,9 @@ func (c ChromaFormat) sub() (int, int) {
 	}
 }
 
-// EncoderOptions configures an [Encoder]. Width and Height must be non-zero and
-// a multiple of what Chroma resolves, which is two either way in 4:2:0 and one
-// in 4:4:4; anything the coding tree cannot fill is padded away behind a
+// EncoderOptions configures an [Encoder]. Width and Height must be non-zero, a
+// multiple of what Chroma resolves, and no more than [MaxLumaSamples] between
+// them; anything the coding tree cannot fill is padded away behind a
 // conformance window. QP runs from 1 through 51 and selects 26 when left at
 // zero; Lossless codes the samples as PCM instead and ignores QP.
 type EncoderOptions struct {
@@ -112,6 +117,10 @@ func NewEncoder(opts EncoderOptions) (*Encoder, error) {
 
 	if opts.Width <= 0 || opts.Height <= 0 || opts.Width%sw != 0 || opts.Height%sh != 0 ||
 		opts.QP < 0 || opts.QP > 51 {
+		return nil, ErrInvalidEncodeInput
+	}
+
+	if codedSize(opts.Width)*codedSize(opts.Height) > MaxLumaSamples {
 		return nil, ErrInvalidEncodeInput
 	}
 
