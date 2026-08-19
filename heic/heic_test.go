@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"io"
 	"os"
 	"os/exec"
@@ -192,7 +195,7 @@ func TestEncodeConverts(t *testing.T) {
 
 				// Lossless coding of the converted planes has to give them
 				// back, whatever the padding did around them.
-				want := toYCbCr420(src)
+				want := toYCbCr420(src, false)
 				for y := range h {
 					for x := range w {
 						if got.Y[y*got.YStride+x] != want.Y[y*want.YStride+x] {
@@ -237,6 +240,518 @@ func encodeToBytes(img image.Image, opts ...EncodeOptions) ([]byte, error) {
 	err := Encode(&b, img, opts...)
 
 	return b.Bytes(), err
+}
+
+// TestEncodeBitDepth writes above eight bits, where the samples leave
+// image.YCbCr behind and the decoder configuration record has to say so, and
+// keeps the alpha through it.
+func TestEncodeBitDepth(t *testing.T) {
+	const w, h = 64, 48
+
+	src := image.NewNRGBA64(image.Rect(0, 0, w, h))
+
+	for y := range h {
+		for x := range w {
+			src.SetNRGBA64(x, y, color.NRGBA64{
+				R: uint16(x * 1000), G: uint16(y * 1300), B: 40000,
+				A: uint16(min((x+y)*900, 65535)),
+			})
+		}
+	}
+
+	for _, depth := range []int{8, 10, 12} {
+		for name, chroma := range map[string]ChromaFormat{
+			"420": Chroma420, "444": Chroma444, "gray": ChromaGray,
+		} {
+			t.Run(fmt.Sprintf("d%d/%s", depth, name), func(t *testing.T) {
+				data, err := encodeToBytes(src, EncodeOptions{BitDepth: depth,
+					Chroma: chroma, Quality: 95})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				img, err := Decode(bytes.NewReader(data))
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if got := img.Bounds(); got != src.Rect {
+					t.Fatalf("bounds = %v", got)
+				}
+
+				for y := range h {
+					for x := range w {
+						_, _, _, got := img.At(x, y).RGBA()
+						_, _, _, want := src.At(x, y).RGBA()
+
+						if d := int(got>>8) - int(want>>8); d > 3 || d < -3 {
+							t.Fatalf("alpha at %d,%d = %d, want %d", x, y, got>>8, want>>8)
+						}
+					}
+				}
+
+				if _, err := exec.LookPath("heif-info"); err != nil {
+					return
+				}
+
+				in := filepath.Join(t.TempDir(), "d.heic")
+				if err := os.WriteFile(in, data, 0o644); err != nil {
+					t.Fatal(err)
+				}
+
+				b, err := exec.Command("heif-info", in).CombinedOutput()
+				if err != nil {
+					t.Fatalf("heif-info: %v: %s", err, b)
+				}
+
+				for _, want := range []string{
+					fmt.Sprintf("bit depth: %d", depth), "alpha channel: yes",
+				} {
+					if !strings.Contains(string(b), want) {
+						t.Fatalf("heif-info has no %q:\n%s", want, b)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestEncodeChroma writes each chroma sampling and reads the planes back. The
+// coding is lossless, so a converted picture has to come back exactly.
+func TestEncodeChroma(t *testing.T) {
+	for name, chroma := range map[string]ChromaFormat{
+		"420": Chroma420, "422": Chroma422, "444": Chroma444, "gray": ChromaGray,
+	} {
+		for _, size := range [][2]int{{64, 48}, {51, 35}, {32, 32}} {
+			w, h := size[0], size[1]
+
+			t.Run(fmt.Sprintf("%s/%dx%d", name, w, h), func(t *testing.T) {
+				src := image.NewRGBA(image.Rect(0, 0, w, h))
+
+				for y := range h {
+					for x := range w {
+						o := src.PixOffset(x, y)
+						src.Pix[o] = byte(x * 5)
+						src.Pix[o+1] = byte(y * 7)
+						src.Pix[o+2] = byte(x + y)
+						src.Pix[o+3] = 255
+					}
+				}
+
+				data, err := encodeToBytes(src, EncodeOptions{Chroma: chroma, Lossless: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				img, err := Decode(bytes.NewReader(data), Options{ToYCbCr: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if got := img.Bounds(); got != image.Rect(0, 0, w, h) {
+					t.Fatalf("bounds = %v", got)
+				}
+
+				if chroma == ChromaGray {
+					got, ok := img.(*image.Gray)
+					if !ok {
+						t.Fatalf("image = %T, want *image.Gray", img)
+					}
+
+					want := toGray(src, false)
+					for y := range h {
+						for x := range w {
+							if got.Pix[got.PixOffset(x, y)] != want[y*w+x] {
+								t.Fatalf("luma at %d,%d = %d, want %d", x, y,
+									got.Pix[got.PixOffset(x, y)], want[y*w+x])
+							}
+						}
+					}
+
+					return
+				}
+
+				got, ok := img.(*image.YCbCr)
+				if !ok {
+					t.Fatalf("image = %T, want *image.YCbCr", img)
+				}
+
+				if got.SubsampleRatio != ratioOf(chroma) {
+					t.Fatalf("ratio = %v, want %v", got.SubsampleRatio, ratioOf(chroma))
+				}
+
+				sw, sh := ratioSub(ratioOf(chroma))
+				want := toYCbCr(src, ratioOf(chroma), false)
+
+				for y := range h {
+					for x := range w {
+						if got.Y[got.YOffset(x, y)] != want.Y[want.YOffset(x, y)] {
+							t.Fatalf("luma at %d,%d = %d, want %d", x, y,
+								got.Y[got.YOffset(x, y)], want.Y[want.YOffset(x, y)])
+						}
+					}
+				}
+
+				for y := range h / sh {
+					for x := range w / sw {
+						g, o := got.COffset(x*sw, y*sh), want.COffset(x*sw, y*sh)
+						if got.Cb[g] != want.Cb[o] || got.Cr[g] != want.Cr[o] {
+							t.Fatalf("chroma at %d,%d = %d,%d, want %d,%d", x, y,
+								got.Cb[g], got.Cr[g], want.Cb[o], want.Cr[o])
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestEncodeExternalChroma holds the decoder configuration record to libheif,
+// which reads the sampling out of it rather than out of the bitstream and gets
+// a picture of the wrong shape when it does not say.
+func TestEncodeExternalChroma(t *testing.T) {
+	if _, err := exec.LookPath("heif-info"); err != nil {
+		t.Skip("heif-info not installed")
+	}
+
+	src := image.NewRGBA(image.Rect(0, 0, 64, 48))
+	for i := range src.Pix {
+		src.Pix[i] = byte(i * 11)
+	}
+
+	for i := 3; i < len(src.Pix); i += 4 {
+		src.Pix[i] = 255
+	}
+
+	for _, c := range []struct {
+		chroma ChromaFormat
+		want   string
+	}{
+		{Chroma420, "colorspace: YCbCr, 4:2:0"},
+		{Chroma422, "colorspace: YCbCr, 4:2:2"},
+		{Chroma444, "colorspace: YCbCr, 4:4:4"},
+		{ChromaGray, "colorspace: monochrome"},
+	} {
+		t.Run(c.want, func(t *testing.T) {
+			data, err := encodeToBytes(src, EncodeOptions{Chroma: c.chroma})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			in := filepath.Join(t.TempDir(), "c.heic")
+			if err := os.WriteFile(in, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			b, err := exec.Command("heif-info", in).CombinedOutput()
+			if err != nil {
+				t.Fatalf("heif-info: %v: %s", err, b)
+			}
+
+			if !strings.Contains(string(b), c.want) {
+				t.Fatalf("heif-info has no %q:\n%s", c.want, b)
+			}
+
+			if !strings.Contains(string(b), "bit depth: 8") {
+				t.Fatalf("heif-info has no bit depth:\n%s", b)
+			}
+		})
+	}
+}
+
+// alphaSource is a picture whose alpha runs the whole way from clear to opaque
+// and whose colour does not follow it, so compositing shows up.
+func alphaSource(w, h int) *image.NRGBA {
+	src := image.NewNRGBA(image.Rect(0, 0, w, h))
+
+	for y := range h {
+		for x := range w {
+			o := src.PixOffset(x, y)
+			src.Pix[o] = byte(x * 4)
+			src.Pix[o+1] = byte(y * 5)
+			src.Pix[o+2] = 200
+			src.Pix[o+3] = byte(min((x+y)*255/(w+h-2), 255))
+		}
+	}
+
+	return src
+}
+
+// TestEncodeAlpha writes the alpha of a picture as the auxiliary item of
+// 23008-12 Annex F and reads it back, over the image types that carry one.
+func TestEncodeAlpha(t *testing.T) {
+	const w, h = 64, 48
+
+	nrgba := alphaSource(w, h)
+
+	// The same picture premultiplied, which has to come back un-premultiplied.
+	rgba := image.NewRGBA(nrgba.Rect)
+	draw.Draw(rgba, rgba.Rect, nrgba, image.Point{}, draw.Src)
+
+	nycc := image.NewNYCbCrA(nrgba.Rect, image.YCbCrSubsampleRatio420)
+	for y := range h {
+		for x := range w {
+			o := nrgba.PixOffset(x, y)
+			yy, cb, cr := rgbToYCbCr(nrgba.Pix[o], nrgba.Pix[o+1], nrgba.Pix[o+2])
+			nycc.Y[nycc.YOffset(x, y)] = yy
+			nycc.Cb[nycc.COffset(x, y)] = cb
+			nycc.Cr[nycc.COffset(x, y)] = cr
+			nycc.A[nycc.AOffset(x, y)] = nrgba.Pix[o+3]
+		}
+	}
+
+	for name, src := range map[string]image.Image{
+		"nrgba": nrgba, "rgba": rgba, "nycbcra": nycc,
+	} {
+		t.Run(name, func(t *testing.T) {
+			data, err := encodeToBytes(src, EncodeOptions{Lossless: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			img, err := Decode(bytes.NewReader(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got, ok := img.(*image.NRGBA)
+			if !ok {
+				t.Fatalf("image = %T", img)
+			}
+
+			for y := range h {
+				for x := range w {
+					wa := nrgba.Pix[nrgba.PixOffset(x, y)+3]
+					if ga := got.Pix[got.PixOffset(x, y)+3]; ga != wa {
+						t.Fatalf("alpha at %d,%d = %d, want %d", x, y, ga, wa)
+					}
+				}
+			}
+
+			// The colour has to survive where the alpha did not hide it, which
+			// compositing over black would have taken away.
+			o, go_ := nrgba.PixOffset(w-1, h-1), got.PixOffset(w-1, h-1)
+			for c := range 3 {
+				if d := int(got.Pix[go_+c]) - int(nrgba.Pix[o+c]); d > 3 || d < -3 {
+					t.Fatalf("colour at the opaque corner = %v, want %v",
+						got.Pix[go_:go_+3], nrgba.Pix[o:o+3])
+				}
+			}
+
+			// ToYCbCr hands the alpha back as its own plane.
+			img, err = Decode(bytes.NewReader(data), Options{ToYCbCr: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, ok := img.(*image.NYCbCrA); !ok {
+				t.Fatalf("ToYCbCr image = %T", img)
+			}
+		})
+	}
+}
+
+// TestEncodeOpaqueNoAlpha keeps an opaque picture down to one item, whatever
+// image type it arrives as.
+func TestEncodeOpaqueNoAlpha(t *testing.T) {
+	const w, h = 32, 32
+
+	opaque := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for i := range opaque.Pix {
+		opaque.Pix[i] = byte(i)
+	}
+
+	for i := 3; i < len(opaque.Pix); i += 4 {
+		opaque.Pix[i] = 255
+	}
+
+	gray := image.NewGray(opaque.Rect)
+	for i := range gray.Pix {
+		gray.Pix[i] = byte(i * 7)
+	}
+
+	for name, src := range map[string]image.Image{"nrgba": opaque, "gray": gray} {
+		t.Run(name, func(t *testing.T) {
+			data, err := encodeToBytes(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			f, err := parse(memSource(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if n := len(f.meta.items); n != 1 {
+				t.Fatalf("items = %d, want 1", n)
+			}
+
+			img, err := Decode(bytes.NewReader(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, ok := img.(*image.NRGBA); !ok {
+				t.Fatalf("image = %T", img)
+			}
+		})
+	}
+}
+
+// TestEncodeMetadata writes Exif and XMP as items describing the picture, which
+// is where DecodeExif and RawXMP look for them.
+func TestEncodeMetadata(t *testing.T) {
+	exif := []byte{
+		'I', 'I', 42, 0, 8, 0, 0, 0,
+		1, 0,
+		0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0,
+		0, 0, 0, 0,
+	}
+	xmp := []byte(`<?xpacket begin=""?><x:xmpmeta xmlns:x="adobe:ns:meta/"/><?xpacket end="w"?>`)
+
+	src := image.NewGray(image.Rect(0, 0, 32, 32))
+	for i := range src.Pix {
+		src.Pix[i] = byte(i * 3)
+	}
+
+	data, err := encodeToBytes(src, EncodeOptions{Exif: exif, XMP: xmp})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := RawExif(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("RawExif: %v", err)
+	}
+
+	if !bytes.Equal(got, exif) {
+		t.Fatalf("exif = %x, want %x", got, exif)
+	}
+
+	// The payload has to be a readable Exif item, not only the same bytes back.
+	ex, err := DecodeExif(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("DecodeExif: %v", err)
+	}
+
+	if ex.Orientation != 6 {
+		t.Fatalf("orientation = %d, want 6", ex.Orientation)
+	}
+
+	if got, err := RawXMP(bytes.NewReader(data)); err != nil || !bytes.Equal(got, xmp) {
+		t.Fatalf("RawXMP = %q, %v", got, err)
+	}
+
+	if _, err := Decode(bytes.NewReader(data)); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+}
+
+// TestEncodeExternalAlpha holds the auxiliary item to libheif, which is the
+// reader that decides whether an alpha channel was written the way the format
+// asks rather than the way our own reader happens to accept.
+func TestEncodeExternalAlpha(t *testing.T) {
+	if _, err := exec.LookPath("heif-dec"); err != nil {
+		t.Skip("heif-dec not installed")
+	}
+
+	const w, h = 64, 48
+
+	src := alphaSource(w, h)
+
+	data, err := encodeToBytes(src, EncodeOptions{Lossless: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+
+	in := filepath.Join(dir, "alpha.heic")
+	if err := os.WriteFile(in, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := exec.LookPath("heif-info"); err == nil {
+		b, err := exec.Command("heif-info", in).CombinedOutput()
+		if err != nil {
+			t.Fatalf("heif-info: %v: %s", err, b)
+		}
+
+		if !strings.Contains(string(b), "alpha channel: yes") {
+			t.Fatalf("heif-info found no alpha:\n%s", b)
+		}
+	}
+
+	out := filepath.Join(dir, "alpha.png")
+	if b, err := exec.Command("heif-dec", in, out).CombinedOutput(); err != nil {
+		t.Fatalf("heif-dec: %v: %s", err, b)
+	}
+
+	f, err := os.Open(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer f.Close()
+
+	img, err := png.Decode(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := img.Bounds(); got != src.Rect {
+		t.Fatalf("bounds = %v, want %v", got, src.Rect)
+	}
+
+	for y := range h {
+		for x := range w {
+			_, _, _, a := img.At(x, y).RGBA()
+			if got, want := uint8(a>>8), src.Pix[src.PixOffset(x, y)+3]; got != want {
+				t.Fatalf("libheif alpha at %d,%d = %d, want %d", x, y, got, want)
+			}
+		}
+	}
+}
+
+// TestEncodeExternalMetadata holds the Exif and XMP items to libheif, which
+// finds them by the item reference back to the picture.
+func TestEncodeExternalMetadata(t *testing.T) {
+	if _, err := exec.LookPath("heif-info"); err != nil {
+		t.Skip("heif-info not installed")
+	}
+
+	exif := append([]byte{'I', 'I', 42, 0, 8, 0, 0, 0, 0, 0}, make([]byte, 6)...)
+	xmp := []byte("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>")
+
+	src := image.NewGray(image.Rect(0, 0, 32, 32))
+	for i := range src.Pix {
+		src.Pix[i] = byte(i * 5)
+	}
+
+	data, err := encodeToBytes(src, EncodeOptions{Exif: exif, XMP: xmp})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	in := filepath.Join(t.TempDir(), "meta.heic")
+	if err := os.WriteFile(in, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := exec.Command("heif-info", in).CombinedOutput()
+	if err != nil {
+		t.Fatalf("heif-info: %v: %s", err, b)
+	}
+
+	for _, want := range []string{
+		fmt.Sprintf("Exif: %d bytes", len(exif)+4),
+		fmt.Sprintf("XMP: %d bytes", len(xmp)),
+		"application/rdf+xml",
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("heif-info has no %q:\n%s", want, b)
+		}
+	}
 }
 
 // TestEncodeExternal holds the written container to libheif rather than to our
@@ -298,7 +813,7 @@ func TestEncodeExternal(t *testing.T) {
 
 		// libheif hands back the picture the clean aperture leaves, which is
 		// the one that went in.
-		ycc := toYCbCr420(src)
+		ycc := toYCbCr420(src, false)
 		cw, ch := (width+1)/2, (height+1)/2
 
 		var want []byte

@@ -532,7 +532,7 @@ func TestRDOQLevels(t *testing.T) {
 				}
 			}
 
-			var e intraEncoder
+			var e intraEncoder[uint8]
 
 			e.reset(make([]uint8, 64*64), make([]uint8, 32*32), make([]uint8, 32*32), 64, 64, qp)
 
@@ -601,7 +601,7 @@ func TestRDOQTruncates(t *testing.T) {
 			raw[0] = int32(int64(12) << qbits / 10 / scale)
 			raw[n*n-1] = int32(c.tail << qbits / 10 / scale)
 
-			var e intraEncoder
+			var e intraEncoder[uint8]
 
 			e.reset(make([]uint8, 64*64), make([]uint8, 32*32), make([]uint8, 32*32), 64, 64, qp)
 
@@ -649,7 +649,7 @@ func TestRDOQTruncatesRun(t *testing.T) {
 				}
 			}
 
-			var e intraEncoder
+			var e intraEncoder[uint8]
 
 			e.reset(make([]uint8, 64*64), make([]uint8, 32*32), make([]uint8, 32*32), 64, 64, qp)
 
@@ -702,7 +702,7 @@ func TestHadamard8(t *testing.T) {
 func TestSATD(t *testing.T) {
 	const n = 16
 
-	var e intraEncoder
+	var e intraEncoder[uint8]
 
 	e.reset(make([]uint8, n*n), make([]uint8, n*n/4), make([]uint8, n*n/4), n, n, 26)
 

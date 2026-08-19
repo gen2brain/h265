@@ -24,14 +24,21 @@ stays in the file's own color space.
 # Encoding
 
 [Encode] writes any image as a HEIC still. One that is not already an 8-bit
-4:2:0 *[image.YCbCr] is converted, dropping alpha, and the file carries an nclx
-description of what [image.YCbCr] holds: full-range BT.601 carrying sRGB
+*[image.YCbCr] at [EncodeOptions.Chroma] is converted, and the file carries an
+nclx description of what [image.YCbCr] holds: full-range BT.601 carrying sRGB
 primaries and transfer. [EncodeOptions.Quality] selects the quantiser and
-[EncodeOptions.Lossless] codes the samples as PCM instead.
+[EncodeOptions.Lossless] codes the samples as PCM instead. [Chroma420],
+[Chroma422], [Chroma444] and [ChromaGray] are the samplings it writes.
 
-4:2:0 chroma cannot resolve an odd dimension, so a picture with one is stored
-with its edge repeated and carries a clean aperture that takes the repetition
-back off.
+An image that carries alpha keeps it. The channel becomes a monochrome
+auxiliary item coded at the same quality, and the colour is written
+un-composited so that a reader gets both back. An opaque image writes no such
+item. [EncodeOptions.Exif] and [EncodeOptions.XMP] add metadata items
+describing the picture.
+
+Chroma that cannot resolve a dimension leaves a picture with one stored with
+its edge repeated, carrying a clean aperture that takes the repetition back
+off. 4:4:4 and monochrome resolve any size and never need it.
 
 # Metadata
 

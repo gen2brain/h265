@@ -6,7 +6,7 @@ import "sync"
 // runs on its own copy of the encoder: the planes and the per block tables are
 // slices and stay shared, the scratch and the writers are values and come out
 // per row.
-func (e *intraEncoder) encodeWavefront(rows, cols, workers int) ([][]byte, error) {
+func (e *intraEncoder[P]) encodeWavefront(rows, cols, workers int) ([][]byte, error) {
 	v := newWave(rows, 0)
 	subs := make([][]byte, rows)
 
@@ -49,7 +49,7 @@ func (e *intraEncoder) encodeWavefront(rows, cols, workers int) ([][]byte, error
 
 // waveRow codes one row at a two block lag behind the row above, which carries
 // 9.3.1's contexts and leaves the samples 8.4.4.2.2 reads reconstructed.
-func (e *intraEncoder) waveRow(v *wave, k, rows, cols int) ([]byte, error) {
+func (e *intraEncoder[P]) waveRow(v *wave, k, rows, cols int) ([]byte, error) {
 	e.bits = putBits{}
 	e.cabac.init(&e.bits, int32(e.qp), sliceI, false)
 

@@ -46,7 +46,7 @@ type rdoqState struct {
 
 // binBits is what one context coded bin costs against the contexts as they
 // stand, which is the estimate 9.3.4.3 would give it.
-func (e *intraEncoder) binBits(ctx int, bin uint32) int64 {
+func (e *intraEncoder[P]) binBits(ctx int, bin uint32) int64 {
 	return int64(entropyBits[e.cabac.state[ctx]^uint8(bin&1)])
 }
 
@@ -66,7 +66,7 @@ func remainingBits(v int32, rice int) int64 {
 
 // levelBits is what coding one significant coefficient of the given magnitude
 // costs, sign included, and how the passes move on.
-func (e *intraEncoder) levelBits(st *rdoqState, level int32, cIdx int) int64 {
+func (e *intraEncoder[P]) levelBits(st *rdoqState, level int32, cIdx int) int64 {
 	bits := int64(1) << rateShift
 
 	base := int32(1)
@@ -130,13 +130,16 @@ func (st *rdoqState) advance(level int32) {
 
 // rdoq quantises raw into coef, choosing each level for what it costs rather
 // than for how near it is.
-func (e *intraEncoder) rdoq(coef, raw []int32, n, qp, cIdx, mode int) {
-	scale, qbits := quantScale(n, qp, 8)
-	dist := levelDist(qp)
-	shift := qbits - 15
-	lambda := e.lambda << 19
+func (e *intraEncoder[P]) rdoq(coef, raw []int32, n, qp, cIdx, mode int) {
+	scale, qbits := quantScale(n, qp, e.bitDepth)
 
-	scanIdx := scanIndex(log2(n), cIdx, mode, true, 1)
+	// Only the ratio of error to bits is weighed here, so both halves run at
+	// the eight bit scale, which is the one the squares fit inside.
+	dist := levelDist(qp - 6*(e.bitDepth-8))
+	shift := qbits - 15
+	lambda := e.lambdaBase << 19
+
+	scanIdx := scanIndex(log2(n), cIdx, mode, true, e.s.chromaArrayType())
 	sbScan := scanOrder[log2(n)-2][scanIdx]
 	coeffScan := scanOrder[2][scanIdx]
 	sbWidth := n >> 2
@@ -304,7 +307,7 @@ func (e *intraEncoder) rdoq(coef, raw []int32, n, qp, cIdx, mode int) {
 // truncate reconsiders where the block ends. Coding a nearer coefficient as the
 // last one drops everything past it, which pays for itself when what is dropped
 // costs more in bits than it is worth in error.
-func (e *intraEncoder) truncate(coef []int32, cost, costZero, costSig []int64,
+func (e *intraEncoder[P]) truncate(coef []int32, cost, costZero, costSig []int64,
 	sbScan, coeffScan []scanPos, last, n, cIdx, scanIdx int, lambda int64,
 ) {
 	at := func(scan int) int {
@@ -349,7 +352,7 @@ func (e *intraEncoder) truncate(coef []int32, cost, costZero, costSig []int64,
 
 // lastBits is what last_sig_coeff_x and last_sig_coeff_y cost for a position,
 // prefix contexts and bypass suffix together.
-func (e *intraEncoder) lastBits(idx, n, cIdx, scanIdx int) int64 {
+func (e *intraEncoder[P]) lastBits(idx, n, cIdx, scanIdx int) int64 {
 	x, y := idx%n, idx/n
 	if scanIdx == scanVer {
 		x, y = y, x
@@ -359,7 +362,7 @@ func (e *intraEncoder) lastBits(idx, n, cIdx, scanIdx int) int64 {
 		e.lastCoordBits(ctxLastSignificantCoeffYPrefix, y, log2(n), cIdx)
 }
 
-func (e *intraEncoder) lastCoordBits(base, v, log2Size, cIdx int) int64 {
+func (e *intraEncoder[P]) lastCoordBits(base, v, log2Size, cIdx int) int64 {
 	prefix := lastSigCoeffPrefix(v)
 	cMax := log2Size<<1 - 1
 

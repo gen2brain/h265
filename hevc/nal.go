@@ -316,3 +316,16 @@ func ProfileTierLevel(sps []byte) ([]byte, bool) {
 
 	return sps[1:13], true
 }
+
+// SPSFormat is the chroma_format_idc and the two sample sizes a sequence
+// parameter set declares. A container's decoder configuration record repeats
+// them, and a reader that trusts it over the bitstream has to be told the
+// truth.
+func SPSFormat(sps []byte) (chromaFormat, bitDepthLuma, bitDepthChroma int, ok bool) {
+	s, err := parseSPS(sps)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+
+	return int(s.chromaFormatIDC), int(s.bitDepthLuma), int(s.bitDepthChroma), true
+}

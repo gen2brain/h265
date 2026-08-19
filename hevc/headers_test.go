@@ -419,7 +419,8 @@ func b2u(v bool) uint32 {
 }
 
 func TestWriteParameterSets(t *testing.T) {
-	h := encoderHeaders{width: 320, height: 240, levelIDC: 60, pcm: true, signDataHidingEnabled: true}
+	h := encoderHeaders{width: 320, height: 240, levelIDC: 60, pcm: true, signDataHidingEnabled: true,
+		chromaFormat: 1, subWidthC: 2, subHeightC: 2}
 
 	v, err := parseVPS(h.vps())
 	if err != nil {
@@ -479,7 +480,23 @@ func TestWriteParameterSets(t *testing.T) {
 	}
 
 	if !p.entropyCodingSync || p.tilesEnabled || !p.loopFilterAcrossSlices ||
-		!p.deblockingControlPresen || p.deblockingDisabled || !p.signDataHidingEnabled {
+		!p.deblockingControlPresen || p.deblockingDisabled || !p.signDataHidingEnabled ||
+		p.betaOffsetDiv2 != 0 || p.tcOffsetDiv2 != 0 {
 		t.Fatalf("wavefront PPS = %+v", p)
+	}
+
+	// pps_deblocking_filter_disabled_flag governs whether the two offsets
+	// behind it are there at all, so the flags after them move with it.
+	h.deblockingDisabled = true
+
+	p, err = parsePPS(h.pps())
+	if err != nil {
+		t.Fatalf("no deblocking PPS: %v", err)
+	}
+
+	if !p.deblockingDisabled || !p.entropyCodingSync || !p.loopFilterAcrossSlices ||
+		!p.deblockingControlPresen || !p.signDataHidingEnabled ||
+		p.scalingListPresent || p.listsModificationPresent {
+		t.Fatalf("no deblocking PPS = %+v", p)
 	}
 }

@@ -12,9 +12,10 @@ func encodePCM(y, cb, cr []uint8, width, height int) ([]NALUnit, error) {
 
 	h := encoderHeaders{
 		width: cw, height: ch, cropRight: cw - width, cropBottom: ch - height,
+		chromaFormat: 1, subWidthC: 2, subHeightC: 2, bitDepth: 8,
 		levelIDC: pcmLevelIDC(cw * ch), pcm: true,
 	}
-	rbsp := pcmSlice(py, pcb, pcr, cw, ch)
+	rbsp := pcmSlice(py, pcb, pcr, cw, ch, 2, 2, 8)
 
 	return append(h.parameterSets(), NALUnit{Type: NALIdrNLP, RBSP: rbsp}), nil
 }
@@ -41,7 +42,7 @@ func pcmLevelIDC(samples int) uint8 {
 	return 186
 }
 
-func pcmSlice(y, cb, cr []uint8, width, height int) []byte {
+func pcmSlice[P pixel](y, cb, cr []P, width, height, subW, subH, bitDepth int) []byte {
 	var bits putBits
 	bits.bit(1)
 	bits.bit(0)
@@ -60,9 +61,12 @@ func pcmSlice(y, cb, cr []uint8, width, height int) []byte {
 			cabac.encodeTerminate(1)
 			cabac.bytes()
 
-			writePCMPlane(&bits, y, width, x0, y0, 16)
-			writePCMPlane(&bits, cb, width/2, x0/2, y0/2, 8)
-			writePCMPlane(&bits, cr, width/2, x0/2, y0/2, 8)
+			writePCMPlane(&bits, y, width, x0, y0, 16, 16, bitDepth)
+
+			if cb != nil {
+				writePCMPlane(&bits, cb, width/subW, x0/subW, y0/subH, 16/subW, 16/subH, bitDepth)
+				writePCMPlane(&bits, cr, width/subW, x0/subW, y0/subH, 16/subW, 16/subH, bitDepth)
+			}
 			cabac.reinit()
 			cabac.encodeTerminate(boolToBit(x0 == width-16 && y0 == height-16))
 		}
@@ -71,10 +75,10 @@ func pcmSlice(y, cb, cr []uint8, width, height int) []byte {
 	return cabac.bytes()
 }
 
-func writePCMPlane(bits *putBits, plane []uint8, stride, x, y, size int) {
-	for j := range size {
-		for i := range size {
-			bits.bits(uint64(plane[(y+j)*stride+x+i]), 8)
+func writePCMPlane[P pixel](bits *putBits, plane []P, stride, x, y, w, h, bitDepth int) {
+	for j := range h {
+		for i := range w {
+			bits.bits(uint64(plane[(y+j)*stride+x+i]), bitDepth)
 		}
 	}
 }
