@@ -110,6 +110,40 @@ func benchFrame(b *testing.B, name string) (Frame, int, int) {
 
 // BenchmarkEncodeReal encodes real pictures, which BenchmarkEncodeLossy's
 // synthetic ones stand in for badly. See SPEED.md.
+// BenchmarkDecodeStill decodes one intra picture, which is what a HEIC holds
+// and what none of the stream benchmarks measure: they all carry inter frames.
+func BenchmarkDecodeStill(b *testing.B) {
+	frame, w, h := benchFrame(b, "realworld_720p.h265")
+
+	enc, err := NewEncoder(EncoderOptions{Width: w, Height: h, QP: 26})
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	nals, err := enc.Encode(frame)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.SetBytes(int64(w * h))
+	b.ReportMetric(float64(w*h), "pixel/op")
+	b.ResetTimer()
+
+	for b.Loop() {
+		var d Decoder
+
+		for _, nal := range nals {
+			if _, err := d.DecodeNAL(nal); err != nil {
+				b.Fatal(err)
+			}
+		}
+
+		for _, p := range d.Flush() {
+			p.Release()
+		}
+	}
+}
+
 func BenchmarkEncodeReal(b *testing.B) {
 	for _, name := range []string{"realworld_320x240.h265", "realworld_720p.h265"} {
 		frame, width, height := benchFrame(b, name)
