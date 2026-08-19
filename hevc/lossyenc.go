@@ -1138,7 +1138,14 @@ func (e *intraEncoder[P]) lumaMode(x, y int, cand [3]int) int {
 		b.pred = e.scratch.modePred[slot[i]][:]
 		coef, trial, cbf := e.blockData(b, false)
 
-		cost := e.rdCost(e.distortion(0, x, y, 16, trial, 16), e.modeRate(cand, mode, coef, cbf))
+		// The rate only adds, so a mode whose distortion alone has lost is not
+		// coded to find out what it costs.
+		dist := e.distortion(0, x, y, 16, trial, 16)
+		if bestCost >= 0 && e.rdCost(dist, 0) >= bestCost {
+			continue
+		}
+
+		cost := e.rdCost(dist, e.modeRate(cand, mode, coef, cbf))
 		if bestCost < 0 || cost < bestCost {
 			bestMode, bestCost = mode, cost
 		}
