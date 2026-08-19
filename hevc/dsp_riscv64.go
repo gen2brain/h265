@@ -45,6 +45,18 @@ func quantize8RVV(dst, src *int32, count int, scale, offset int32, qbits int)
 func satd16x8RVV(src *uint8, srcStride int, pred *uint8, predStride int) int64
 
 //go:noescape
+func deblockStrong8RVV(p *uint8, pitch int, tc0, tc1, flags int32)
+
+//go:noescape
+func deblockNormal8RVV(p *uint8, pitch int, tc0, tc1, nd, flags int32)
+
+//go:noescape
+func turnIn8RVV(dst *uint8, src *uint8, stride int)
+
+//go:noescape
+func turnOut8RVV(dst *uint8, stride int, src *uint8)
+
+//go:noescape
 func transposeRVV(dst, src *int32, n int)
 
 //go:noescape
@@ -85,6 +97,22 @@ func dspInit(d *dspContext) {
 
 	transposeAsm = func(dst, src []int32, n int) {
 		transposeRVV(&dst[0], &src[0], n)
+	}
+
+	deblockStrongAsm = func(p []uint8, pitch int, tc0, tc1, flags int32) {
+		deblockStrong8RVV(&p[0], pitch, tc0, tc1, flags)
+	}
+
+	deblockNormalAsm = func(p []uint8, pitch int, tc0, tc1, nd, flags int32) {
+		deblockNormal8RVV(&p[0], pitch, tc0, tc1, nd, flags)
+	}
+
+	deblockTurnIn = func(dst, src []uint8, stride int) {
+		turnIn8RVV(&dst[0], &src[0], stride)
+	}
+
+	deblockTurnOut = func(dst []uint8, stride int, src []uint8) {
+		turnOut8RVV(&dst[0], stride, &src[0])
 	}
 
 	satd16x8Asm = func(src []uint8, srcStride int, pred []uint8, predStride int) int64 {

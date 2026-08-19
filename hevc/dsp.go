@@ -19,6 +19,19 @@ var oddAsm func(out, in []int32, stride int)
 
 var forwardTransform8Asm func(dst, src []int32, n int)
 
+// The luma filters of 8.7.2.5.7 over the eight lines of one edge, nil unless an
+// implementation is compiled in. Position i of line l is at p[i*pitch+l], the
+// first four lines take tc0 and the rest tc1.
+var (
+	deblockStrongAsm func(p []uint8, pitch int, tc0, tc1, flags int32)
+	deblockNormalAsm func(p []uint8, pitch int, tc0, tc1, nd, flags int32)
+
+	// deblockTurnIn and deblockTurnOut put a vertical edge's lines into those
+	// lanes and back, since only a horizontal one already lies that way.
+	deblockTurnIn  func(dst, src []uint8, stride int)
+	deblockTurnOut func(dst []uint8, stride int, src []uint8)
+)
+
 // planarAsm is 8.4.4.2.4 for eight-bit output, nil unless an implementation is
 // compiled in. It handles n of at least eight.
 var planarAsm func(dst []uint8, stride int, r *refSamples, shift int)

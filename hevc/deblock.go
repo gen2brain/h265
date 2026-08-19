@@ -231,8 +231,24 @@ func (d *ctuDecoder) deblockEdge(x, y int, vertical bool) {
 	}
 
 	deep := d.pic.deep()
-	luma8, lumaStride8 := d.pic.plane8(0)
-	luma16, lumaStride16 := d.pic.plane16(0)
+	luma8, stride := d.pic.plane8(0)
+	luma16, stride16 := d.pic.plane16(0)
+
+	if deep {
+		stride = stride16
+	}
+
+	step, line := 1, stride
+	if !vertical {
+		step, line = stride, 1
+	}
+
+	base := y*stride + x
+
+	var (
+		plan     [2]lumaPlan
+		noP, noQ [2]bool
+	)
 
 	for k := 0; k < 8; k += 4 {
 		var px, py, qx, qy int
@@ -264,14 +280,14 @@ func (d *ctuDecoder) deblockEdge(x, y int, vertical bool) {
 
 		// 8.7.2.5.3 leaves a side untouched when its coding unit bypassed the
 		// transform, or is pulse code modulated with filtering turned off.
-		noP, noQ := d.noFilter[pt], d.noFilter[qt]
+		noP[k>>2], noQ[k>>2] = d.noFilter[pt], d.noFilter[qt]
 
-		if deep {
-			deblockLuma(luma16, lumaStride16, qx, qy, vertical, bs, qp, sl, d.pic.BitDepth,
-				noP, noQ)
-		} else {
-			deblockLuma(luma8, lumaStride8, qx, qy, vertical, bs, qp, sl, d.pic.BitDepth,
-				noP, noQ)
+		if beta, tc := betaTc(qp, bs, sl, d.pic.BitDepth); beta != 0 && tc != 0 {
+			if deep {
+				plan[k>>2] = deblockLumaPlan(luma16, base+k*line, line, step, beta, tc)
+			} else {
+				plan[k>>2] = deblockLumaPlan(luma8, base+k*line, line, step, beta, tc)
+			}
 		}
 
 		if bs != 2 || d.s.chromaArrayType() == 0 {
@@ -299,16 +315,22 @@ func (d *ctuDecoder) deblockEdge(x, y int, vertical bool) {
 
 			cqp := chromaQP(clip3(qp+off, 0, 57), d.s.chromaArrayType())
 
-			if d.pic.deep() {
-				plane, stride := d.pic.plane16(cIdx)
-				deblockChroma(plane, stride, qx/sw, qy/sh, n, vertical, cqp, sl, d.pic.BitDepthC,
-					noP, noQ)
+			if deep {
+				plane, cs := d.pic.plane16(cIdx)
+				deblockChroma(plane, cs, qx/sw, qy/sh, n, vertical, cqp, sl, d.pic.BitDepthC,
+					noP[k>>2], noQ[k>>2])
 			} else {
-				plane, stride := d.pic.plane8(cIdx)
-				deblockChroma(plane, stride, qx/sw, qy/sh, n, vertical, cqp, sl, d.pic.BitDepthC,
-					noP, noQ)
+				plane, cs := d.pic.plane8(cIdx)
+				deblockChroma(plane, cs, qx/sw, qy/sh, n, vertical, cqp, sl, d.pic.BitDepthC,
+					noP[k>>2], noQ[k>>2])
 			}
 		}
+	}
+
+	if deep {
+		deblockLumaEdge(luma16, base, line, step, plan, d.pic.BitDepth, noP, noQ)
+	} else {
+		deblockLumaEdge(luma8, base, line, step, plan, d.pic.BitDepth, noP, noQ)
 	}
 }
 
@@ -322,21 +344,63 @@ func betaTc(qp int32, bs int, sh *sliceHeader, bitDepth int) (int32, int32) {
 	return beta, tc
 }
 
-// deblockLuma is 8.7.2.5.3, filtering the four lines that share one decision.
-func deblockLuma[P pixel](plane []P, stride, x, y int, vertical bool, bs int, qp int32,
-	sh *sliceHeader, bitDepth int, noP, noQ bool,
+// lumaPlan is what 8.7.2.5.3 decides for one group of four lines.
+type lumaPlan struct {
+	tc       int32
+	mode     uint8
+	nDp, nDq uint8
+}
+
+const (
+	lumaNone = iota
+	lumaStrong
+	lumaNormal
+)
+
+// deblockLumaPlan is 8.7.2.5.3 over the outer two lines of a group.
+func deblockLumaPlan[P pixel](plane []P, base, line, step int, beta, tc int32) lumaPlan {
+	at := func(l, i int) int32 {
+		return int32(plane[base+l*line+i*step])
+	}
+
+	dp0 := absI32(at(0, -3) - 2*at(0, -2) + at(0, -1))
+	dq0 := absI32(at(0, 2) - 2*at(0, 1) + at(0, 0))
+	dp3 := absI32(at(3, -3) - 2*at(3, -2) + at(3, -1))
+	dq3 := absI32(at(3, 2) - 2*at(3, 1) + at(3, 0))
+
+	dp, dq := dp0+dp3, dq0+dq3
+	if dp+dq >= beta {
+		return lumaPlan{}
+	}
+
+	strong := func(l int, d2 int32) bool {
+		return 2*d2 < beta>>2 &&
+			absI32(at(l, -4)-at(l, -1))+absI32(at(l, 0)-at(l, 3)) < beta>>3 &&
+			absI32(at(l, -1)-at(l, 0)) < (5*tc+1)>>1
+	}
+
+	if strong(0, dp0+dq0) && strong(3, dp3+dq3) {
+		return lumaPlan{tc: tc, mode: lumaStrong}
+	}
+
+	pl := lumaPlan{tc: tc, mode: lumaNormal}
+
+	if dp < (beta+beta>>1)>>3 {
+		pl.nDp = 1
+	}
+
+	if dq < (beta+beta>>1)>>3 {
+		pl.nDq = 1
+	}
+
+	return pl
+}
+
+// deblockLumaApply is 8.7.2.5.7 over the four lines its plan was taken from.
+func deblockLumaApply[P pixel](plane []P, base, line, step int, pl lumaPlan,
+	bitDepth int, noP, noQ bool,
 ) {
-	beta, tc := betaTc(qp, bs, sh, bitDepth)
-	if beta == 0 || tc == 0 {
-		return
-	}
-
-	step, line := 1, stride
-	if !vertical {
-		step, line = stride, 1
-	}
-
-	base := y*stride + x
+	tc := pl.tc
 
 	at := func(l, i int) int32 {
 		return int32(plane[base+l*line+i*step])
@@ -350,33 +414,12 @@ func deblockLuma[P pixel](plane []P, stride, x, y int, vertical bool, bs int, qp
 		plane[base+l*line+i*step] = P(clip3(v, 0, 1<<bitDepth-1))
 	}
 
-	dpq := func(l int) (int32, int32) {
-		dp := absI32(at(l, -3) - 2*at(l, -2) + at(l, -1))
-		dq := absI32(at(l, 2) - 2*at(l, 1) + at(l, 0))
+	if pl.mode == lumaStrong {
+		c := 2 * tc
 
-		return dp, dq
-	}
-
-	dp0, dq0 := dpq(0)
-	dp3, dq3 := dpq(3)
-
-	dp, dq := dp0+dp3, dq0+dq3
-	if dp+dq >= beta {
-		return
-	}
-
-	strong := func(l int, d2 int32) bool {
-		return 2*d2 < beta>>2 &&
-			absI32(at(l, -4)-at(l, -1))+absI32(at(l, 0)-at(l, 3)) < beta>>3 &&
-			absI32(at(l, -1)-at(l, 0)) < (5*tc+1)>>1
-	}
-
-	if strong(0, dp0+dq0) && strong(3, dp3+dq3) {
 		for l := range 4 {
 			p0, p1, p2, p3 := at(l, -1), at(l, -2), at(l, -3), at(l, -4)
 			q0, q1, q2, q3 := at(l, 0), at(l, 1), at(l, 2), at(l, 3)
-
-			c := 2 * tc
 
 			set(l, -1, clip3((p2+2*p1+2*p0+2*q0+q1+4)>>3, p0-c, p0+c))
 			set(l, -2, clip3((p2+p1+p0+q0+2)>>2, p1-c, p1+c))
@@ -387,16 +430,6 @@ func deblockLuma[P pixel](plane []P, stride, x, y int, vertical bool, bs int, qp
 		}
 
 		return
-	}
-
-	nDp, nDq := 0, 0
-
-	if dp < (beta+beta>>1)>>3 {
-		nDp = 1
-	}
-
-	if dq < (beta+beta>>1)>>3 {
-		nDq = 1
 	}
 
 	for l := range 4 {
@@ -413,16 +446,107 @@ func deblockLuma[P pixel](plane []P, stride, x, y int, vertical bool, bs int, qp
 		set(l, -1, p0+delta)
 		set(l, 0, q0-delta)
 
-		if nDp != 0 {
-			v := clip3(((p2+p0+1)>>1-p1+delta)>>1, -(tc >> 1), tc>>1)
-			set(l, -2, p1+v)
+		if pl.nDp != 0 {
+			set(l, -2, p1+clip3(((p2+p0+1)>>1-p1+delta)>>1, -(tc>>1), tc>>1))
 		}
 
-		if nDq != 0 {
-			v := clip3(((q2+q0+1)>>1-q1-delta)>>1, -(tc >> 1), tc>>1)
-			set(l, 1, q1+v)
+		if pl.nDq != 0 {
+			set(l, 1, q1+clip3(((q2+q0+1)>>1-q1-delta)>>1, -(tc>>1), tc>>1))
 		}
 	}
+}
+
+// deblockLumaEdge filters the eight lines of one edge, both groups at once.
+func deblockLumaEdge[P pixel](plane []P, base, line, step int, pl [2]lumaPlan,
+	bitDepth int, noP, noQ [2]bool,
+) {
+	if pl[0].mode == lumaNone && pl[1].mode == lumaNone {
+		return
+	}
+
+	if bitDepth == 8 {
+		if p8, ok := any(plane).([]uint8); ok {
+			mode, ok := lumaBoth(&pl, &noP, &noQ)
+			if ok {
+				flags := int32(0)
+				if noP[0] {
+					flags |= 1
+				}
+
+				if noQ[0] {
+					flags |= 2
+				}
+
+				if deblockLuma8(p8, base, line, step, mode, pl, flags) {
+					return
+				}
+			}
+		}
+	}
+
+	for g := range 2 {
+		if pl[g].mode == lumaNone {
+			continue
+		}
+
+		deblockLumaApply(plane, base+g*4*line, line, step, pl[g], bitDepth, noP[g], noQ[g])
+	}
+}
+
+// lumaBoth gives a group without a filter the other's, at a tc of zero.
+func lumaBoth(pl *[2]lumaPlan, noP, noQ *[2]bool) (uint8, bool) {
+	a, b := 0, 1
+	if pl[0].mode == lumaNone {
+		a, b = 1, 0
+	}
+
+	if pl[b].mode == lumaNone {
+		pl[b].mode = pl[a].mode
+		noP[b], noQ[b] = noP[a], noQ[a]
+	}
+
+	return pl[0].mode, pl[0].mode == pl[1].mode && noP[0] == noP[1] && noQ[0] == noQ[1]
+}
+
+// deblockLuma8 hands one edge to a kernel, turning it first when it runs down.
+func deblockLuma8(p []uint8, base, line, step int, mode uint8, pl [2]lumaPlan, flags int32) bool {
+	strong, normal := deblockStrongAsm, deblockNormalAsm
+	if strong == nil || normal == nil {
+		return false
+	}
+
+	nd := int32(pl[0].nDp) | int32(pl[0].nDq)<<1 |
+		int32(pl[1].nDp)<<2 | int32(pl[1].nDq)<<3
+
+	if step != 1 {
+		q := p[base-4*step:]
+
+		if mode == lumaStrong {
+			strong(q, step, pl[0].tc, pl[1].tc, flags)
+		} else {
+			normal(q, step, pl[0].tc, pl[1].tc, nd, flags)
+		}
+
+		return true
+	}
+
+	if deblockTurnIn == nil {
+		return false
+	}
+
+	var buf [8 * 8]uint8
+
+	deblockTurnIn(buf[:], p[base-4:], line)
+
+	if mode == lumaStrong {
+		strong(buf[:], 8, pl[0].tc, pl[1].tc, flags)
+	} else {
+		normal(buf[:], 8, pl[0].tc, pl[1].tc, nd, flags)
+	}
+
+	deblockTurnOut(p[base-4:], line, buf[:])
+
+	return true
 }
 
 // deblockChroma is 8.7.2.5.5, which only runs where the strength is two.

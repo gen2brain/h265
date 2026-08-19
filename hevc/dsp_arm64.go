@@ -75,6 +75,18 @@ var forwardTransformMatrixNEON = func() [4][32 * 32]int32 {
 	return m
 }()
 
+//go:noescape
+func deblockStrong8NEON(p *uint8, pitch int, tc0, tc1, flags int32)
+
+//go:noescape
+func deblockNormal8NEON(p *uint8, pitch int, tc0, tc1, nd, flags int32)
+
+//go:noescape
+func turnIn8NEON(dst *uint8, src *uint8, stride int)
+
+//go:noescape
+func turnOut8NEON(dst *uint8, stride int, src *uint8)
+
 func dspInit(d *dspContext) {
 	d.addResidual8 = func(dst []uint8, stride int, coef []int32, n, shift int) {
 		addResidual8NEON(&dst[0], stride, &coef[0], n, shift)
@@ -91,6 +103,22 @@ func dspInit(d *dspContext) {
 
 	transposeAsm = func(dst, src []int32, n int) {
 		transpose4NEON(&dst[0], &src[0], n)
+	}
+
+	deblockStrongAsm = func(p []uint8, pitch int, tc0, tc1, flags int32) {
+		deblockStrong8NEON(&p[0], pitch, tc0, tc1, flags)
+	}
+
+	deblockNormalAsm = func(p []uint8, pitch int, tc0, tc1, nd, flags int32) {
+		deblockNormal8NEON(&p[0], pitch, tc0, tc1, nd, flags)
+	}
+
+	deblockTurnIn = func(dst, src []uint8, stride int) {
+		turnIn8NEON(&dst[0], &src[0], stride)
+	}
+
+	deblockTurnOut = func(dst []uint8, stride int, src []uint8) {
+		turnOut8NEON(&dst[0], stride, &src[0])
 	}
 
 	satd16x8Asm = func(src []uint8, srcStride int, pred []uint8, predStride int) int64 {

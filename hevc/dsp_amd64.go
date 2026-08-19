@@ -99,6 +99,18 @@ func dequant32AVX2(coef *int32, m *uint8, n int, ls, rnd, sh, lo, hi int32)
 //go:noescape
 func dequant32AVX512(coef *int32, m *uint8, n int, ls, rnd, sh, lo, hi int32)
 
+//go:noescape
+func deblockStrong8AVX2(p *uint8, pitch int, tc0, tc1, flags int32)
+
+//go:noescape
+func deblockNormal8AVX2(p *uint8, pitch int, tc0, tc1, nd, flags int32)
+
+//go:noescape
+func turnIn8AVX2(dst *uint8, src *uint8, stride int)
+
+//go:noescape
+func turnOut8AVX2(dst *uint8, stride int, src *uint8)
+
 func dspInit(d *dspContext) {
 	if !hasAVX2 {
 		return
@@ -115,6 +127,22 @@ func dspInit(d *dspContext) {
 	idctColsAsm = func(dst, src []int32, n int, rnd int32, shift int, lo, hi int32) {
 		idctCols8AVX2(&dst[0], &src[0], &transMatrix32[0][0], n, 32*(32/n), shift,
 			rnd, lo, hi)
+	}
+
+	deblockStrongAsm = func(p []uint8, pitch int, tc0, tc1, flags int32) {
+		deblockStrong8AVX2(&p[0], pitch, tc0, tc1, flags)
+	}
+
+	deblockNormalAsm = func(p []uint8, pitch int, tc0, tc1, nd, flags int32) {
+		deblockNormal8AVX2(&p[0], pitch, tc0, tc1, nd, flags)
+	}
+
+	deblockTurnIn = func(dst, src []uint8, stride int) {
+		turnIn8AVX2(&dst[0], &src[0], stride)
+	}
+
+	deblockTurnOut = func(dst []uint8, stride int, src []uint8) {
+		turnOut8AVX2(&dst[0], stride, &src[0])
 	}
 
 	transposeAsm = func(dst, src []int32, n int) {

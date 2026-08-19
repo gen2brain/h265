@@ -1246,3 +1246,164 @@ func TestTransposeAsm(t *testing.T) {
 		}
 	}
 }
+
+// TestDeblockAsm holds the luma filter kernels of 8.7.2.5.7 to the Go they
+// replace, over every combination of the flags that decide what they may write.
+func TestDeblockAsm(t *testing.T) {
+	if deblockStrongAsm == nil {
+		t.Skip("no kernel on this target")
+	}
+
+	r := rand.New(rand.NewPCG(1, 2))
+
+	for _, pitch := range []int{8, 16, 64} {
+		for iter := range 512 {
+			a := make([]uint8, 8*pitch)
+			for i := range a {
+				a[i] = uint8(r.UintN(256))
+			}
+
+			b := append([]uint8(nil), a...)
+
+			tc0, tc1 := int32(r.IntN(25)), int32(r.IntN(25))
+
+			// The flags are taken apart from the choice of filter, or half of
+			// the combinations never reach the one being exercised.
+			noP, noQ := iter&2 != 0, iter&4 != 0
+
+			flags := int32(0)
+			if noP {
+				flags |= 1
+			}
+
+			if noQ {
+				flags |= 2
+			}
+
+			if iter%2 == 0 {
+				deblockStrongGo(a, pitch, tc0, tc1, noP, noQ)
+				deblockStrongAsm(b, pitch, tc0, tc1, flags)
+			} else {
+				nd := int32(iter >> 3 & 15)
+
+				deblockNormalGo(a, pitch, tc0, tc1, nd, noP, noQ)
+				deblockNormalAsm(b, pitch, tc0, tc1, nd, flags)
+			}
+
+			for i := range a {
+				if a[i] != b[i] {
+					t.Fatalf("pitch %d iter %d: at %d = %d, want %d", pitch, iter, i, b[i], a[i])
+				}
+			}
+		}
+	}
+}
+
+// deblockStrongGo and deblockNormalGo are 8.7.2.5.7 written out over the same
+// layout the kernels take, which is the only thing they are for.
+func deblockStrongGo(p []uint8, pitch int, tc0, tc1 int32, noP, noQ bool) {
+	at := func(l, i int) int32 { return int32(p[i*pitch+l]) }
+
+	set := func(l, i int, v int32) {
+		if (i < 4 && noP) || (i >= 4 && noQ) {
+			return
+		}
+
+		p[i*pitch+l] = uint8(clip3(v, 0, 255))
+	}
+
+	for l := range 8 {
+		c := 2 * tc0
+		if l >= 4 {
+			c = 2 * tc1
+		}
+
+		p3, p2, p1, p0 := at(l, 0), at(l, 1), at(l, 2), at(l, 3)
+		q0, q1, q2, q3 := at(l, 4), at(l, 5), at(l, 6), at(l, 7)
+
+		set(l, 3, clip3((p2+2*p1+2*p0+2*q0+q1+4)>>3, p0-c, p0+c))
+		set(l, 2, clip3((p2+p1+p0+q0+2)>>2, p1-c, p1+c))
+		set(l, 1, clip3((2*p3+3*p2+p1+p0+q0+4)>>3, p2-c, p2+c))
+		set(l, 4, clip3((p1+2*p0+2*q0+2*q1+q2+4)>>3, q0-c, q0+c))
+		set(l, 5, clip3((p0+q0+q1+q2+2)>>2, q1-c, q1+c))
+		set(l, 6, clip3((p0+q0+q1+3*q2+2*q3+4)>>3, q2-c, q2+c))
+	}
+}
+
+func deblockNormalGo(p []uint8, pitch int, tc0, tc1, nd int32, noP, noQ bool) {
+	at := func(l, i int) int32 { return int32(p[i*pitch+l]) }
+
+	set := func(l, i int, v int32) {
+		if (i < 4 && noP) || (i >= 4 && noQ) {
+			return
+		}
+
+		p[i*pitch+l] = uint8(clip3(v, 0, 255))
+	}
+
+	for l := range 8 {
+		tc, nDp, nDq := tc0, nd&1, nd>>1&1
+		if l >= 4 {
+			tc, nDp, nDq = tc1, nd>>2&1, nd>>3&1
+		}
+
+		p2, p1, p0 := at(l, 1), at(l, 2), at(l, 3)
+		q0, q1, q2 := at(l, 4), at(l, 5), at(l, 6)
+
+		delta := (9*(q0-p0) - 3*(q1-p1) + 8) >> 4
+		if absI32(delta) >= tc*10 {
+			continue
+		}
+
+		delta = clip3(delta, -tc, tc)
+
+		set(l, 3, p0+delta)
+		set(l, 4, q0-delta)
+
+		if nDp != 0 {
+			set(l, 2, p1+clip3(((p2+p0+1)>>1-p1+delta)>>1, -(tc>>1), tc>>1))
+		}
+
+		if nDq != 0 {
+			set(l, 5, q1+clip3(((q2+q0+1)>>1-q1-delta)>>1, -(tc>>1), tc>>1))
+		}
+	}
+}
+
+// TestDeblockTurnAsm holds the turn a vertical edge takes on its way to the
+// filters, and back, to the identity it has to be.
+func TestDeblockTurnAsm(t *testing.T) {
+	if deblockTurnIn == nil {
+		t.Skip("no kernel on this target")
+	}
+
+	r := rand.New(rand.NewPCG(3, 4))
+
+	for _, stride := range []int{8, 17, 64} {
+		src := make([]uint8, 8*stride+8)
+		for i := range src {
+			src[i] = uint8(r.UintN(256))
+		}
+
+		var buf [8 * 8]uint8
+
+		deblockTurnIn(buf[:], src, stride)
+
+		for l := range 8 {
+			for i := range 8 {
+				if got, want := buf[i*8+l], src[l*stride+i]; got != want {
+					t.Fatalf("stride %d: line %d position %d = %d, want %d",
+						stride, l, i, got, want)
+				}
+			}
+		}
+
+		out := append([]uint8(nil), src...)
+
+		deblockTurnOut(out, stride, buf[:])
+
+		if !bytes.Equal(out, src) {
+			t.Fatalf("stride %d: turning back did not restore the samples", stride)
+		}
+	}
+}

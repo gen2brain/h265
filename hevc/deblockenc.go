@@ -54,6 +54,17 @@ func (e *intraEncoder[P]) deblockEdge(x, y int, vertical bool, hdr *sliceHeader)
 	bw := e.width / 4
 	sw, sh := e.shiftW, e.shiftH
 
+	step, line := 1, e.width
+	if !vertical {
+		step, line = e.width, 1
+	}
+
+	base := y*e.width + x
+
+	beta, tc := betaTc(int32(e.qp), 2, hdr, e.bitDepth)
+
+	var plan [2]lumaPlan
+
 	for k := 0; k < 8; k += 4 {
 		qx, qy := x, y+k
 		if !vertical {
@@ -73,8 +84,9 @@ func (e *intraEncoder[P]) deblockEdge(x, y int, vertical bool, hdr *sliceHeader)
 			continue
 		}
 
-		deblockLuma(e.recon[0], e.width, qx, qy, vertical, 2, int32(e.qp), hdr,
-			e.bitDepth, false, false)
+		if beta != 0 && tc != 0 {
+			plan[k>>2] = deblockLumaPlan(e.recon[0], base+k*line, line, step, beta, tc)
+		}
 
 		if e.s.chromaArrayType() == 0 {
 			continue
@@ -94,4 +106,7 @@ func (e *intraEncoder[P]) deblockEdge(x, y int, vertical bool, hdr *sliceHeader)
 				int32(e.qpDeblockC), hdr, e.bitDepth, false, false)
 		}
 	}
+
+	deblockLumaEdge(e.recon[0], base, line, step, plan, e.bitDepth,
+		[2]bool{}, [2]bool{})
 }
