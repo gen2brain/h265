@@ -468,8 +468,9 @@ func (d *ctuDecoder) parseCuQPDelta() {
 	v := int32(prefix)
 
 	if prefix > 4 {
+		// 7.4.9.14 caps cu_qp_delta_abs at 26 + QpBdOffsetY/2, well inside this.
 		k := 0
-		for d.c.decodeBypass() != 0 {
+		for k < 6 && d.c.decodeBypass() != 0 {
 			k++
 		}
 
