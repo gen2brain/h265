@@ -227,7 +227,7 @@ func (d *Decoder) finishPicture() []*Picture {
 }
 
 func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
-	p, err := d.ppsForSlice(nal)
+	p, first, err := d.ppsForSlice(nal)
 	if err != nil {
 		return nil, err
 	}
@@ -235,6 +235,15 @@ func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
 	s, ok := d.sps[p.spsID]
 	if !ok {
 		return nil, ErrInvalid
+	}
+
+	// 7.4.3.2.1 activates one pair of parameter sets for the whole picture.
+	if !first && d.ctu != nil {
+		if p.id != d.ctu.p.id {
+			return nil, ErrInvalid
+		}
+
+		s, p = d.ctu.s, d.ctu.p
 	}
 
 	if n := d.frameSizeLimit; n > 0 &&
@@ -343,11 +352,11 @@ func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
 	return done, nil
 }
 
-func (d *Decoder) ppsForSlice(nal NALUnit) (*pps, error) {
+func (d *Decoder) ppsForSlice(nal NALUnit) (*pps, bool, error) {
 	var c getBits
 	c.init(nal.RBSP)
 
-	c.bit()
+	first := c.bit() != 0
 
 	if nal.Type >= NALBlaWLP && nal.Type <= 23 {
 		c.bit()
@@ -355,15 +364,15 @@ func (d *Decoder) ppsForSlice(nal NALUnit) (*pps, error) {
 
 	id := c.ue()
 	if c.err {
-		return nil, ErrInvalid
+		return nil, false, ErrInvalid
 	}
 
 	p, ok := d.pps[id]
 	if !ok {
-		return nil, ErrInvalid
+		return nil, false, ErrInvalid
 	}
 
-	return p, nil
+	return p, first, nil
 }
 
 // decodeSliceData is 7.3.8.1. Tiles and wavefronts split the slice segment into
