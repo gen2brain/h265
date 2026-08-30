@@ -592,7 +592,8 @@ func parseSPS(rbsp []byte) (*sps, error) {
 	s.minTbLog2SizeY = 2 + uint8(log2MinTbSizeMinus2)
 	s.maxTbLog2SizeY = s.minTbLog2SizeY + uint8(log2DiffMaxMinTbSize)
 
-	if s.minTbLog2SizeY >= s.minCbLog2SizeY || s.maxTbLog2SizeY > s.ctbLog2SizeY {
+	// 7.4.3.2.1 holds MaxTbLog2SizeY to Min(CtbLog2SizeY, 5), which is 32.
+	if s.minTbLog2SizeY >= s.minCbLog2SizeY || s.maxTbLog2SizeY > min(s.ctbLog2SizeY, 5) {
 		return nil, ErrInvalid
 	}
 
