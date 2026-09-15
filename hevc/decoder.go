@@ -177,8 +177,28 @@ func (d *Decoder) DecodeNAL(nal NALUnit) ([]*Picture, error) {
 	return d.decodeSlice(nal)
 }
 
+// Reset discards all decoding state without emitting output: parameter sets,
+// references, reordering and POC history, unfinished pictures, and cached buffers.
+// Thread and size limits are preserved. Pictures already returned to the caller
+// remain valid until Release, and cannot repopulate the reset decoder's pool.
+// A Decoder and its pictures must not be used concurrently.
+func (d *Decoder) Reset() {
+	if d.cur != nil {
+		d.cur.release()
+	}
+	d.clearDPB()
+	d.pool.reset()
+	*d = Decoder{
+		pool:           d.pool,
+		threads:        d.threads,
+		frameSizeLimit: d.frameSizeLimit,
+	}
+}
+
 // Flush ends the sequence and returns every picture still held back for
-// reordering, in output order.
+// reordering, in output order. References and POC history are cleared;
+// parameter sets and configured limits are retained. Use Reset instead
+// to discard pending output and parameter sets.
 func (d *Decoder) Flush() []*Picture {
 	out := d.finishPicture()
 
@@ -192,13 +212,9 @@ func (d *Decoder) Flush() []*Picture {
 	}
 
 	d.cur, d.ctu, d.prevSlic = nil, nil, nil
-
-	for i := range d.dpb {
-		d.dpb[i].pic.release()
-	}
-
-	clear(d.dpb)
-	d.dpb = d.dpb[:0]
+	d.curRPS, d.poc = refPicSet{}, pocState{}
+	d.seenPicture, d.skipRASL = false, false
+	d.clearDPB()
 
 	return out
 }
@@ -313,7 +329,7 @@ func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
 				}
 			}
 
-			d.dpb = nil
+			d.clearDPB()
 		default:
 			d.dpbMark(&rps)
 			d.dpbRemoveUnused()

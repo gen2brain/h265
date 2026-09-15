@@ -238,6 +238,16 @@ func (d *Decoder) dpbLongTerm(poc int32) bool {
 	return false
 }
 
+// clearDPB drops the decoder's ownership, leaving already returned pictures
+// alive under their separate caller ownership.
+func (d *Decoder) clearDPB() {
+	for _, e := range d.dpb {
+		e.pic.release()
+	}
+	clear(d.dpb)
+	d.dpb = d.dpb[:0]
+}
+
 // dpbRemoveUnused drops the entries C.5.2.2 empties, those neither held for
 // reference nor waiting to be output.
 func (d *Decoder) dpbRemoveUnused() {
