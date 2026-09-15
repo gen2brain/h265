@@ -14,6 +14,7 @@ const (
 	maxShortTermRPS     = 64
 	maxLongTermRefPics  = 32
 	maxRefPicsPerRPS    = 16
+	maxDpbSize          = 16
 	maxTileColumns      = 22
 	maxTileRows         = 20
 	maxPicSize          = 16384
@@ -527,6 +528,9 @@ func parseSPS(rbsp []byte) (*sps, error) {
 		s.confWinTop = c.ue()
 		s.confWinBottom = c.ue()
 	}
+	if s.croppedWidth() == 0 || s.croppedHeight() == 0 {
+		return nil, ErrInvalid
+	}
 
 	bitDepthLumaMinus8 := c.ue()
 	bitDepthChromaMinus8 := c.ue()
@@ -554,6 +558,11 @@ func parseSPS(rbsp []byte) (*sps, error) {
 		s.maxDecPicBuffering = c.ue()
 		s.maxNumReorderPics = c.ue()
 		s.maxLatencyIncrease = c.ue()
+		// 7.4.3.2.1 bounds reordering by the declared buffer, and A.4.2
+		// bounds MaxDpbSize above by 16 for every supported level.
+		if s.maxDecPicBuffering >= maxDpbSize || s.maxNumReorderPics > s.maxDecPicBuffering {
+			return nil, ErrInvalid
+		}
 	}
 
 	log2MinCbSizeMinus3 := c.ue()
@@ -936,21 +945,21 @@ func (p *pps) resolveTileGeometry(s *sps) error {
 }
 
 func (s *sps) croppedWidth() uint32 {
-	crop := uint32(s.subWidthC) * (s.confWinLeft + s.confWinRight)
-	if crop >= s.picWidthInLumaSamples {
+	crop := uint64(s.subWidthC) * (uint64(s.confWinLeft) + uint64(s.confWinRight))
+	if crop >= uint64(s.picWidthInLumaSamples) {
 		return 0
 	}
 
-	return s.picWidthInLumaSamples - crop
+	return s.picWidthInLumaSamples - uint32(crop)
 }
 
 func (s *sps) croppedHeight() uint32 {
-	crop := uint32(s.subHeightC) * (s.confWinTop + s.confWinBottom)
-	if crop >= s.picHeightInLumaSamples {
+	crop := uint64(s.subHeightC) * (uint64(s.confWinTop) + uint64(s.confWinBottom))
+	if crop >= uint64(s.picHeightInLumaSamples) {
 		return 0
 	}
 
-	return s.picHeightInLumaSamples - crop
+	return s.picHeightInLumaSamples - uint32(crop)
 }
 
 func parseShortTermRPS(c *getBits, idx, numStRPS int, prev []shortTermRPS) (shortTermRPS, error) {
