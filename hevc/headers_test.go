@@ -418,6 +418,127 @@ func b2u(v bool) uint32 {
 	return 0
 }
 
+func TestConformanceWindowBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		crop  [4]uint32
+		valid bool
+	}{
+		{"uncropped", [4]uint32{}, true},
+		{"last chroma sample", [4]uint32{15, 0, 15, 0}, true},
+		{"horizontal empty", [4]uint32{8, 8, 0, 0}, false},
+		{"vertical empty", [4]uint32{0, 0, 8, 8}, false},
+		{"left outside", [4]uint32{17, 0, 0, 0}, false},
+		{"top outside", [4]uint32{0, 0, 17, 0}, false},
+		{"horizontal sum overflow", [4]uint32{0xfffffffe, 2, 0, 0}, false},
+		{"vertical sum overflow", [4]uint32{0, 0, 0xfffffffe, 2}, false},
+		{"horizontal scale overflow", [4]uint32{1 << 31, 0, 0, 0}, false},
+		{"vertical scale overflow", [4]uint32{0, 0, 1 << 31, 0}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := parseSPS(validationSPS(tc.crop, [3]uint32{1, 0, 0}))
+			if !tc.valid {
+				if !errors.Is(err, ErrInvalid) {
+					t.Fatalf("invalid crop accepted: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.croppedWidth() != 32-2*(tc.crop[0]+tc.crop[1]) ||
+				s.croppedHeight() != 32-2*(tc.crop[2]+tc.crop[3]) {
+				t.Fatal("valid conformance window changed")
+			}
+		})
+	}
+}
+
+func TestPictureBufferBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		ordering [][3]uint32
+		valid    bool
+	}{
+		{"one picture", [][3]uint32{{0, 0, 0}}, true},
+		{"maximum buffer", [][3]uint32{{15, 15, 0}}, true},
+		{"finite latency", [][3]uint32{{3, 2, 1}}, true},
+		{"buffer too large", [][3]uint32{{16, 0, 0}}, false},
+		{"reordering exceeds buffer", [][3]uint32{{1, 2, 0}}, false},
+		{"valid sublayers", [][3]uint32{{1, 0, 0}, {3, 2, 0}}, true},
+		{"invalid lower sublayer", [][3]uint32{{16, 0, 0}, {3, 2, 0}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSPS(validationSPS([4]uint32{}, tc.ordering...))
+			if tc.valid && err != nil {
+				t.Fatal(err)
+			}
+			if !tc.valid && !errors.Is(err, ErrInvalid) {
+				t.Fatalf("invalid picture buffering accepted: %v", err)
+			}
+		})
+	}
+}
+
+// validationSPS replaces only the crop and ordering fields of an otherwise
+// ordinary encoder SPS. It never sends malformed headers to pixel decoding.
+func validationSPS(crop [4]uint32, ordering ...[3]uint32) []byte {
+	h := encoderHeaders{width: 32, height: 32, chromaFormat: 1,
+		subWidthC: 2, subHeightC: 2, levelIDC: 60}
+	data := h.sps()
+	var r getBits
+	r.init(data)
+	r.skip(8)
+	parseProfileTierLevel(&r, true, 0)
+	profileEnd := r.pos()
+	r.ue() // SPS id.
+	r.ue() // Chroma format.
+	r.ue() // Width.
+	r.ue() // Height.
+	cropStart := r.pos()
+	r.bit() // Encoder has no conformance window.
+	cropEnd := r.pos()
+	r.ue()  // Luma depth.
+	r.ue()  // Chroma depth.
+	r.ue()  // POC bits.
+	r.bit() // Ordering information is present.
+	orderingStart := r.pos()
+	r.ue()
+	r.ue()
+	r.ue()
+	orderingEnd := r.pos()
+
+	var w putBits
+	copyBits := func(start, end int) {
+		for i := start; i < end; i++ {
+			w.bit(uint32(data[i/8] >> (7 - i%8)))
+		}
+	}
+	copyBits(0, 4)
+	w.bits(uint64(len(ordering)-1), 3)
+	copyBits(7, profileEnd)
+	if len(ordering) > 1 {
+		// No sublayer profile/level overrides, followed by reserved bits.
+		w.bits(0, 16)
+	}
+	copyBits(profileEnd, cropStart)
+	w.bit(1)
+	for _, v := range crop {
+		w.ue(v)
+	}
+	copyBits(cropEnd, orderingStart)
+	for _, layer := range ordering {
+		for _, v := range layer {
+			w.ue(v)
+		}
+	}
+	copyBits(orderingEnd, len(data)*8)
+	for w.nbits != 0 {
+		w.bit(0)
+	}
+	return w.bytes()
+}
+
 func TestWriteParameterSets(t *testing.T) {
 	h := encoderHeaders{width: 320, height: 240, levelIDC: 60, pcm: true, signDataHidingEnabled: true,
 		chromaFormat: 1, subWidthC: 2, subHeightC: 2}
