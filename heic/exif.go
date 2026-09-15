@@ -121,6 +121,10 @@ func readFile(r io.Reader) (*file, error) {
 // no image item at all still gives up its metadata.
 func (f *file) descItem(typ, contentType string) *item {
 	m := f.meta
+	if m == nil {
+		return nil
+	}
+
 	primary, _ := f.primary()
 
 	for _, id := range m.order {

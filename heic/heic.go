@@ -92,7 +92,7 @@ type Options struct {
 	// AutoRotate applies the clap/irot/imir transforms, forcing NRGBA output
 	// when it transforms.
 	AutoRotate bool
-	// FrameSizeLimit bounds a frame's area in pixels. Zero means
+	// FrameSizeLimit bounds a frame's coded area in pixels. Zero means
 	// DefaultFrameSizeLimit; a negative value removes the limit.
 	FrameSizeLimit int
 	// ToYCbCr forces the image's native color space instead of NRGBA:
@@ -431,6 +431,8 @@ func (f *file) decodeItem(dec *itemDecoder, it *item) (*hevc.Picture, error) {
 			return nil, ErrUnsupported
 		}
 	}
+
+	dec.d.FrameSizeLimit(f.limit())
 
 	if dec.cfg != cfg.hvcC {
 		for _, nal := range cfg.hvcC.paramSets {

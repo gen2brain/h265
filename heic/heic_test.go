@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1419,6 +1420,76 @@ func TestFrameSizeLimit(t *testing.T) {
 
 	if _, err := Decode(bytes.NewReader(data), Options{FrameSizeLimit: -1}); err != nil {
 		t.Errorf("negative limit should remove it: %v", err)
+	}
+
+	lying := append([]byte(nil), data...)
+	if got := binary.BigEndian.Uint32(lying[323:]); got != 320 {
+		t.Fatalf("ispe width at 323 is %d, want 320", got)
+	}
+	binary.BigEndian.PutUint32(lying[323:], 1)
+	binary.BigEndian.PutUint32(lying[327:], 1)
+
+	if _, err := Decode(bytes.NewReader(lying), Options{FrameSizeLimit: 16}); !errors.Is(err, ErrUnsupported) {
+		t.Errorf("ispe of 1x1 over a 320x240 picture under a 16 pixel limit: %v", err)
+	}
+}
+
+func TestSampleTableBounds(t *testing.T) {
+	stbl := func(table []byte) []byte {
+		return append(box("ftyp", []byte("heic\x00\x00\x00\x00mif1heic")),
+			box("moov", box("trak", box("mdia", box("minf", box("stbl", table)))))...)
+	}
+
+	cases := map[string][]byte{
+		"stts": stbl(fullBox("stts", 0, 0, append(u32(1), append(u32(1<<24), u32(1)...)...))),
+		"stsz": stbl(fullBox("stsz", 0, 0, append(u32(1), u32(1<<24)...))),
+		"stco": stbl(fullBox("stco", 0, 0, append(u32(1<<24), u32(0)...))),
+		"co64": stbl(fullBox("co64", 0, 0, u32(1<<24))),
+	}
+
+	for name, data := range cases {
+		t.Run(name, func(t *testing.T) {
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+
+			_, err := DecodeConfig(bytes.NewReader(data))
+
+			runtime.ReadMemStats(&after)
+
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("err = %v, want ErrInvalid", err)
+			}
+
+			if n := after.TotalAlloc - before.TotalAlloc; n > 1<<20 {
+				t.Fatalf("%d bytes allocated for a %d byte file", n, len(data))
+			}
+		})
+	}
+
+	tr := &track{uniform: 1, count: 1 << 24, offsets: []uint64{0}, runs: []chunkRun{{1, 1 << 24}}}
+	if err := tr.layout(100); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("layout of more samples than bytes: %v", err)
+	}
+
+	tr = &track{uniform: 3, count: 4, offsets: []uint64{0}, runs: []chunkRun{{1, 4}}}
+	if err := tr.layout(12); err != nil || len(tr.samples) != 4 || tr.samples[3].off != 9 {
+		t.Fatalf("layout = %v, %+v", err, tr.samples)
+	}
+}
+
+func TestMetadataWithoutMeta(t *testing.T) {
+	data := append(box("ftyp", []byte("heic\x00\x00\x00\x00mif1heic")), box("moov", nil)...)
+
+	if _, err := DecodeExif(bytes.NewReader(data)); !errors.Is(err, ErrNoExif) {
+		t.Errorf("DecodeExif: %v, want ErrNoExif", err)
+	}
+
+	if _, err := RawExif(bytes.NewReader(data)); !errors.Is(err, ErrNoExif) {
+		t.Errorf("RawExif: %v, want ErrNoExif", err)
+	}
+
+	if _, err := RawXMP(bytes.NewReader(data)); !errors.Is(err, ErrNoXMP) {
+		t.Errorf("RawXMP: %v, want ErrNoXMP", err)
 	}
 }
 

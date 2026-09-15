@@ -11,7 +11,12 @@ type track struct {
 	handler   string
 	timescale uint32
 	samples   []extent
-	deltas    []uint32
+	timing    []sttsRun
+	sizes     []uint32
+	uniform   uint32
+	count     int
+	offsets   []uint64
+	runs      []chunkRun
 	auxl      []uint32
 	auxType   string
 	hvcC      *hevcConfig
@@ -193,12 +198,23 @@ type chunkRun struct {
 	firstChunk, perChunk uint32
 }
 
-func (t *track) parseStbl(b []byte) error {
-	var sizes []uint32
-	var offsets []uint64
-	var runs []chunkRun
+type sttsRun struct {
+	count, delta uint32
+}
 
-	err := eachBox(b, func(typ string, b []byte) error {
+func (t *track) delta(i int) (uint32, bool) {
+	for _, run := range t.timing {
+		if i < int(run.count) {
+			return run.delta, true
+		}
+		i -= int(run.count)
+	}
+
+	return 0, false
+}
+
+func (t *track) parseStbl(b []byte) error {
+	return eachBox(b, func(typ string, b []byte) error {
 		r := &reader{b: b}
 
 		switch typ {
@@ -206,29 +222,28 @@ func (t *track) parseStbl(b []byte) error {
 			r.fullBox()
 			n := int(r.u32())
 			for range n {
-				count := r.u32()
-				delta := r.u32()
-				if r.err || count > 1<<24 {
+				count, delta := r.u32(), r.u32()
+				if r.err {
 					return ErrInvalid
 				}
-				for range int(count) {
-					t.deltas = append(t.deltas, delta)
-				}
+				t.timing = append(t.timing, sttsRun{count, delta})
 			}
 
 		case "stsz":
 			r.fullBox()
-			uniform := r.u32()
+			t.uniform = r.u32()
 			n := int(r.u32())
 			if r.err || n < 0 || n > 1<<24 {
 				return ErrInvalid
 			}
-			sizes = make([]uint32, n)
-			for i := range n {
-				if uniform != 0 {
-					sizes[i] = uniform
-				} else {
-					sizes[i] = r.u32()
+			t.count = n
+			if t.uniform == 0 {
+				if r.remaining()/4 < n {
+					return ErrInvalid
+				}
+				t.sizes = make([]uint32, n)
+				for i := range n {
+					t.sizes[i] = r.u32()
 				}
 			}
 
@@ -275,21 +290,25 @@ func (t *track) parseStbl(b []byte) error {
 				if r.err {
 					return ErrInvalid
 				}
-				runs = append(runs, chunkRun{first, per})
+				t.runs = append(t.runs, chunkRun{first, per})
 			}
 
 		case "stco", "co64":
 			r.fullBox()
 			n := int(r.u32())
-			if r.err || n < 0 || n > 1<<24 {
+			w := 4
+			if typ == "co64" {
+				w = 8
+			}
+			if r.err || n < 0 || r.remaining()/w < n {
 				return ErrInvalid
 			}
-			offsets = make([]uint64, n)
+			t.offsets = make([]uint64, n)
 			for i := range n {
 				if typ == "stco" {
-					offsets[i] = uint64(r.u32())
+					t.offsets[i] = uint64(r.u32())
 				} else {
-					offsets[i] = r.u64()
+					t.offsets[i] = r.u64()
 				}
 			}
 		}
@@ -300,50 +319,56 @@ func (t *track) parseStbl(b []byte) error {
 
 		return nil
 	})
-	if err != nil {
-		return err
-	}
-
-	t.samples = layoutSamples(sizes, offsets, runs)
-
-	return nil
 }
 
-// layoutSamples walks the chunk table to give every sample a file offset.
-func layoutSamples(sizes []uint32, offsets []uint64, runs []chunkRun) []extent {
-	if len(sizes) == 0 || len(offsets) == 0 || len(runs) == 0 {
+// layout gives every sample a file offset, once the tables fit a file this size.
+func (t *track) layout(size uint64) error {
+	if t.samples != nil {
 		return nil
 	}
 
-	out := make([]extent, 0, len(sizes))
+	if t.count == 0 || len(t.offsets) == 0 || len(t.runs) == 0 || uint64(t.count) > size ||
+		uint64(t.count)*uint64(t.uniform) > size {
+		return ErrInvalid
+	}
+
+	out := make([]extent, 0, t.count)
 	s := 0
 
-	for c := range offsets {
+	for c := range t.offsets {
 		var per uint32
-		for _, run := range runs {
+		for _, run := range t.runs {
 			if uint32(c+1) < run.firstChunk {
 				break
 			}
 			per = run.perChunk
 		}
 
-		off := offsets[c]
+		off := t.offsets[c]
 		for range int(per) {
-			if s >= len(sizes) {
-				return out
+			if s >= t.count {
+				t.samples = out
+
+				return nil
 			}
-			out = append(out, extent{off: off, len: uint64(sizes[s])})
-			off += uint64(sizes[s])
+			n := t.uniform
+			if n == 0 {
+				n = t.sizes[s]
+			}
+			out = append(out, extent{off: off, len: uint64(n)})
+			off += uint64(n)
 			s++
 		}
 	}
 
-	return out
+	t.samples = out
+
+	return nil
 }
 
 func (m *movie) pictTrack() *track {
 	for i := range m.tracks {
-		if m.tracks[i].handler == "pict" && len(m.tracks[i].samples) > 0 {
+		if m.tracks[i].handler == "pict" && m.tracks[i].count > 0 {
 			return &m.tracks[i]
 		}
 	}
@@ -354,7 +379,7 @@ func (m *movie) pictTrack() *track {
 func (m *movie) alphaTrack(id uint32) *track {
 	for i := range m.tracks {
 		t := &m.tracks[i]
-		if t.handler != "auxv" || len(t.samples) == 0 || !isAlphaURN(t.auxType) {
+		if t.handler != "auxv" || t.count == 0 || !isAlphaURN(t.auxType) {
 			continue
 		}
 		for _, to := range t.auxl {
@@ -416,8 +441,8 @@ func (f *file) decodeSequence(o Options) (*HEIC, error) {
 		out.Image = append(out.Image, img)
 
 		d := 0.0
-		if i < len(t.deltas) {
-			d = float64(t.deltas[i]) / float64(t.timescale)
+		if delta, ok := t.delta(i); ok {
+			d = float64(delta) / float64(t.timescale)
 		}
 
 		out.Delay = append(out.Delay, d)
@@ -447,13 +472,17 @@ func (f *file) decodeTrack(t *track) ([]*hevc.Picture, error) {
 		return nil, ErrInvalid
 	}
 
-	// A sample needs at least one byte, so a table claiming more samples than
-	// the file has bytes is describing data that cannot exist.
-	if uint64(len(t.samples)) > f.src.size {
+	if err := t.layout(f.src.size); err != nil {
+		return nil, err
+	}
+
+	if len(t.samples) == 0 {
 		return nil, ErrInvalid
 	}
 
 	var d hevc.Decoder
+
+	d.FrameSizeLimit(f.limit())
 
 	for _, nal := range t.hvcC.paramSets {
 		u, ok := hevc.ParseNAL(nal)
