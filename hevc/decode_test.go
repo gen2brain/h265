@@ -281,12 +281,19 @@ func TestEncodeLossyIntraTransformChoice(t *testing.T) {
 	}
 
 	var d Decoder
+	var pics []*Picture
 	for _, nal := range nals {
-		if _, err := d.DecodeNAL(nal); err != nil {
+		out, err := d.DecodeNAL(nal)
+		pics = append(pics, out...)
+		if err != nil {
 			t.Fatalf("DecodeNAL %d: %v", nal.Type, err)
 		}
 	}
-	if pics := d.Flush(); len(pics) != 1 {
+	pics = append(pics, d.Flush()...)
+	for _, p := range pics {
+		defer p.Release()
+	}
+	if len(pics) != 1 {
 		t.Fatalf("pictures = %d", len(pics))
 	}
 	if d.ctuPrev.blk[d.ctuPrev.blkIndex(4, 0)].tuV {
@@ -370,13 +377,20 @@ func TestEncodeTransformEdges(t *testing.T) {
 				}
 
 				var d Decoder
+				var pics []*Picture
 				for _, nal := range e.nals(width, height, rbsp) {
-					if _, err := d.DecodeNAL(nal); err != nil {
+					out, err := d.DecodeNAL(nal)
+					pics = append(pics, out...)
+					if err != nil {
 						t.Fatalf("DecodeNAL %d: %v", nal.Type, err)
 					}
 				}
 
-				if pics := d.Flush(); len(pics) != 1 {
+				pics = append(pics, d.Flush()...)
+				for _, p := range pics {
+					defer p.Release()
+				}
+				if len(pics) != 1 {
 					t.Fatalf("pictures = %d", len(pics))
 				}
 
@@ -994,14 +1008,21 @@ func TestEncodeCUSize(t *testing.T) {
 			}
 
 			var d Decoder
+			var pics []*Picture
 
 			for _, nal := range nals {
-				if _, err := d.DecodeNAL(nal); err != nil {
+				out, err := d.DecodeNAL(nal)
+				pics = append(pics, out...)
+				if err != nil {
 					t.Fatalf("DecodeNAL %d: %v", nal.Type, err)
 				}
 			}
 
-			if pics := d.Flush(); len(pics) != 1 {
+			pics = append(pics, d.Flush()...)
+			for _, p := range pics {
+				defer p.Release()
+			}
+			if len(pics) != 1 {
 				t.Fatalf("pictures = %d", len(pics))
 			}
 
@@ -1613,12 +1634,18 @@ func TestEncodeLossyIntraQP(t *testing.T) {
 			_, _, recon := encodeRecon(t, y, cb, cr, width, height, qp)
 
 			var d Decoder
+			var pics []*Picture
 			for _, nal := range nals {
-				if _, err := d.DecodeNAL(nal); err != nil {
+				out, err := d.DecodeNAL(nal)
+				pics = append(pics, out...)
+				if err != nil {
 					t.Fatalf("DecodeNAL %d: %v", nal.Type, err)
 				}
 			}
-			pics := d.Flush()
+			pics = append(pics, d.Flush()...)
+			for _, p := range pics {
+				defer p.Release()
+			}
 			if len(pics) != 1 {
 				t.Fatalf("pictures = %d", len(pics))
 			}
@@ -1952,6 +1979,7 @@ func TestEncoder(t *testing.T) {
 }
 
 var cannotDecode = map[string]string{
+	"fuzz_bit_depth_change.h265":    "malformed slice missing end_of_slice_segment_flag",
 	"fuzz_dequant_qp_overflow.h265": "slice QP outside the range of 7.4.7.1",
 	"fuzz_mvd_overflow.h265":        "corrupted motion vector difference desyncs the arithmetic decoder",
 }

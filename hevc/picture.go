@@ -29,6 +29,10 @@ type Picture struct {
 
 	POC int
 
+	// Tag is copied from the picture's first slice NALUnit. It follows the
+	// picture through output reordering; the decoder does not interpret it.
+	Tag uint64
+
 	Y, Cb, Cr       []uint8
 	Y16, Cb16, Cr16 []uint16
 

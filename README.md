@@ -25,10 +25,31 @@ img, err := heic.Decode(r)
 d := hevc.Decoder{}
 
 for _, nal := range nals {
+    nal.Tag = tag // Optional timestamp or frame ID; the first slice supplies it.
     pics, err := d.DecodeNAL(nal)
+    for _, pic := range pics {
+        // Consume pic's visible planes and pic.Tag, then release its storage.
+        pic.Release()
+    }
+    // Handle err after consuming any completed pictures returned alongside it.
     ...
 }
 ```
+
+Each call accepts one complete NAL; slices of a picture may arrive in separate
+calls. The final slice finishes reconstruction and filtering without waiting for
+the next picture. With zero SPS reorder depth, that picture is returned immediately;
+otherwise output follows the stream's ordering constraints. Each picture retains
+the first slice's opaque `Tag`, including zero, through any output reordering.
+Use `SplitAnnexB` or `SplitHVCC` to frame complete input into NAL units.
+
+Use `Flush` at end of stream, not after each frame. `Reset` discards pending output,
+references and parameter sets while preserving configured limits; already returned
+pictures remain valid until `Release`. Decode errors also reset the decoder.
+
+Set `FrameSizeLimit` and `Threads` to the application's decoded-size and worker
+budgets, and limit compressed input before parsing it. Picture planes are read-only;
+decoder operations and picture releases must be serialized.
 
 ### Encoding
 

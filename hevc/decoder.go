@@ -1,21 +1,25 @@
 /*
 Package hevc decodes an HEVC (H.265) bitstream, and encodes an intra-only one.
 
-[Decoder.DecodeNAL] takes one NAL unit at a time and returns the pictures that
-are ready, which is not the same as the pictures it just decoded: a stream that
-codes out of display order is held back by sps_max_num_reorder_pics and released
-by picture order count. [Decoder.Flush] drains what is left at the end.
+[Decoder.DecodeNAL] takes one complete NAL unit at a time. When its last slice
+finishes reconstruction, a picture is filtered and made eligible for output in
+that same call. A stream that codes out of display order can still hold pictures
+back under sps_max_num_reorder_pics and release them by picture order count.
+[Decoder.Flush] drains what is left at the end of the sequence.
+
+The first slice's [NALUnit.Tag] follows its picture through output reordering.
+[Decoder.Reset] discards state without emitting pictures, for example after
+unrepaired transport loss.
 
 	var d hevc.Decoder
 
 	for _, nal := range hevc.SplitAnnexB(data) {
 		pics, err := d.DecodeNAL(nal)
-		if err != nil {
-			return err
-		}
-
 		for _, p := range pics {
 			p.Release()
+		}
+		if err != nil {
+			return err
 		}
 	}
 
@@ -101,19 +105,35 @@ type Decoder struct {
 	seenPicture bool
 	skipRASL    bool
 
-	maxReorder   int
-	maxLatency   int
-	maxDecPicBuf int
+	maxReorder    int
+	maxLatency    int
+	maxDecPicBuf  int
+	curType       NALType
+	curTemporalID uint8
 }
 
-// DecodeNAL consumes one NAL unit and returns whatever pictures that completes,
-// in output order. Reordering means a picture may surface several NAL units
-// after the one that finished it.
 // FrameSizeLimit refuses a sequence whose pictures are larger than n samples,
 // with ErrUnsupported. Zero, the default, accepts anything the level allows.
 func (d *Decoder) FrameSizeLimit(n int) { d.frameSizeLimit = n }
 
-func (d *Decoder) DecodeNAL(nal NALUnit) ([]*Picture, error) {
+// DecodeNAL consumes one complete NAL unit and returns zero or more pictures in
+// output order. The final slice completes and filters its picture immediately;
+// SPS reordering limits decide whether it can be returned now or must wait for
+// later pictures or Flush. Earlier slices can be submitted in separate calls.
+// Each picture carries the Tag of its first slice, including a zero tag.
+//
+// Input bytes may be reused after this call. Returned pictures, including any
+// returned with an error, belong to the caller until Release. An error resets
+// the decoder; supply parameter sets again before resuming at a random access point.
+func (d *Decoder) DecodeNAL(nal NALUnit) (out []*Picture, err error) {
+	defer func() {
+		if err != nil {
+			d.Reset()
+		}
+	}()
+	if nal.LayerID != 0 {
+		return nil, ErrUnsupported
+	}
 	if d.sps == nil {
 		d.vps = make(map[uint8]*vps)
 		d.sps = make(map[uint32]*sps)
@@ -162,7 +182,9 @@ func (d *Decoder) DecodeNAL(nal NALUnit) ([]*Picture, error) {
 		return nil, nil
 	}
 
-	if nal.Type.IsIRAP() {
+	// NoRaslOutputFlag belongs to the picture. A later slice of the same CRA
+	// must not undo the random-access decision made before its first slice.
+	if nal.Type.IsIRAP() && len(nal.RBSP) != 0 && nal.RBSP[0]&0x80 != 0 {
 		d.skipRASL = !d.seenPicture || nal.Type.IsIDR() ||
 			(nal.Type >= NALBlaWLP && nal.Type <= NALBlaNLP)
 		d.seenPicture = true
@@ -196,9 +218,9 @@ func (d *Decoder) Reset() {
 }
 
 // Flush ends the sequence and returns every picture still held back for
-// reordering, in output order. References and POC history are cleared;
-// parameter sets and configured limits are retained. Use Reset instead
-// to discard pending output and parameter sets.
+// reordering, in output order. An incomplete final picture is discarded.
+// References and POC history are cleared; parameter sets and configured limits
+// are retained. Use Reset instead to discard pending output and parameter sets.
 func (d *Decoder) Flush() []*Picture {
 	out := d.finishPicture()
 
@@ -219,11 +241,25 @@ func (d *Decoder) Flush() []*Picture {
 	return out
 }
 
+// pictureComplete checks reconstruction coverage, not just successful parsing
+// of the last slice. A slice may end legally before the picture is complete.
+func (d *Decoder) pictureComplete() bool {
+	return d.ctu != nil && d.ctu.nextCTU ==
+		int(d.ctu.s.picWidthInCtbs)*int(d.ctu.s.picHeightInCtbs)
+}
+
 // finishPicture runs the loop filters over the picture the decoder has been
 // filling, files it in the buffer and applies the additional bumping of
 // C.5.2.3.
 func (d *Decoder) finishPicture() []*Picture {
 	if d.cur == nil {
+		return nil
+	}
+	if !d.pictureComplete() {
+		// Flush cannot report an error. Never turn an incomplete final picture
+		// into output or a reference; older complete pictures may still drain.
+		d.cur.release()
+		d.cur, d.ctu, d.ctuPrev, d.prevSlic = nil, nil, nil, nil
 		return nil
 	}
 
@@ -261,6 +297,9 @@ func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
 
 		s, p = d.ctu.s, d.ctu.p
 	}
+	if !first && d.ctu == nil {
+		return nil, ErrInvalid
+	}
 
 	if n := d.frameSizeLimit; n > 0 &&
 		int(s.picWidthInLumaSamples)*int(s.picHeightInLumaSamples) > n {
@@ -290,9 +329,12 @@ func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
 	var done []*Picture
 
 	if sh.firstSliceSegmentInPic {
-		prior := d.cur != nil
-
-		done = append(done, d.finishPicture()...)
+		if d.cur != nil {
+			// Complete pictures are finished by their final slice. A new first
+			// slice while cur is live therefore abandons an incomplete picture.
+			return nil, ErrInvalid
+		}
+		prior := len(d.dpb) != 0
 
 		d.maxReorder = int(s.maxNumReorderPics)
 		d.maxLatency = int(s.maxLatencyIncrease)
@@ -344,6 +386,8 @@ func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
 
 		d.cur = newPicture(&d.pool, s)
 		d.cur.POC = int(poc)
+		d.cur.Tag = nal.Tag
+		d.curType, d.curTemporalID = nal.Type, nal.TemporalID
 		d.curOut = sh.picOutputFlag
 		d.ctu = newCTUDecoder(d.ctuPrev, s, p, sh, d.cur)
 		d.ctu.threads = d.waveThreads()
@@ -352,7 +396,11 @@ func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
 	}
 
 	if d.cur == nil || d.ctu == nil {
-		return nil, ErrInvalid
+		return done, ErrInvalid
+	}
+	if nal.Type != d.curType || nal.TemporalID != d.curTemporalID ||
+		sh.picOrderCntLsb != d.ctu.sh.picOrderCntLsb || sh.picOutputFlag != d.curOut {
+		return done, ErrInvalid
 	}
 
 	d.ctu.sh = sh
@@ -361,11 +409,18 @@ func (d *Decoder) decodeSlice(nal NALUnit) ([]*Picture, error) {
 	// every slice header, so the lists belong to the slice, not the picture.
 	d.buildRefLists(sh)
 
-	if err := d.ctu.decodeSliceData(nal, sh); err != nil {
-		return nil, err
+	err = d.ctu.decodeSliceData(nal, sh)
+	// CABAC has finished consuming this NAL, even for dependent segments:
+	// only its probability contexts carry over to the next segment.
+	d.ctu.c.data = nil
+	if err == nil && d.pictureComplete() {
+		// All coding-tree blocks have been reconstructed, including every WPP
+		// worker. Filter and store the picture now instead of waiting for a
+		// later NAL to announce the next picture. DPB bumping still controls
+		// which completed pictures are eligible for display.
+		done = append(done, d.finishPicture()...)
 	}
-
-	return done, nil
+	return done, err
 }
 
 func (d *Decoder) ppsForSlice(nal NALUnit) (*pps, bool, error) {
@@ -411,6 +466,11 @@ func (d *ctuDecoder) decodeSliceData(nal NALUnit, sh *sliceHeader) error {
 	sub := 0
 
 	start := int(d.rsToTs[sh.sliceSegmentAddress])
+	// 7.4.2.4.5 orders segments by tile scan. A gap means a slice was lost;
+	// an overlap would reconstruct a block twice with inconsistent predictors.
+	if start != d.nextCTU {
+		return ErrInvalid
+	}
 	tileStart := start == 0 || d.tileID[start] != d.tileID[start-1]
 
 	if err := d.startSubstream(nal, sh, starts, sub, tileStart); err != nil {
@@ -460,6 +520,7 @@ func (d *ctuDecoder) decodeSliceData(nal NALUnit, sh *sliceHeader) error {
 		if err := d.codingTreeUnit(x, y); err != nil {
 			return err
 		}
+		d.nextCTU = ts + 1
 
 		if wpp && rs%w == 1 {
 			d.saved = d.c.state
@@ -498,7 +559,8 @@ func (d *ctuDecoder) decodeSliceData(nal NALUnit, sh *sliceHeader) error {
 		}
 	}
 
-	return nil
+	// The final CTU also carries end_of_slice_segment_flag.
+	return ErrInvalid
 }
 
 // substreamStarts converts the entry point offsets, which count bytes of the
