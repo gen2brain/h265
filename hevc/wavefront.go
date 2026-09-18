@@ -59,6 +59,9 @@ type wave struct {
 	ctx  [][nContexts]uint8
 	err  error
 	bad  bool
+	// end is the actual end of the final segment row, not the progress used
+	// to wake workers. That progress can advance to w after an early end.
+	end int
 }
 
 func newWave(rows, first int) *wave {
@@ -167,6 +170,7 @@ func (d *ctuDecoder) decodeWavefront(nal NALUnit, sh *sliceHeader, starts []int,
 	if v.err != nil {
 		return v.err
 	}
+	d.nextCTU = v.end
 
 	if rows > 1 {
 		d.saved = v.ctx[rows-1]
@@ -230,6 +234,7 @@ func (d *ctuDecoder) decodeWaveRow(nal NALUnit, sh *sliceHeader, starts []int, v
 			if k != len(starts)-1 {
 				return ErrInvalid
 			}
+			v.end = rs + 1
 
 			v.advance(k, w)
 
@@ -245,6 +250,9 @@ func (d *ctuDecoder) decodeWaveRow(nal NALUnit, sh *sliceHeader, starts []int, v
 		}
 	}
 
+	if k == len(starts)-1 {
+		return ErrInvalid
+	}
 	return nil
 }
 

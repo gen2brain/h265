@@ -1,7 +1,8 @@
 package hevc
 
 // Picture is one decoded picture. Planes hold either 8-bit or 16-bit samples
-// depending on the bit depth, with Stride in samples.
+// depending on the bit depth, with Stride in samples. A returned picture and its
+// planes are read-only and remain valid until Release. Do not copy a Picture value.
 type Picture struct {
 	Width, Height int
 
@@ -28,6 +29,10 @@ type Picture struct {
 
 	POC int
 
+	// Tag is copied from the picture's first slice NALUnit. It follows the
+	// picture through output reordering; the decoder does not interpret it.
+	Tag uint64
+
 	Y, Cb, Cr       []uint8
 	Y16, Cb16, Cr16 []uint16
 
@@ -37,15 +42,27 @@ type Picture struct {
 	Col  []colMotion
 	ColW int
 
-	pool *picPool
-	refs int32
+	pool           *picPool
+	poolGeneration uint64
+	refs           int32
+	released       bool
 }
 
 // Release hands the picture's memory back to the decoder that produced it, to
 // be reused by a later picture. It is optional: one that is never released is
 // collected as any other value would be. Reading the planes afterwards is a
 // mistake; releasing twice is not, and does nothing.
+//
+// Release must not run concurrently with decoder operations or releases of
+// other pictures from the same decoder.
 func (p *Picture) Release() {
+	if p == nil || p.released {
+		return
+	}
+
+	// The caller owns one reference, independently of any reference the decoder
+	// keeps for prediction. A repeated Release must not consume that second one.
+	p.released = true
 	p.release()
 }
 
@@ -82,7 +99,9 @@ func (p *Picture) release() {
 	p.Y, p.Cb, p.Cr = nil, nil, nil
 	p.Y16, p.Cb16, p.Cr16 = nil, nil, nil
 
-	pool.put(g, b)
+	if pool != nil && p.poolGeneration == pool.generation {
+		pool.put(g, b)
+	}
 }
 
 // picBufs is the sample memory of one picture, the only part worth recycling.
@@ -110,14 +129,27 @@ func (p *Picture) geom() picGeom {
 	}
 }
 
-// picPoolDepth bounds how many pictures of one shape are kept, so a sequence
-// that changes resolution cannot make the pool grow without end.
+// picPoolDepth bounds the total cached pictures across all shapes. Limiting
+// each shape separately would still grow without bound as dimensions change.
 const picPoolDepth = 8
 
 // picPool holds the pictures nobody references any more. A decoder keeps one,
 // so everything it recycles came from the same sequence.
 type picPool struct {
-	free map[picGeom][]picBufs
+	free       []cachedPicture
+	generation uint64
+}
+
+type cachedPicture struct {
+	geom picGeom
+	bufs picBufs
+}
+
+// reset discards cached storage and prevents outstanding caller pictures from
+// returning old-sequence buffers to the new pool when they are released later.
+func (pl *picPool) reset() {
+	pl.free = nil
+	pl.generation++
 }
 
 func (pl *picPool) get(g picGeom) (picBufs, bool) {
@@ -125,16 +157,20 @@ func (pl *picPool) get(g picGeom) (picBufs, bool) {
 		return picBufs{}, false
 	}
 
-	free := pl.free[g]
-	if len(free) == 0 {
-		return picBufs{}, false
+	// Steady-state decoding usually reuses the buffer just returned, so search
+	// from the end. Eight entries need neither a map nor per-shape allocations.
+	for i := len(pl.free) - 1; i >= 0; i-- {
+		if pl.free[i].geom != g {
+			continue
+		}
+		b := pl.free[i].bufs
+		last := len(pl.free) - 1
+		pl.free[i] = pl.free[last]
+		pl.free[last] = cachedPicture{}
+		pl.free = pl.free[:last]
+		return b, true
 	}
-
-	b := free[len(free)-1]
-	free[len(free)-1] = picBufs{}
-	pl.free[g] = free[:len(free)-1]
-
-	return b, true
+	return picBufs{}, false
 }
 
 func (pl *picPool) put(g picGeom, b picBufs) {
@@ -142,13 +178,18 @@ func (pl *picPool) put(g picGeom, b picBufs) {
 		return
 	}
 
-	if pl.free == nil {
-		pl.free = make(map[picGeom][]picBufs)
+	if len(pl.free) == picPoolDepth {
+		// Make room for the current shape instead of leaving the cache full of
+		// obsolete resolutions. With one shape, keeping any eight is sufficient.
+		for i := range pl.free {
+			if pl.free[i].geom != g {
+				pl.free[i] = cachedPicture{g, b}
+				return
+			}
+		}
+		return
 	}
-
-	if len(pl.free[g]) < picPoolDepth {
-		pl.free[g] = append(pl.free[g], b)
-	}
+	pl.free = append(pl.free, cachedPicture{g, b})
 }
 
 func newPicture(pool *picPool, s *sps) *Picture {
@@ -163,6 +204,12 @@ func newPicture(pool *picPool, s *sps) *Picture {
 		ColorTransfer:  s.transferChar,
 		ColorMatrix:    s.matrixCoeffs,
 		FullRange:      s.fullRange,
+
+		pool: pool,
+		refs: 1,
+	}
+	if pool != nil {
+		p.poolGeneration = pool.generation
 	}
 
 	p.CropX = int(s.confWinLeft) * s.subWidthC
@@ -203,12 +250,8 @@ func newPicture(pool *picPool, s *sps) *Picture {
 		clear(p.Cb16)
 		clear(p.Cr16)
 
-		p.pool, p.refs = pool, 1
-
 		return p
 	}
-
-	p.pool, p.refs = pool, 1
 
 	p.Col = make([]colMotion, g.colLen)
 

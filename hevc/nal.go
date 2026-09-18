@@ -62,6 +62,11 @@ type NALUnit struct {
 	RBSP       []byte
 
 	EPB []uint32
+
+	// Tag is optional application metadata, such as a timestamp or frame ID.
+	// DecodeNAL copies the first slice's Tag to its Picture; tags on later
+	// slices and non-VCL units are ignored. It is not encoded in the bitstream.
+	Tag uint64
 }
 
 // ParseNAL parses a single NAL unit with a two-byte header and no framing.

@@ -2,6 +2,102 @@ package hevc
 
 import "testing"
 
+// A displayed reference picture remains in the DPB after its caller releases
+// it. Releasing that same output twice must not recycle its prediction samples.
+func TestPictureReleaseKeepsDecoderReference(t *testing.T) {
+	d := &Decoder{}
+	s := poolTestSPS(64)
+	p := newPicture(&d.pool, s)
+	p.POC = 7
+	p.Y[0] = 42
+	samples := &p.Y[0]
+	d.dpb = []dpbPicture{{pic: p, ref: true, output: true}}
+
+	out := d.dpbBump()
+	out.Release()
+	out.Release()
+	if got := d.dpbFind(7); got == nil || len(got.Y) == 0 || got.Y[0] != 42 {
+		t.Fatal("repeated output release destroyed a retained reference")
+	}
+
+	d.dpb[0].ref = false
+	d.dpbRemoveUnused()
+	if p.Y != nil {
+		t.Fatal("picture still owns samples after both owners released it")
+	}
+
+	reused := newPicture(&d.pool, s)
+	defer reused.release()
+	if &reused.Y[0] != samples || reused.Y[0] != 0 {
+		t.Fatal("released storage was not recycled and cleared")
+	}
+}
+
+func TestPicturePoolBoundsParameterChanges(t *testing.T) {
+	var pool picPool
+	var last *uint8
+	var s *sps
+	for i := range 4 * picPoolDepth {
+		s = poolTestSPS(uint32(64 + 16*i))
+		p := newPicture(&pool, s)
+		last = &p.Y[0]
+		p.release()
+	}
+
+	if len(pool.free) > picPoolDepth {
+		t.Fatalf("cached pictures = %d, limit %d", len(pool.free), picPoolDepth)
+	}
+
+	// Old sizes must not fill the bounded cache forever: the newest size should
+	// still reuse its buffers on the next picture of that sequence.
+	p := newPicture(&pool, s)
+	defer p.release()
+	if &p.Y[0] != last {
+		t.Fatal("obsolete geometries prevented caching the current size")
+	}
+	for _, cached := range pool.free {
+		if cached.geom == p.geom() {
+			t.Fatal("consumed buffers still cached")
+		}
+	}
+}
+
+func TestPicturePoolResetKeepsCallerOutput(t *testing.T) {
+	var pool picPool
+	s := poolTestSPS(64)
+	old := newPicture(&pool, s)
+	old.acquire() // Transfer an output reference to the caller before reset.
+	old.Y[0] = 42
+	old.release() // Reset abandons the decoder's reference, not the caller's.
+	pool.reset()
+
+	fresh := newPicture(&pool, s)
+	if old.Y[0] != 42 || &old.Y[0] == &fresh.Y[0] {
+		t.Fatal("pool reset invalidated an outstanding output")
+	}
+	old.Release()
+	if len(pool.free) != 0 {
+		t.Fatal("old output repopulated the reset pool")
+	}
+
+	fresh.Release()
+	if len(pool.free) != 1 {
+		t.Fatal("new output did not recycle into the reset pool")
+	}
+}
+
+func poolTestSPS(width uint32) *sps {
+	return &sps{
+		picWidthInLumaSamples:  width,
+		picHeightInLumaSamples: 64,
+		chromaFormatIDC:        1,
+		subWidthC:              2,
+		subHeightC:             2,
+		bitDepthLuma:           8,
+		bitDepthChroma:         8,
+	}
+}
+
 func TestDerivePOC(t *testing.T) {
 	const log2Max = 4
 

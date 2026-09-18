@@ -116,6 +116,9 @@ type ctuDecoder struct {
 	ctbSlice       []int32
 	slices         []*sliceHeader
 	depSliceAddrRs int
+	// nextCTU is the first block not reconstructed yet, in tile-scan order.
+	// It distinguishes a complete picture from a successfully decoded prefix.
+	nextCTU int
 
 	coef    [32 * 32]int32
 	scratch transformScratch
