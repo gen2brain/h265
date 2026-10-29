@@ -2359,4 +2359,40 @@ func TestColorInfoPrecedence(t *testing.T) {
 
 		same(t, f.colorInfo(it, pic), ColorInfo{Primaries: 9, Transfer: 16, Matrix: 9})
 	})
+
+	t.Run("grid takes its tiles' colr", func(t *testing.T) {
+		grid := &item{id: 1, typ: "grid"}
+		tile := &item{id: 2, typ: "hvc1", props: []itemProp{{idx: 0}, {idx: 1}}}
+
+		f := &file{meta: &metaBox{
+			primary: 1,
+			items:   map[uint32]*item{1: grid, 2: tile},
+			order:   []uint32{1, 2},
+			refs:    []itemRef{{typ: "dimg", from: 1, to: []uint32{2, 2, 2, 2}}},
+			props: []property{
+				{typ: "colr", colr: &colorInfo{hasNCLX: true, primaries: 9, transfer: 16, matrix: 9}},
+				{typ: "colr", colr: &colorInfo{icc: []byte("icc")}},
+			},
+		}}
+
+		got := f.colorInfo(grid, pic)
+		same(t, got, ColorInfo{Primaries: 9, Transfer: 16, Matrix: 9})
+
+		if string(got.ICCP) != "icc" {
+			t.Errorf("ICC = %q", got.ICCP)
+		}
+
+		grid.props = []itemProp{{idx: 1}}
+		got = f.colorInfo(grid, pic)
+		same(t, got, ColorInfo{Primaries: 9, Transfer: 16, Matrix: 9})
+
+		grid.props = []itemProp{{idx: 0}}
+		tile.props = []itemProp{{idx: 1}}
+		got = f.colorInfo(grid, pic)
+		same(t, got, ColorInfo{Primaries: 9, Transfer: 16, Matrix: 9})
+
+		if string(got.ICCP) != "icc" {
+			t.Errorf("ICC from the tile = %q", got.ICCP)
+		}
+	})
 }

@@ -34,8 +34,48 @@ func (f *file) colorInfo(it *item, pic *hevc.Picture) ColorInfo {
 		return ci
 	}
 
-	// 23008-12 lets a picture carry an nclx description and an ICC profile at
-	// once, in a colr box each, so both are read rather than the first.
+	nclx, icc := f.colr(it)
+
+	// A grid without a description of its own takes its first tile's, as
+	// libheif reads it.
+	if it.typ == "grid" && (nclx == nil || icc == nil) {
+		if tiles := f.meta.refsTo("dimg", it.id); len(tiles) > 0 {
+			tileNCLX, tileICC := f.colr(f.meta.items[tiles[0]])
+
+			if nclx == nil {
+				nclx = tileNCLX
+			}
+
+			if icc == nil {
+				icc = tileICC
+			}
+		}
+	}
+
+	if nclx != nil {
+		ci.Primaries = nclx.primaries
+		ci.Transfer = nclx.transfer
+		ci.Matrix = nclx.matrix
+		ci.FullRange = nclx.fullRange
+	}
+
+	ci.ICCP = icc
+
+	return ci
+}
+
+// colr reads an item's color boxes. 23008-12 lets a picture carry an nclx
+// description and an ICC profile at once, in a colr box each.
+func (f *file) colr(it *item) (*colorInfo, []byte) {
+	if it == nil {
+		return nil, nil
+	}
+
+	var (
+		nclx *colorInfo
+		icc  []byte
+	)
+
 	for _, ip := range it.props {
 		if ip.idx >= len(f.meta.props) {
 			continue
@@ -47,18 +87,15 @@ func (f *file) colorInfo(it *item, pic *hevc.Picture) ColorInfo {
 		}
 
 		if c.hasNCLX {
-			ci.Primaries = c.primaries
-			ci.Transfer = c.transfer
-			ci.Matrix = c.matrix
-			ci.FullRange = c.fullRange
+			nclx = c
 		}
 
 		if c.icc != nil {
-			ci.ICCP = c.icc
+			icc = c.icc
 		}
 	}
 
-	return ci
+	return nclx, icc
 }
 
 // aliasesPicture reports whether img shares memory with the decoded planes.
