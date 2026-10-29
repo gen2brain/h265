@@ -232,6 +232,13 @@ func newGrid(first *hevc.Picture, g gridInfo) *hevc.Picture {
 		ChromaFormat: first.ChromaFormat,
 		BitDepth:     first.BitDepth,
 		StrideY:      g.w,
+
+		// The tiles' color description, which is the grid's unless a colr
+		// box replaces it.
+		ColorPrimaries: first.ColorPrimaries,
+		ColorTransfer:  first.ColorTransfer,
+		ColorMatrix:    first.ColorMatrix,
+		FullRange:      first.FullRange,
 	}
 
 	if first.ChromaFormat != 0 {

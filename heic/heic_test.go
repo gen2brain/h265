@@ -2296,6 +2296,25 @@ func TestConformanceCorpus(t *testing.T) {
 	}
 }
 
+// TestGridColor checks that a grid keeps its tiles' color description. Files
+// whose only colr box is an ICC profile, as iPhones write, depend on it: their
+// full-range BT.601 tiles were otherwise converted as limited-range GBR.
+func TestGridColor(t *testing.T) {
+	for _, cf := range []int{1, 3} {
+		tile := &hevc.Picture{
+			Width: 64, Height: 64, ChromaFormat: cf, BitDepth: 8,
+			ColorPrimaries: 12, ColorTransfer: 1, ColorMatrix: 6, FullRange: true,
+		}
+
+		g := newGrid(tile, gridInfo{rows: 2, cols: 2, w: 100, h: 100})
+
+		if g.ColorPrimaries != 12 || g.ColorTransfer != 1 || g.ColorMatrix != 6 || !g.FullRange {
+			t.Errorf("chroma format %d: grid color = %d/%d/%d, full range %v; want 12/1/6, full range",
+				cf, g.ColorPrimaries, g.ColorTransfer, g.ColorMatrix, g.FullRange)
+		}
+	}
+}
+
 // TestColorInfoPrecedence holds the rule of ISO/IEC 23008-12: the sequence
 // declares a color description in its video usability information, and a colr
 // box replaces it whole. An animated HEIC often carries no colr at all, which
