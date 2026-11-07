@@ -577,11 +577,12 @@ func (f *file) decodeItemImage(it *item, o Options) (image.Image, ColorInfo, err
 
 	var alpha *hevc.Picture
 
-	// A grid carries no alpha of its own; its tiles do.
-	if it.typ == "grid" {
-		alpha, err = f.gridAlpha(it)
-	} else if a := f.alphaOf(it.id); a != nil {
+	// A grid's alpha is an auxiliary image of the grid itself, itself often a
+	// grid, as Apple writes it, or else the auxiliary images of its tiles.
+	if a := f.alphaOf(it.id); a != nil {
 		alpha, err = f.decodeImage(a)
+	} else if it.typ == "grid" {
+		alpha, err = f.gridAlpha(it)
 	}
 
 	if err != nil {

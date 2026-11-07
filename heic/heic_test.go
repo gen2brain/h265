@@ -2396,3 +2396,38 @@ func TestColorInfoPrecedence(t *testing.T) {
 		}
 	})
 }
+
+// TestGridAlphaOfGrid decodes the alpha of a grid when it is an auxiliary
+// image of the grid itself rather than of each tile. That is how macOS writes
+// it: testdata/grid_alpha.heic is a synthetic 1100x700 image saved by sips,
+// whose alpha is a grid of its own linked to the color grid by auxl. Its alpha
+// is opaque inside an ellipse, transparent outside it, and half transparent in
+// the first 40 columns.
+func TestGridAlphaOfGrid(t *testing.T) {
+	img, err := Decode(bytes.NewReader(mustRead(t, "testdata/grid_alpha.heic")))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n, ok := img.(*image.NRGBA)
+	if !ok {
+		t.Fatalf("got %T, want *image.NRGBA", img)
+	}
+
+	if n.Opaque() {
+		t.Fatal("the grid's alpha was dropped")
+	}
+
+	for _, c := range []struct {
+		x, y   int
+		lo, hi uint8
+	}{
+		{550, 350, 250, 255}, // inside the ellipse
+		{150, 20, 0, 5},      // outside it
+		{10, 350, 115, 140},  // the half-transparent band
+	} {
+		if a := n.NRGBAAt(c.x, c.y).A; a < c.lo || a > c.hi {
+			t.Errorf("alpha at %d,%d = %d, want %d to %d", c.x, c.y, a, c.lo, c.hi)
+		}
+	}
+}
