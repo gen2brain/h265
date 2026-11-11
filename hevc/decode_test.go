@@ -14,6 +14,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -634,7 +635,7 @@ func TestEncodeBitDepth(t *testing.T) {
 							}
 
 							checkDeepExternal(t, nals, want[0], width, height,
-								depth, qp, chroma == ChromaMono)
+								depth, qp, chroma == ChromaMono, lossless)
 						})
 					}
 				}
@@ -653,15 +654,25 @@ func cropDeep(src []uint16, stride, width, height int) []uint16 {
 	return out
 }
 
+// ffmpegMajor is the major version of the ffmpeg on the path, zero when none.
+var ffmpegMajor = sync.OnceValue(func() int {
+	out, err := exec.Command("ffmpeg", "-version").Output()
+	if err != nil {
+		return 0
+	}
+
+	var major int
+
+	fmt.Sscanf(string(out), "ffmpeg version %d", &major)
+
+	return major
+})
+
 // checkDeepExternal holds a deep stream to libde265 and ffmpeg, which write
-// sixteen bit samples little endian whatever the coded depth is.
-//
-// Two operating points are left out, each to the tool that reads it. libde265
-// aborts on a monochrome picture above eight bits whose conformance window
-// takes columns off. ffmpeg hands back a flat picture at twelve bits once Qp'
-// passes 73, where libde265 and this decoder agree sample for sample.
+// sixteen bit samples little endian whatever the coded depth is, leaving out
+// the operating points each tool gets wrong.
 func checkDeepExternal(t *testing.T, nals []NALUnit, luma []uint16,
-	width, height, depth, qp int, mono bool,
+	width, height, depth, qp int, mono, lossless bool,
 ) {
 	t.Helper()
 
@@ -691,7 +702,7 @@ func checkDeepExternal(t *testing.T, nals []NALUnit, luma []uint16,
 			continue
 		}
 
-		if name == "ffmpeg" && qp+6*(depth-8) > 73 {
+		if name == "ffmpeg" && (qp+6*(depth-8) > 73 || mono && lossless && ffmpegMajor() < 8) {
 			continue
 		}
 
