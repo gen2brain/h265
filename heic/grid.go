@@ -164,8 +164,10 @@ func (f *file) decodeTiles(g gridInfo, tiles []uint32) (*hevc.Picture, error) {
 
 		defer p.Release()
 
+		// 23008-12 6.6.2.3.1 has the tiles cover the canvas, and MIAF
+		// 7.3.11.4.2 has the last row and column overlap it.
 		tw, th = p.CropW, p.CropH
-		if tw*g.cols < g.w || th*g.rows < g.h {
+		if tw*g.cols < g.w || th*g.rows < g.h || (g.cols-1)*tw >= g.w || (g.rows-1)*th >= g.h {
 			setErr(ErrInvalid)
 
 			return

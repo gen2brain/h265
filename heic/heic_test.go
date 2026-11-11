@@ -22,6 +22,7 @@ import (
 	"sync"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/gen2brain/h265/hevc"
 )
@@ -2397,12 +2398,95 @@ func TestColorInfoPrecedence(t *testing.T) {
 	})
 }
 
-// TestGridAlphaOfGrid decodes the alpha of a grid when it is an auxiliary
-// image of the grid itself rather than of each tile. That is how macOS writes
-// it: testdata/grid_alpha.heic is a synthetic 1100x700 image saved by sips,
-// whose alpha is a grid of its own linked to the color grid by auxl. Its alpha
-// is opaque inside an ellipse, transparent outside it, and half transparent in
-// the first 40 columns.
+// gridFile writes a grid whose rows by cols references all name one tile item
+// of the given size, over a canvas of w by h.
+func gridFile(t *testing.T, tile, rows, cols, w, h int) []byte {
+	t.Helper()
+
+	enc, err := hevc.NewEncoder(hevc.EncoderOptions{Width: tile, Height: tile, QP: 10, Chroma: hevc.ChromaMono})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nals, err := enc.Encode(hevc.Frame{Y: bytes.Repeat([]byte{0xff}, tile*tile), StrideY: tile})
+	if err != nil || len(nals) != 4 {
+		t.Fatalf("encode: %v, %d NAL units", err, len(nals))
+	}
+
+	config, err := marshalHvcC(nals[:3])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	slice := hevc.MarshalNAL(nals[3])
+	sample := append(u32(uint32(len(slice))), slice...)
+
+	grid := concat([]byte{0, 1, byte(rows - 1), byte(cols - 1)}, u32(uint32(w)), u32(uint32(h)))
+
+	refs := concat(u16(2), u16(uint16(rows*cols)))
+	for range rows * cols {
+		refs = append(refs, u16(1)...)
+	}
+
+	meta := func(base uint32) []byte {
+		loc := func(id uint16, off, n uint32) []byte {
+			return concat(u16(id), u16(0), u16(1), u32(off), u32(n))
+		}
+
+		return fullBox("meta", 0, 0, concat(
+			fullBox("hdlr", 0, 0, concat(u32(0), []byte("pict"), make([]byte, 13))),
+			fullBox("pitm", 0, 0, u16(2)),
+			fullBox("iinf", 0, 0, concat(u16(2),
+				fullBox("infe", 2, 0, concat(u16(1), u16(0), []byte("hvc1\x00"))),
+				fullBox("infe", 2, 0, concat(u16(2), u16(0), []byte("grid\x00"))))),
+			fullBox("iloc", 0, 0, concat([]byte{0x44, 0x00}, u16(2),
+				loc(1, base, uint32(len(sample))), loc(2, base+uint32(len(sample)), uint32(len(grid))))),
+			fullBox("iref", 0, 0, box("dimg", refs)),
+			box("iprp", concat(
+				box("ipco", concat(
+					fullBox("ispe", 0, 0, concat(u32(uint32(tile)), u32(uint32(tile)))),
+					box("hvcC", config),
+					fullBox("ispe", 0, 0, concat(u32(uint32(w)), u32(uint32(h)))))),
+				fullBox("ipma", 0, 0, concat(u32(2), u16(1), []byte{2, 1, 0x82}, u16(2), []byte{1, 3})))),
+		))
+	}
+
+	ftyp := box("ftyp", []byte("heic\x00\x00\x00\x00mif1heic"))
+	base := uint32(len(ftyp) + len(meta(0)) + 8)
+
+	return concat(ftyp, meta(base), box("mdat", concat(sample, grid)))
+}
+
+func TestGridTileBounds(t *testing.T) {
+	img, err := Decode(bytes.NewReader(gridFile(t, 64, 2, 2, 100, 100)))
+	if err != nil || img.Bounds().Dx() != 100 || img.Bounds().Dy() != 100 {
+		t.Fatalf("a 2x2 grid of 64 over 100x100: %v, %v", img, err)
+	}
+
+	for _, c := range []struct {
+		tile, rows, cols, w, h int
+	}{
+		{64, 2, 2, 129, 100},
+		{64, 2, 2, 100, 129},
+		{64, 3, 2, 100, 100},
+		{64, 2, 3, 100, 100},
+		{512, 64, 64, 64, 64},
+	} {
+		start := time.Now()
+
+		_, err := Decode(bytes.NewReader(gridFile(t, c.tile, c.rows, c.cols, c.w, c.h)), Options{Threads: 1})
+		if !errors.Is(err, ErrInvalid) {
+			t.Errorf("%dx%d tiles of %d over %dx%d: %v", c.rows, c.cols, c.tile, c.w, c.h, err)
+		}
+
+		if d := time.Since(start); d > time.Second {
+			t.Errorf("%dx%d tiles of %d over %dx%d took %v", c.rows, c.cols, c.tile, c.w, c.h, d)
+		}
+	}
+}
+
+// TestGridAlphaOfGrid decodes an alpha that is an auxiliary image of the grid
+// itself, as macOS writes it: an ellipse over a half transparent left band.
 func TestGridAlphaOfGrid(t *testing.T) {
 	img, err := Decode(bytes.NewReader(mustRead(t, "testdata/grid_alpha.heic")))
 	if err != nil {
