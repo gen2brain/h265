@@ -131,13 +131,8 @@ type Options struct {
 	// and the wavefront rows within each. Zero means GOMAXPROCS; one decodes
 	// serially.
 	Threads int
-	// AutoCorrect trusts the bitstream's video_full_range_flag over a colr
-	// box that declares limited range, as libheif's --auto-correct does.
-	// Sony cameras write HIF whose nclx says limited range while the
-	// samples, and the SPS VUI, are full range; read as limited, they come
-	// out with crushed blacks and clipped highlights. Only that one
-	// mismatch is corrected, and ColorInfo.FullRange reports the range
-	// used.
+	// AutoCorrect keeps the bitstream's full range over a colr box that says
+	// limited, as libheif's --auto-correct does; ColorInfo.FullRange reports it.
 	AutoCorrect bool
 }
 

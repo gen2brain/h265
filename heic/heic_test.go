@@ -2385,6 +2385,41 @@ func TestColorInfoPrecedence(t *testing.T) {
 		same(t, f.colorInfo(it, nil), ColorInfo{Primaries: 1, Transfer: 13, Matrix: 6})
 	})
 
+	t.Run("end to end", func(t *testing.T) {
+		data := mustRead(t, "testdata/thumb.heic")
+
+		i := bytes.Index(data, []byte("colrnclx"))
+		if i < 0 || data[i+14] != 0x80 {
+			t.Fatal("thumb.heic has no full range nclx to patch")
+		}
+
+		patched := bytes.Clone(data)
+		patched[i+14] = 0
+
+		want, ci, err := DecodeColor(bytes.NewReader(data))
+		if err != nil || !ci.FullRange {
+			t.Fatalf("original: %v, full range %v", err, ci.FullRange)
+		}
+
+		limited, ci, err := DecodeColor(bytes.NewReader(patched))
+		if err != nil || ci.FullRange {
+			t.Fatalf("patched: %v, full range %v", err, ci.FullRange)
+		}
+
+		if bytes.Equal(limited.(*image.NRGBA).Pix, want.(*image.NRGBA).Pix) {
+			t.Fatal("a limited colr changed nothing")
+		}
+
+		got, ci, err := DecodeColor(bytes.NewReader(patched), Options{AutoCorrect: true})
+		if err != nil || !ci.FullRange {
+			t.Fatalf("patched with AutoCorrect: %v, full range %v", err, ci.FullRange)
+		}
+
+		if !bytes.Equal(got.(*image.NRGBA).Pix, want.(*image.NRGBA).Pix) {
+			t.Fatal("AutoCorrect did not restore the bitstream's range")
+		}
+	})
+
 	t.Run("grid takes its tiles' colr", func(t *testing.T) {
 		grid := &item{id: 1, typ: "grid"}
 		tile := &item{id: 2, typ: "hvc1", props: []itemProp{{idx: 0}, {idx: 1}}}
