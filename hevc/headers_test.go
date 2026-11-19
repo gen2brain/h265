@@ -565,6 +565,25 @@ func TestWriteParameterSets(t *testing.T) {
 		t.Fatalf("SPS = %+v", s)
 	}
 
+	if s.colourPrimaries != 2 || s.transferChar != 2 || s.matrixCoeffs != 2 || s.fullRange {
+		t.Fatalf("SPS without a VUI describes color as %d/%d/%d full %v",
+			s.colourPrimaries, s.transferChar, s.matrixCoeffs, s.fullRange)
+	}
+
+	h.color = ColorDescription{Primaries: 1, Transfer: 13, Matrix: 6, FullRange: true}
+
+	s, err = parseSPS(h.sps())
+	if err != nil {
+		t.Fatalf("SPS with a VUI: %v", err)
+	}
+
+	if s.colourPrimaries != 1 || s.transferChar != 13 || s.matrixCoeffs != 6 || !s.fullRange {
+		t.Fatalf("VUI read back as %d/%d/%d full %v",
+			s.colourPrimaries, s.transferChar, s.matrixCoeffs, s.fullRange)
+	}
+
+	h.color = ColorDescription{}
+
 	// ISO/IEC 14496-15 has a container repeat these twelve bytes, so they have
 	// to be the ones the sequence parameter set itself carries.
 	ptl, ok := ProfileTierLevel(h.sps())

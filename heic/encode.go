@@ -161,6 +161,8 @@ func Encode(w io.Writer, img image.Image, opts ...EncodeOptions) error {
 		stored: stored, sw: sw, sh: sh}
 
 	base := hevc.EncoderOptions{Chroma: o.Chroma, BitDepth: o.BitDepth,
+		Color: hevc.ColorDescription{Primaries: encPrimaries, Transfer: encTransfer,
+			Matrix: encMatrix, FullRange: true},
 		QP: qp, Lossless: o.Lossless, SAO: o.SAO}
 
 	if err := f.picture(&src, base, tile); err != nil {

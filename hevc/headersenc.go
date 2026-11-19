@@ -19,6 +19,7 @@ type encoderHeaders struct {
 	ctbLog2               uint8
 	maxTrHierIntra        uint32
 	wavefront             bool
+	color                 ColorDescription
 }
 
 // parameterSets is the video, sequence and picture parameter sets a slice
@@ -158,11 +159,36 @@ func (h encoderHeaders) sps() []byte {
 	w.bit(0)
 	w.bit(0)
 	w.bit(0)
-	w.bit(0)
+	if h.color != (ColorDescription{}) {
+		w.bit(1)
+		h.vui(&w)
+	} else {
+		w.bit(0)
+	}
 	w.bit(0)
 	w.rbspTrailingBits()
 
 	return w.bytes()
+}
+
+// vui is E.2.1 with only video_signal_type present.
+func (h encoderHeaders) vui(w *putBits) {
+	w.bit(0)
+	w.bit(0)
+	w.bit(1)
+	w.bits(5, 3)
+	w.bit(boolToBit(h.color.FullRange))
+	w.bit(1)
+	w.bits(uint64(h.color.Primaries), 8)
+	w.bits(uint64(h.color.Transfer), 8)
+	w.bits(uint64(h.color.Matrix), 8)
+	w.bit(0)
+	w.bit(0)
+	w.bit(0)
+	w.bit(0)
+	w.bit(0)
+	w.bit(0)
+	w.bit(0)
 }
 
 func (h encoderHeaders) pps() []byte {

@@ -78,6 +78,16 @@ type EncoderOptions struct {
 	// block. It codes the picture twice, for about 2.2x the time, 3.5% of luma
 	// bitrate and half a decibel of chroma.
 	SAO bool
+	// Color is written in the video usability information of the sequence
+	// parameter set. The zero value writes none.
+	Color ColorDescription
+}
+
+// ColorDescription is the color description of E.2.1, as the code points of
+// ISO/IEC 23091-2 that [Picture] reports.
+type ColorDescription struct {
+	Primaries, Transfer, Matrix uint16
+	FullRange                   bool
 }
 
 // Encoder writes self-contained intra IDR access units. It holds the working
@@ -92,6 +102,7 @@ type Encoder struct {
 	subW, subH    int
 	bitDepth      int
 	sao           bool
+	color         ColorDescription
 
 	intra    intraEncoder[uint8]
 	deep     *intraEncoder[uint16]
@@ -136,9 +147,13 @@ func NewEncoder(opts EncoderOptions) (*Encoder, error) {
 		return nil, ErrInvalidEncodeInput
 	}
 
+	if c := opts.Color; c.Primaries > 255 || c.Transfer > 255 || c.Matrix > 255 {
+		return nil, ErrInvalidEncodeInput
+	}
+
 	return &Encoder{width: opts.Width, height: opts.Height, qp: opts.QP,
 		lossless: opts.Lossless, chroma: opts.Chroma, subW: sw, subH: sh,
-		bitDepth: opts.BitDepth, sao: opts.SAO}, nil
+		bitDepth: opts.BitDepth, sao: opts.SAO, color: opts.Color}, nil
 }
 
 // Encode codes one frame as a complete access unit: a video, a sequence and a
@@ -200,7 +215,7 @@ func encodePicture[P pixel](e *Encoder, enc *intraEncoder[P], src [3][]P,
 		h := encoderHeaders{
 			width: cw, height: ch, cropRight: cw - e.width, cropBottom: ch - e.height,
 			chromaFormat: e.chroma.idc(), subWidthC: sw, subHeightC: sh,
-			bitDepth: e.bitDepth,
+			bitDepth: e.bitDepth, color: e.color,
 			levelIDC: pcmLevelIDC(cw * ch), pcm: true,
 		}
 
@@ -209,6 +224,7 @@ func encodePicture[P pixel](e *Encoder, enc *intraEncoder[P], src [3][]P,
 	}
 
 	enc.bitDepth = e.bitDepth
+	enc.color = e.color
 	enc.wantSAO = e.sao
 	enc.threads = e.waveThreads()
 

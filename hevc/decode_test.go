@@ -2954,3 +2954,60 @@ func TestPicturePoolBounded(t *testing.T) {
 		t.Fatal("the newest shape was not recycled")
 	}
 }
+
+func TestEncodeColorDescription(t *testing.T) {
+	const width, height = 16, 16
+
+	y := make([]byte, width*height)
+	cb := make([]byte, width*height/4)
+	cr := make([]byte, width*height/4)
+
+	for _, lossless := range []bool{true, false} {
+		for _, color := range []ColorDescription{{}, {Primaries: 9, Transfer: 16, Matrix: 9},
+			{Primaries: 1, Transfer: 13, Matrix: 6, FullRange: true}} {
+			enc, err := NewEncoder(EncoderOptions{Width: width, Height: height, QP: 30,
+				Lossless: lossless, Color: color})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			nals, err := enc.Encode(Frame{Y: y, Cb: cb, Cr: cr, StrideY: width, StrideC: width / 2})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var d Decoder
+			var pics []*Picture
+
+			for _, nal := range nals {
+				out, err := d.DecodeNAL(nal)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				pics = append(pics, out...)
+			}
+
+			if pics = append(pics, d.Flush()...); len(pics) != 1 {
+				t.Fatalf("pictures = %d", len(pics))
+			}
+
+			want := color
+			if color == (ColorDescription{}) {
+				want = ColorDescription{Primaries: 2, Transfer: 2, Matrix: 2}
+			}
+
+			p := pics[0]
+			got := ColorDescription{p.ColorPrimaries, p.ColorTransfer, p.ColorMatrix, p.FullRange}
+
+			if got != want {
+				t.Fatalf("lossless %v, color %+v: decoded %+v", lossless, color, got)
+			}
+		}
+	}
+
+	if _, err := NewEncoder(EncoderOptions{Width: width, Height: height,
+		Color: ColorDescription{Primaries: 256}}); !errors.Is(err, ErrInvalidEncodeInput) {
+		t.Fatalf("a code point beyond eight bits: %v", err)
+	}
+}

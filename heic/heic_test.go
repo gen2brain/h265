@@ -2574,3 +2574,38 @@ func TestGridAlphaOfGrid(t *testing.T) {
 		}
 	}
 }
+
+func TestEncodeVUI(t *testing.T) {
+	src := image.NewNRGBA(image.Rect(0, 0, 32, 32))
+	for i := range src.Pix {
+		src.Pix[i] = byte(i * 7)
+	}
+
+	for _, opts := range []EncodeOptions{{}, {Lossless: true}, {BitDepth: 10, Chroma: Chroma444}} {
+		b, err := encodeToBytes(src, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		f, err := parse(memSource(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		it, err := f.primary()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		pic, err := f.decodeImage(it)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if pic.ColorPrimaries != encPrimaries || pic.ColorTransfer != encTransfer ||
+			pic.ColorMatrix != encMatrix || !pic.FullRange {
+			t.Fatalf("%+v: the bitstream describes color as %d/%d/%d full %v", opts,
+				pic.ColorPrimaries, pic.ColorTransfer, pic.ColorMatrix, pic.FullRange)
+		}
+	}
+}

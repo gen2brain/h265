@@ -19,7 +19,7 @@ func (e *intraEncoder[P]) nals(width, height int, rbsp []byte) []NALUnit {
 		width: cw, height: ch, cropRight: cw - width, cropBottom: ch - height,
 		chromaFormat: e.s.chromaFormatIDC,
 		subWidthC:    int(e.s.subWidthC), subHeightC: int(e.s.subHeightC),
-		bitDepth: e.bitDepth,
+		bitDepth: e.bitDepth, color: e.color,
 		levelIDC: pcmLevelIDC(cw * ch),
 		ctbLog2:  6, maxTrHierIntra: 2,
 		wavefront: e.wavefront, sao: e.saoOn,
@@ -39,6 +39,7 @@ type intraEncoder[P pixel] struct {
 	qp, qpY, qpC int
 	qpDeblockC   int
 	bitDepth     int
+	color        ColorDescription
 	lambda       int64
 	// lambdaBase is the same weight at eight bits, which is what rdoq weighs by.
 	lambdaBase int64
