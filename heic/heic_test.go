@@ -2361,6 +2361,30 @@ func TestColorInfoPrecedence(t *testing.T) {
 		same(t, f.colorInfo(it, pic), ColorInfo{Primaries: 9, Transfer: 16, Matrix: 9})
 	})
 
+	t.Run("auto-correct keeps the bitstream's full range", func(t *testing.T) {
+		it := &item{id: 1, props: []itemProp{{idx: 0}}}
+		limited := &colorInfo{hasNCLX: true, primaries: 1, transfer: 13, matrix: 6}
+
+		f := &file{meta: &metaBox{
+			primary: 1,
+			items:   map[uint32]*item{1: it},
+			order:   []uint32{1},
+			props:   []property{{typ: "colr", colr: limited}},
+		}}
+
+		same(t, f.colorInfo(it, pic), ColorInfo{Primaries: 1, Transfer: 13, Matrix: 6})
+
+		f.autoCorrect = true
+		same(t, f.colorInfo(it, pic), ColorInfo{Primaries: 1, Transfer: 13, Matrix: 6, FullRange: true})
+
+		// Only limited-over-full is corrected: a limited bitstream stays
+		// limited, and a missing picture changes nothing.
+		lim := *pic
+		lim.FullRange = false
+		same(t, f.colorInfo(it, &lim), ColorInfo{Primaries: 1, Transfer: 13, Matrix: 6})
+		same(t, f.colorInfo(it, nil), ColorInfo{Primaries: 1, Transfer: 13, Matrix: 6})
+	})
+
 	t.Run("grid takes its tiles' colr", func(t *testing.T) {
 		grid := &item{id: 1, typ: "grid"}
 		tile := &item{id: 2, typ: "hvc1", props: []itemProp{{idx: 0}, {idx: 1}}}

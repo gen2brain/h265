@@ -56,7 +56,9 @@ func (f *file) colorInfo(it *item, pic *hevc.Picture) ColorInfo {
 		ci.Primaries = nclx.primaries
 		ci.Transfer = nclx.transfer
 		ci.Matrix = nclx.matrix
-		ci.FullRange = nclx.fullRange
+		// A colr box replaces the VUI whole, except that AutoCorrect keeps
+		// the bitstream's full range when colr claims limited.
+		ci.FullRange = nclx.fullRange || f.autoCorrect && pic != nil && pic.FullRange
 	}
 
 	ci.ICCP = icc
